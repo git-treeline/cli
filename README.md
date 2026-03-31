@@ -64,7 +64,16 @@ Git Treeline will:
 - Write your env file with all the allocated values
 - Run your setup commands (`bundle install`, etc.)
 
-### 3. Check what's allocated
+### 3. Boot the worktree
+
+```bash
+cd ../myapp-feature-x
+bin/dev
+```
+
+Visit http://localhost:3010. Your main app can run simultaneously on port 3000.
+
+### 4. Check what's allocated
 
 ```bash
 git-treeline status
@@ -79,7 +88,7 @@ other-project:
   :3030  experiment  db:other_development_experiment  prefix:other:experiment
 ```
 
-### 4. Release when done
+### 5. Release when done
 
 ```bash
 git-treeline release ../myapp-feature-x --drop-db
@@ -212,21 +221,31 @@ This keeps the convention familiar to any Rails developer while letting Treeline
 
 ## Use with Conductor
 
-Add to your `conductor.json`:
+Conductor manages worktrees for AI coding agents. Git Treeline plugs into its lifecycle hooks so each agent gets isolated resources automatically.
+
+**Prerequisites:**
+
+1. `git-treeline` is installed on the machine running Conductor agents
+2. `.treeline.yml` is committed to the repo (so it's present when Conductor checks out a branch from origin)
+3. User config exists on the machine (one-time: `git-treeline config`)
+
+**`conductor.json`:**
 
 ```json
 {
   "setup": "git-treeline setup .",
-  "archive": "git-treeline release ."
+  "archive": "git-treeline release . --drop-db"
 }
 ```
 
-Or if you use `bin/setup-worktree`:
+`setup` runs when Conductor creates a worktree — allocates a port, clones the database, writes the env file. `archive` runs when the agent finishes — frees the port, drops the cloned database, removes the registry entry.
+
+If you use a `bin/setup-worktree` binstub with project-specific steps beyond what `.treeline.yml` covers:
 
 ```json
 {
   "setup": "bin/setup-worktree .",
-  "archive": "git-treeline release ."
+  "archive": "git-treeline release . --drop-db"
 }
 ```
 
@@ -244,4 +263,4 @@ Or if you use `bin/setup-worktree`:
 
 ## License
 
-MIT
+Copyright (c) 2026 Product Matter. All rights reserved.

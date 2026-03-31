@@ -127,7 +127,7 @@ module Git
             # - yarn install --silent
 
           editor:
-            vscode_title: "{project} (:{port}) — {branch} — \\${activeEditorShort}"
+            vscode_title: '{project} (:{port}) — {branch} — ${activeEditorShort}'
         YAML
 
         File.write(path, content)
@@ -135,6 +135,8 @@ module Git
         puts ""
         puts "Allocation policy (ports, Redis) is managed in your user config:"
         puts "  #{Platform.config_file}"
+
+        open_in_editor(path)
       end
 
       desc "config", "Show or initialize user-level config"
@@ -157,6 +159,15 @@ module Git
 
       def self.exit_on_failure?
         true
+      end
+
+      private
+
+      def open_in_editor(path)
+        editor = ENV.fetch("VISUAL", nil) || ENV.fetch("EDITOR", nil)
+        return unless editor
+
+        system(editor, path)
       end
     end
   end

@@ -13,7 +13,7 @@ Gem::Specification.new do |spec|
                      "across git worktrees so multiple branches can run simultaneously without collisions. " \
                      "A central registry at ~/.git-treeline/ tracks allocations across all projects."
   spec.homepage = "https://git-treeline.dev"
-  spec.license = "MIT"
+  spec.license = "Proprietary"
   spec.required_ruby_version = ">= 3.2.0"
 
   spec.metadata["homepage_uri"] = spec.homepage
