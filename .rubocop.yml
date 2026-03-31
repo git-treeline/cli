@@ -1,0 +1,47 @@
+AllCops:
+  TargetRubyVersion: 3.2
+  NewCops: enable
+
+Style/StringLiterals:
+  EnforcedStyle: double_quotes
+
+Style/StringLiteralsInInterpolation:
+  EnforcedStyle: double_quotes
+
+Style/Documentation:
+  Enabled: false
+
+Metrics/ClassLength:
+  Exclude:
+    - "lib/git/treeline/cli.rb"
+    - "lib/git/treeline/setup.rb"
+
+Metrics/MethodLength:
+  CountAsOne:
+    - hash
+    - heredoc
+  Exclude:
+    - "lib/git/treeline/cli.rb"
+    - "lib/git/treeline/setup.rb"
+    - "lib/git/treeline/interpolation.rb"
+    - "lib/git/treeline/registry.rb"
+
+Metrics/AbcSize:
+  Exclude:
+    - "lib/git/treeline/cli.rb"
+    - "lib/git/treeline/setup.rb"
+    - "lib/git/treeline/interpolation.rb"
+    - "lib/git/treeline/registry.rb"
+
+Metrics/CyclomaticComplexity:
+  Exclude:
+    - "lib/git/treeline/cli.rb"
+
+Metrics/PerceivedComplexity:
+  Exclude:
+    - "lib/git/treeline/cli.rb"
+
+Metrics/BlockLength:
+  Exclude:
+    - "spec/**/*"
+    - "*.gemspec"

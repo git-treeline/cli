@@ -1,0 +1,7 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "git/treeline"
+require "git/treeline/cli"
+
+Git::Treeline::CLI.start(ARGV)
