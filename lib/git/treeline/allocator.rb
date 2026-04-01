@@ -17,26 +17,40 @@ module Git
       end
 
       def allocate(worktree_path:, worktree_name:)
-        port = next_available_port
+        count = project_config.ports_needed
+        validate_port_count!(count)
+
+        ports = next_available_ports(count)
         redis = allocate_redis(worktree_name)
         database = build_database_name(worktree_name)
 
-        {
+        entry = {
           project: project_config.project,
           worktree: worktree_path,
           worktree_name: worktree_name,
-          port: port,
+          port: ports.first,
+          ports: ports,
           database: database,
           **redis
         }
+
+        ports.each_with_index do |p, i|
+          entry[:"port_#{i + 1}"] = p
+        end
+
+        entry
       end
 
-      def next_available_port
-        used = registry.used_ports
-        port = user_config.port_base + user_config.port_increment
+      def next_available_ports(count)
+        used = registry.used_ports.to_set
+        candidate = user_config.port_base + user_config.port_increment
 
-        port += user_config.port_increment while used.include?(port)
-        port
+        loop do
+          block = (candidate...(candidate + count)).to_a
+          return block if block.none? { |p| used.include?(p) }
+
+          candidate += user_config.port_increment
+        end
       end
 
       def allocate_redis(worktree_name)
@@ -76,6 +90,13 @@ module Git
       end
 
       private
+
+      def validate_port_count!(count)
+        return if count <= user_config.port_increment
+
+        raise Error, "ports_needed (#{count}) exceeds port.increment (#{user_config.port_increment}). " \
+                     "Increase port.increment in #{Platform.config_file} to at least #{count}."
+      end
 
       def sanitize_name(name)
         name.gsub(/[^a-zA-Z0-9_]/, "_").gsub(/_+/, "_").gsub(/\A_|_\z/, "")

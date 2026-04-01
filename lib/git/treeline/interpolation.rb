@@ -14,18 +14,28 @@ module Git
       end
 
       def interpolate(pattern, allocation:, redis_url:, project:)
-        port = allocation[:port] || allocation["port"]
-        database = allocation[:database] || allocation["database"]
-        redis_prefix = allocation[:redis_prefix] || allocation["redis_prefix"]
-        worktree = allocation[:worktree_name] || allocation["worktree_name"]
+        tokens = build_token_map(allocation, redis_url, project)
+        tokens.reduce(pattern) { |result, (token, value)| result.gsub(token, value) }
+      end
 
-        pattern
-          .gsub("{port}", port.to_s)
-          .gsub("{database}", database.to_s)
-          .gsub("{redis_url}", redis_url)
-          .gsub("{redis_prefix}", redis_prefix.to_s)
-          .gsub("{project}", project)
-          .gsub("{worktree}", worktree.to_s)
+      def build_token_map(allocation, redis_url, project)
+        tokens = {
+          "{port}" => fetch(allocation, :port).to_s,
+          "{database}" => fetch(allocation, :database).to_s,
+          "{redis_url}" => redis_url,
+          "{redis_prefix}" => fetch(allocation, :redis_prefix).to_s,
+          "{project}" => project,
+          "{worktree}" => fetch(allocation, :worktree_name).to_s
+        }
+
+        ports = fetch(allocation, :ports)
+        Array(ports).each_with_index { |p, i| tokens["{port_#{i + 1}}"] = p.to_s }
+
+        tokens
+      end
+
+      def fetch(hash, sym_key)
+        hash[sym_key] || hash[sym_key.to_s]
       end
     end
   end

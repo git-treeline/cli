@@ -28,7 +28,7 @@ module Git
       end
 
       def used_ports
-        allocations.map { |a| a["port"] }.compact
+        allocations.flat_map { |a| a["ports"] || [a["port"]] }.compact
       end
 
       def used_redis_dbs

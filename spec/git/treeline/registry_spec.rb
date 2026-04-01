@@ -105,6 +105,20 @@ RSpec.describe Git::Treeline::Registry do
 
       expect(registry.used_ports).to contain_exactly(3010, 3020)
     end
+
+    it "returns all ports from multi-port allocations" do
+      registry.allocate(sample_entry.merge(ports: [3010, 3011]))
+      registry.allocate(sample_entry.merge(worktree: "/tmp/other", port: 3020, ports: [3020, 3021]))
+
+      expect(registry.used_ports).to contain_exactly(3010, 3011, 3020, 3021)
+    end
+
+    it "handles mix of old single-port and new multi-port entries" do
+      registry.allocate(sample_entry) # old format: port only, no ports array
+      registry.allocate(sample_entry.merge(worktree: "/tmp/other", port: 3020, ports: [3020, 3021]))
+
+      expect(registry.used_ports).to contain_exactly(3010, 3020, 3021)
+    end
   end
 
   describe "#prune" do

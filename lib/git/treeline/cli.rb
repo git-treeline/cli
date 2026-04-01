@@ -35,7 +35,12 @@ module Git
 
         registry.release(path)
         puts "==> Released resources for #{File.basename(path)}"
-        puts "  Port:     #{allocation["port"]}"
+        ports = allocation["ports"] || [allocation["port"]]
+        if ports.length > 1
+          puts "  Ports:    #{ports.join(", ")}"
+        else
+          puts "  Port:     #{ports.first}"
+        end
         puts "  Database: #{allocation["database"]}" if allocation["database"]
       end
 
@@ -64,7 +69,9 @@ module Git
           puts "\n#{project}:"
           entries.sort_by { |a| a["port"] || 0 }.each do |a|
             redis = a["redis_prefix"] ? "prefix:#{a["redis_prefix"]}" : "db:#{a["redis_db"]}"
-            puts "  :#{a["port"]}  #{a["worktree_name"]}  db:#{a["database"]}  #{redis}"
+            ports = a["ports"] || [a["port"]]
+            port_label = ports.length > 1 ? ports.join(",") : ports.first.to_s
+            puts "  :#{port_label}  #{a["worktree_name"]}  db:#{a["database"]}  #{redis}"
           end
         end
       end
@@ -107,6 +114,9 @@ module Git
           env_file:
             target: .env.local
             source: .env.local
+
+          # Number of ports to allocate per worktree (e.g. 2 for app + esbuild reload)
+          # ports_needed: 1
 
           database:
             adapter: postgresql

@@ -29,7 +29,12 @@ module Git
         allocation = allocator.allocate(worktree_path: worktree_path, worktree_name: worktree_name)
         redis_url = allocator.build_redis_url(allocation)
 
-        log "Allocating port #{allocation[:port]} for '#{worktree_name}'"
+        ports = allocation[:ports]
+        if ports.length > 1
+          log "Allocating ports #{ports.join(", ")} for '#{worktree_name}'"
+        else
+          log "Allocating port #{ports.first} for '#{worktree_name}'"
+        end
         log "Database: #{allocation[:database]}" if allocation[:database]
         log "Redis: #{redis_url}"
 
@@ -43,10 +48,14 @@ module Git
 
         log ""
         log "Done! Worktree '#{worktree_name}' ready:"
-        log "  Port:     #{allocation[:port]}"
+        if ports.length > 1
+          log "  Ports:    #{ports.join(", ")}"
+        else
+          log "  Port:     #{ports.first}"
+        end
         log "  Database: #{allocation[:database]}" if allocation[:database]
         log "  Redis:    #{redis_url}"
-        log "  URL:      http://localhost:#{allocation[:port]}"
+        log "  URL:      http://localhost:#{ports.first}"
         log "  Dir:      #{worktree_path}"
 
         allocation

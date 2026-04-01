@@ -73,5 +73,37 @@ RSpec.describe Git::Treeline::Interpolation do
       )
       expect(result).to eq("3020/test_db")
     end
+
+    it "replaces {port_N} tokens from ports array" do
+      alloc = allocation.merge(ports: [3010, 3011, 3012])
+      result = described_class.interpolate(
+        "{port}:{port_2}:{port_3}",
+        allocation: alloc, redis_url: "redis://localhost:6379", project: "myapp"
+      )
+      expect(result).to eq("3010:3011:3012")
+    end
+
+    it "replaces {port_N} with string keys" do
+      alloc = {
+        "port" => 3020,
+        "ports" => [3020, 3021],
+        "database" => "test_db",
+        "redis_prefix" => "test:wt",
+        "worktree_name" => "wt"
+      }
+      result = described_class.interpolate(
+        "{port}/{port_2}",
+        allocation: alloc, redis_url: "redis://localhost:6379", project: "test"
+      )
+      expect(result).to eq("3020/3021")
+    end
+
+    it "leaves {port_N} untouched when no ports array" do
+      result = described_class.interpolate(
+        "{port}/{port_2}",
+        allocation: allocation, redis_url: "redis://localhost:6379", project: "myapp"
+      )
+      expect(result).to eq("3010/{port_2}")
+    end
   end
 end

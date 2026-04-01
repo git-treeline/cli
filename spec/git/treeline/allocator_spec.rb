@@ -29,34 +29,40 @@ RSpec.describe Git::Treeline::Allocator do
 
   after { FileUtils.rm_rf(tmpdir) }
 
-  describe "#next_available_port" do
-    it "starts at base + increment" do
-      expect(allocator.next_available_port).to eq(3010)
+  describe "#next_available_ports" do
+    it "starts at base + increment for a single port" do
+      expect(allocator.next_available_ports(1)).to eq([3010])
     end
 
-    it "skips ports already in use" do
-      registry.allocate(project: "other", worktree: "/tmp/a", worktree_name: "a", port: 3010, database: nil,
-                        redis_prefix: nil, redis_db: nil)
-
-      expect(allocator.next_available_port).to eq(3020)
+    it "returns contiguous block for multiple ports" do
+      expect(allocator.next_available_ports(3)).to eq([3010, 3011, 3012])
     end
 
-    it "skips multiple used ports" do
-      registry.allocate(project: "x", worktree: "/tmp/a", worktree_name: "a", port: 3010, database: nil,
-                        redis_prefix: nil, redis_db: nil)
-      registry.allocate(project: "x", worktree: "/tmp/b", worktree_name: "b", port: 3020, database: nil,
-                        redis_prefix: nil, redis_db: nil)
+    it "skips blocks where any port is in use" do
+      registry.allocate(project: "other", worktree: "/tmp/a", worktree_name: "a",
+                        port: 3011, ports: [3011], database: nil, redis_prefix: nil, redis_db: nil)
 
-      expect(allocator.next_available_port).to eq(3030)
+      expect(allocator.next_available_ports(3)).to eq([3020, 3021, 3022])
+    end
+
+    it "skips multiple used blocks" do
+      registry.allocate(project: "x", worktree: "/tmp/a", worktree_name: "a",
+                        port: 3010, ports: [3010, 3011], database: nil, redis_prefix: nil, redis_db: nil)
+      registry.allocate(project: "x", worktree: "/tmp/b", worktree_name: "b",
+                        port: 3020, ports: [3020, 3021], database: nil, redis_prefix: nil, redis_db: nil)
+
+      expect(allocator.next_available_ports(2)).to eq([3030, 3031])
     end
   end
 
   describe "#allocate" do
-    it "returns a complete allocation hash" do
+    it "returns a complete allocation hash with ports array" do
       result = allocator.allocate(worktree_path: "/tmp/feature", worktree_name: "feature")
 
       expect(result[:project]).to eq("testapp")
       expect(result[:port]).to eq(3010)
+      expect(result[:ports]).to eq([3010])
+      expect(result[:port_1]).to eq(3010)
       expect(result[:database]).to eq("testapp_dev_feature")
       expect(result[:worktree]).to eq("/tmp/feature")
       expect(result[:worktree_name]).to eq("feature")
@@ -67,6 +73,55 @@ RSpec.describe Git::Treeline::Allocator do
 
       expect(result[:redis_prefix]).to eq("testapp:feature")
       expect(result[:redis_db]).to be_nil
+    end
+
+    context "with multi-port project" do
+      let(:project_config) do
+        File.write(File.join(project_root, ".treeline.yml"), <<~YAML)
+          project: testapp
+          ports_needed: 2
+          database:
+            adapter: postgresql
+            template: testapp_dev
+            pattern: "{template}_{worktree}"
+        YAML
+        Git::Treeline::ProjectConfig.new(project_root)
+      end
+
+      it "allocates contiguous port block" do
+        result = allocator.allocate(worktree_path: "/tmp/feature", worktree_name: "feature")
+
+        expect(result[:port]).to eq(3010)
+        expect(result[:ports]).to eq([3010, 3011])
+        expect(result[:port_1]).to eq(3010)
+        expect(result[:port_2]).to eq(3011)
+      end
+
+      it "does not overlap with other allocations" do
+        registry.allocate(project: "other", worktree: "/tmp/a", worktree_name: "a",
+                          port: 3010, ports: [3010, 3011], database: nil, redis_prefix: nil, redis_db: nil)
+
+        result = allocator.allocate(worktree_path: "/tmp/feature", worktree_name: "feature")
+
+        expect(result[:ports]).to eq([3020, 3021])
+        expect(result[:ports] & [3010, 3011]).to be_empty
+      end
+    end
+
+    context "when ports_needed exceeds port_increment" do
+      let(:project_config) do
+        File.write(File.join(project_root, ".treeline.yml"), <<~YAML)
+          project: testapp
+          ports_needed: 15
+        YAML
+        Git::Treeline::ProjectConfig.new(project_root)
+      end
+
+      it "raises an error" do
+        expect do
+          allocator.allocate(worktree_path: "/tmp/feature", worktree_name: "feature")
+        end.to raise_error(Git::Treeline::Error, /ports_needed.*exceeds.*port\.increment/)
+      end
     end
   end
 

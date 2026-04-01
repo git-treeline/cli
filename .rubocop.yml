@@ -23,14 +23,12 @@ Metrics/MethodLength:
   Exclude:
     - "lib/git/treeline/cli.rb"
     - "lib/git/treeline/setup.rb"
-    - "lib/git/treeline/interpolation.rb"
     - "lib/git/treeline/registry.rb"
 
 Metrics/AbcSize:
   Exclude:
     - "lib/git/treeline/cli.rb"
     - "lib/git/treeline/setup.rb"
-    - "lib/git/treeline/interpolation.rb"
     - "lib/git/treeline/registry.rb"
 
 Metrics/CyclomaticComplexity:
@@ -40,6 +38,9 @@ Metrics/CyclomaticComplexity:
 Metrics/PerceivedComplexity:
   Exclude:
     - "lib/git/treeline/cli.rb"
+
+Naming/VariableNumber:
+  EnforcedStyle: snake_case
 
 Metrics/BlockLength:
   Exclude:

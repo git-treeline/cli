@@ -42,6 +42,7 @@ module Git
       include ConfigSupport
 
       DEFAULTS = {
+        "ports_needed" => 1,
         "env_file" => {
           "target" => ".env.local",
           "source" => ".env.local"
@@ -66,6 +67,10 @@ module Git
 
       def project
         data["project"] || File.basename(project_root)
+      end
+
+      def ports_needed
+        (data["ports_needed"] || DEFAULTS["ports_needed"]).to_i
       end
 
       def database_adapter

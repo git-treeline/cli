@@ -16,6 +16,7 @@ RSpec.describe Git::Treeline::ProjectConfig do
     it "provides defaults when no config file exists" do
       config = described_class.new(tmpdir)
 
+      expect(config.ports_needed).to eq(1)
       expect(config.database_adapter).to eq("postgresql")
       expect(config.database_template).to be_nil
       expect(config.database_pattern).to eq("{template}_{worktree}")
@@ -91,6 +92,22 @@ RSpec.describe Git::Treeline::ProjectConfig do
       YAML
 
       expect(config.env_template).to eq("PORT" => "{port}", "DATABASE_NAME" => "{database}")
+    end
+  end
+
+  describe "#ports_needed" do
+    it "reads ports_needed from config" do
+      config = write_config(<<~YAML)
+        project: myapp
+        ports_needed: 3
+      YAML
+
+      expect(config.ports_needed).to eq(3)
+    end
+
+    it "defaults to 1 when not specified" do
+      config = write_config("project: myapp")
+      expect(config.ports_needed).to eq(1)
     end
   end
 
