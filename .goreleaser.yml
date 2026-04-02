@@ -21,6 +21,17 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+brews:
+  - repository:
+      owner: git-treeline
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://github.com/git-treeline/git-treeline
+    description: "Worktree environment manager — isolated ports, databases, and services across parallel development environments"
+    license: Apache-2.0
+    install: |
+      bin.install "git-treeline"
+
 changelog:
   sort: asc
   filters:
