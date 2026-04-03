@@ -18,13 +18,16 @@ func setup(t *testing.T, files ...string) string {
 }
 
 func TestDetect_NextJS(t *testing.T) {
-	dir := setup(t, "package.json", "next.config.mjs")
+	dir := setup(t, "package.json", "next.config.mjs", ".env.local")
 	r := Detect(dir)
 	if r.Framework != "nextjs" {
 		t.Errorf("expected nextjs, got %s", r.Framework)
 	}
 	if r.EnvFile != ".env.local" {
 		t.Errorf("expected .env.local, got %s", r.EnvFile)
+	}
+	if !r.HasEnvFile {
+		t.Error("expected HasEnvFile=true")
 	}
 	if r.PackageManager != "npm" {
 		t.Errorf("expected npm, got %s", r.PackageManager)
@@ -97,6 +100,28 @@ func TestDetect_Node(t *testing.T) {
 	}
 	if r.EnvFile != ".env" {
 		t.Errorf("expected .env, got %s", r.EnvFile)
+	}
+	if r.HasEnvFile {
+		t.Error("expected HasEnvFile=false when no .env file exists")
+	}
+}
+
+func TestDetect_Node_WithEnvFile(t *testing.T) {
+	dir := setup(t, "package.json", ".env")
+	r := Detect(dir)
+	if r.Framework != "node" {
+		t.Errorf("expected node, got %s", r.Framework)
+	}
+	if !r.HasEnvFile {
+		t.Error("expected HasEnvFile=true when .env exists")
+	}
+}
+
+func TestDetect_HasEnvFile_Example(t *testing.T) {
+	dir := setup(t, "package.json", ".env.example")
+	r := Detect(dir)
+	if !r.HasEnvFile {
+		t.Error("expected HasEnvFile=true when .env.example exists")
 	}
 }
 

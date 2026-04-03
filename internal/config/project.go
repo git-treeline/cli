@@ -22,9 +22,10 @@ var ProjectDefaults = map[string]any{
 	},
 	"copy_files":     []any{},
 	"env":            map[string]any{},
-	"setup_commands": []any{},
-	"editor":         map[string]any{},
-	"start_command":  "",
+	"setup_commands":  []any{},
+	"editor":          map[string]any{},
+	"start_command":   "",
+	"default_branch":  "",
 }
 
 type ProjectConfig struct {
@@ -150,6 +151,13 @@ func (pc *ProjectConfig) Editor() map[string]string {
 
 func (pc *ProjectConfig) StartCommand() string {
 	if v, ok := pc.Data["start_command"].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func (pc *ProjectConfig) DefaultBranch() string {
+	if v, ok := pc.Data["default_branch"].(string); ok {
 		return v
 	}
 	return ""

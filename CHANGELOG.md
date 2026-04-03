@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+- Add `default_branch` config field: `prune --merged` now works with any default branch (develop, staging, trunk, etc.)
+- Improve default branch detection: tries `origin/HEAD`, then `git remote show origin`, then local candidates — works with any git host
+- Smarter `init`: only emits `env_file` and `env` sections when env files are detected on disk
+
 ## [0.9.1]
 
 - Harden codebase: fix potential panic in port allocation, consolidate helper functions, add godoc

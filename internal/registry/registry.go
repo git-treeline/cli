@@ -56,7 +56,7 @@ func (r *Registry) Allocations() []Allocation {
 func (r *Registry) Find(worktreePath string) Allocation {
 	resolved := resolvePath(worktreePath)
 	for _, a := range r.Allocations() {
-		if getString(a, "worktree") == resolved {
+		if resolvePath(getString(a, "worktree")) == resolved {
 			return a
 		}
 	}
@@ -127,7 +127,7 @@ func (r *Registry) Release(worktreePath string) (bool, error) {
 	err := r.withLock(func(data *RegistryData) {
 		filtered := make([]Allocation, 0, len(data.Allocations))
 		for _, a := range data.Allocations {
-			if getString(a, "worktree") == resolved {
+			if resolvePath(getString(a, "worktree")) == resolved {
 				removed = true
 			} else {
 				filtered = append(filtered, a)
@@ -150,7 +150,7 @@ func (r *Registry) FindMergedAllocations(mergedBranches []string, worktreeBranch
 
 	var result []Allocation
 	for _, a := range r.Allocations() {
-		wtPath := getString(a, "worktree")
+		wtPath := resolvePath(getString(a, "worktree"))
 		if branch, ok := worktreeBranches[wtPath]; ok && branchSet[branch] {
 			result = append(result, a)
 		}
@@ -170,7 +170,7 @@ func (r *Registry) ReleaseMany(worktreePaths []string) (int, error) {
 	err := r.withLock(func(data *RegistryData) {
 		filtered := make([]Allocation, 0, len(data.Allocations))
 		for _, a := range data.Allocations {
-			if pathSet[getString(a, "worktree")] {
+			if pathSet[resolvePath(getString(a, "worktree"))] {
 				count++
 			} else {
 				filtered = append(filtered, a)

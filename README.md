@@ -20,7 +20,7 @@ Git Treeline has two layers of configuration and a central registry.
 
 **The registry** (`registry.json`) is the ledger. When you run `gtl setup`, it allocates the next available port block, writes your env file, and records the allocation. When you run `gtl release`, it frees those resources. `gtl status` shows everything allocated across all projects.
 
-For projects that need it, Treeline can also clone PostgreSQL databases from a template and assign Redis namespaces — but those are opt-in.
+For projects that need it, Treeline can also clone PostgreSQL or SQLite databases and assign Redis namespaces — but those are opt-in.
 
 ## Install
 
@@ -50,34 +50,46 @@ Download the latest binary from [GitHub Releases](https://github.com/git-treelin
 
 ```bash
 cd your-project
-gtl init --project myapp
+gtl init
 ```
 
-This creates `.treeline.yml` — commit it so your team shares the same config. Edit it to match your needs (see [Framework examples](#framework-examples)).
+`init` auto-detects your framework (Next.js, Rails, Express, Python, Rust, Go) and generates a tailored `.treeline.yml`. It also creates agent context files (`.cursor/rules/treeline.mdc` or `CLAUDE.md`) so AI tools understand the setup. Commit the config so your team shares it.
 
-### 2. Set up a worktree
+Use `--project myapp` to set the project name explicitly, or `--skip-agent-config` to skip agent context generation.
+
+### 2. Create and set up a worktree
+
+```bash
+gtl new feature-auth
+```
+
+This creates the worktree, allocates resources, writes your env file, and runs setup commands — all in one step. Add `--start` to boot the app immediately.
+
+If you already have a worktree, use `gtl setup` instead:
 
 ```bash
 git worktree add ../myapp-feature-x feature-x
 gtl setup ../myapp-feature-x
 ```
 
-Git Treeline will:
-- Allocate the next available port (3010, 3020, etc.)
-- Write your env file with the allocated values
-- Run your setup commands (`npm install`, `bundle install`, etc.)
-- Optionally clone your database and assign a Redis namespace
-
 ### 3. Boot the worktree
 
 ```bash
-cd ../myapp-feature-x
+cd ../myapp-feature-auth
 npm run dev    # or bin/dev, or whatever starts your app
 ```
 
 Your app reads `PORT` from the env file and starts on 3010. The main copy runs on 3000. No collisions.
 
-### 4. Check what's allocated
+### 4. Review a pull request
+
+```bash
+gtl review 42 --start
+```
+
+Fetches the PR branch via `gh`, creates a worktree, allocates resources, runs setup, and boots the app. Requires the [gh CLI](https://cli.github.com).
+
+### 5. Check what's allocated
 
 ```bash
 gtl status
@@ -85,19 +97,32 @@ gtl status
 
 ```
 myapp:
-  :3010  feature-x
-  :3020  bugfix-y
+  :3010  feature-auth
+  :3020  pr-42
 
 api-service:
   :3030  experiment  db:api_development_experiment
 ```
 
-### 5. Release when done
+Use `--check` to probe ports and show which services are running. Use `--watch` for a live-updating dashboard.
+
+### 6. Release when done
 
 ```bash
-gtl release ../myapp-feature-x
-git worktree remove ../myapp-feature-x
+gtl release ../myapp-feature-auth --drop-db
+git worktree remove ../myapp-feature-auth
 ```
+
+For bulk cleanup: `gtl release --project myapp --drop-db` or `gtl release --all --drop-db`.
+
+### 7. Prune stale allocations
+
+```bash
+gtl prune --stale
+gtl prune --merged --drop-db
+```
+
+`--stale` removes allocations for worktrees that no longer exist on disk. `--merged` targets branches already merged into the default branch. Treeline auto-detects the default branch via git (works with any remote host), but you can set `default_branch` in `.treeline.yml` if your repo uses something other than `main`/`master` (e.g. `develop`, `staging`).
 
 ## Framework examples
 
@@ -118,6 +143,8 @@ env:
 
 setup_commands:
   - npm install
+
+start_command: npm run dev
 ```
 
 Next.js reads `PORT` from `.env.local` automatically. That's all most Next apps need.
@@ -144,6 +171,8 @@ database:
 setup_commands:
   - npm install
   - npx prisma migrate deploy
+
+start_command: npm run dev
 ```
 
 ### Node.js / Express
@@ -160,12 +189,15 @@ env:
 
 setup_commands:
   - npm install
+
+start_command: node server.js
 ```
 
 ### Rails
 
 ```yaml
 project: myapp
+default_branch: develop   # omit if your default branch is main
 ports_needed: 2
 
 env_file:
@@ -190,6 +222,8 @@ env:
 setup_commands:
   - bundle install --quiet
   - yarn install --silent
+
+start_command: bin/dev
 ```
 
 For automatic ENV injection at Rails boot, see [git-treeline-rails](https://github.com/git-treeline/git-treeline-rails).
@@ -244,15 +278,17 @@ See [Framework examples](#framework-examples) for complete examples. Available f
 | Field | Description |
 |---|---|
 | `project` | Project name (defaults to directory name) |
+| `default_branch` | Default branch name for `prune --merged` (auto-detected if omitted) |
 | `ports_needed` | Number of contiguous ports per worktree (default: 1) |
 | `env_file.target` | Env file written in the worktree |
 | `env_file.source` | Env file copied from main repo as a starting point |
-| `database.adapter` | `postgresql` (only supported adapter for template cloning) |
+| `database.adapter` | `postgresql` or `sqlite` |
 | `database.template` | Source database to clone from (omit if no DB needed) |
 | `database.pattern` | Naming pattern — `{template}_{worktree}` |
 | `copy_files` | Files copied from main repo to worktree |
 | `env` | Key-value pairs written to the env file, with token interpolation |
 | `setup_commands` | Shell commands run in the worktree after setup |
+| `start_command` | Command to boot the app (used by `--start` on `new` and `review`) |
 | `editor.vscode_title` | VS Code window title template |
 
 ### Interpolation tokens
@@ -271,9 +307,13 @@ Available in `env` values:
 
 ## Database cloning (optional)
 
-If your project uses PostgreSQL, Treeline can clone your development database per-worktree using `createdb --template`. This gives each worktree its own database with zero migration overhead.
+If your project uses PostgreSQL or SQLite, Treeline can clone your development database per-worktree.
 
-Set `database.template` in your `.treeline.yml` to enable this. Omit it entirely if your project doesn't need database isolation, or if you use migrations instead (e.g. `npx prisma migrate deploy` in `setup_commands`).
+**PostgreSQL** uses `createdb --template` to clone your database. This copies the full schema and seed data without running migrations, so each worktree gets a complete database in seconds.
+
+**SQLite** clones by copying the database file. Set `database.adapter: sqlite` and `database.template` to the path of your SQLite database.
+
+Set `database.template` in your `.treeline.yml` to enable cloning. Omit it entirely if your project doesn't need database isolation, or if you use migrations instead (e.g. `npx prisma migrate deploy` in `setup_commands`).
 
 Use `--drop-db` with `gtl release` to clean up cloned databases.
 
@@ -289,7 +329,16 @@ Configure in your user config under `redis.strategy`.
 
 ## Use with AI agents
 
-Git Treeline is designed to support AI coding agents that work in worktrees. Any tool that creates worktrees — Conductor, Claude Code, custom scripts — can use Treeline to ensure each worktree gets isolated resources.
+Git Treeline is designed to support AI coding agents that work in worktrees. Any tool that creates worktrees — Conductor, Claude Code, Cursor — can use Treeline to ensure each worktree gets isolated resources.
+
+### Agent context generation
+
+`gtl init` auto-generates context files that teach AI agents how to use Treeline in your project:
+
+- `.cursor/rules/treeline.mdc` for Cursor
+- `CLAUDE.md` section for Claude Code
+
+Use `--skip-agent-config` to opt out.
 
 ### Lifecycle hooks
 
@@ -324,19 +373,18 @@ This returns the full registry as JSON — allocated ports, databases, Redis nam
 
 ## CLI reference
 
-| Command | Description |
-|---|---|
-| `gtl init` | Generate `.treeline.yml` for current project |
-| `gtl setup [PATH]` | Allocate resources and configure a worktree (idempotent — safe to re-run) |
-| `gtl setup --dry-run` | Print what would be allocated without writing anything |
-| `gtl refresh [PATH]` | Re-interpolate env file using existing allocation (no re-clone, no setup commands) |
-| `gtl release [PATH]` | Free allocated resources (`--drop-db` to also drop the database) |
-| `gtl status` | Show all allocations across projects (`--json` for machine output) |
-| `gtl status --check` | Probe allocated ports to show which services are actually running |
-| `gtl prune` | Remove allocations for deleted worktree directories |
-| `gtl prune --stale` | Also remove allocations not listed in `git worktree list` |
-| `gtl config` | Show or initialize user-level config |
-| `gtl version` | Print version |
+| Command | Flags | Description |
+|---|---|---|
+| `gtl init` | `--project` `--template-db` `--skip-agent-config` | Generate `.treeline.yml` (auto-detects framework and creates agent context files) |
+| `gtl new <branch>` | `--base` `--path` `--start` `--dry-run` | Create worktree + allocate + setup in one step |
+| `gtl review <PR#>` | `--path` `--start` | Check out a GitHub PR into a worktree with full setup (requires `gh`) |
+| `gtl setup [PATH]` | `--main-repo` `--dry-run` | Allocate resources and configure a worktree (idempotent) |
+| `gtl refresh [PATH]` | | Re-interpolate env file from existing allocation |
+| `gtl release [PATH]` | `--drop-db` `--project` `--all` `--force`/`-f` `--dry-run` | Free allocated resources (single, by project, or all) |
+| `gtl status` | `--project` `--json` `--check` `--watch` `--interval` | Show allocations across projects |
+| `gtl prune` | `--stale` `--merged` `--drop-db` `--force` | Remove orphaned allocations |
+| `gtl config` | | Show or initialize user-level config |
+| `gtl version` | | Print version |
 
 ## License
 

@@ -23,20 +23,24 @@ func ForDetection(project, templateDB string, det *detect.Result) string {
 	case "django", "python":
 		return python(project, det)
 	default:
-		return generic(project)
+		return generic(project, det)
 	}
 }
 
 func nextJS(project, templateDB string, det *detect.Result) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "project: %s\n", project)
-	b.WriteString("\nenv_file:\n")
-	b.WriteString("  target: .env.local\n")
-	b.WriteString("  source: .env.local\n")
+	writeDefaultBranch(&b, det)
+
+	if det.HasEnvFile {
+		b.WriteString("\nenv_file:\n")
+		b.WriteString("  target: .env.local\n")
+		b.WriteString("  source: .env.local\n")
+	}
 
 	envVars := map[string]string{
-		"PORT":                  `"{port}"`,
-		"NEXT_PUBLIC_APP_URL":   `"http://localhost:{port}"`,
+		"PORT":                `"{port}"`,
+		"NEXT_PUBLIC_APP_URL": `"http://localhost:{port}"`,
 	}
 
 	if det.HasPrisma && det.DBAdapter == "postgresql" {
@@ -47,9 +51,11 @@ func nextJS(project, templateDB string, det *detect.Result) string {
 		envVars["DATABASE_URL"] = `"postgresql://localhost:5432/{database}"`
 	}
 
-	b.WriteString("\nenv:\n")
-	for k, v := range envVars {
-		fmt.Fprintf(&b, "  %s: %s\n", k, v)
+	if det.HasEnvFile {
+		b.WriteString("\nenv:\n")
+		for k, v := range envVars {
+			fmt.Fprintf(&b, "  %s: %s\n", k, v)
+		}
 	}
 
 	b.WriteString("\nsetup_commands:\n")
@@ -64,10 +70,14 @@ func nextJS(project, templateDB string, det *detect.Result) string {
 func rails(project, templateDB string, det *detect.Result) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "project: %s\n", project)
+	writeDefaultBranch(&b, det)
 	b.WriteString("ports_needed: 2\n")
-	b.WriteString("\nenv_file:\n")
-	b.WriteString("  target: .env.local\n")
-	b.WriteString("  source: .env.local\n")
+
+	if det.HasEnvFile {
+		b.WriteString("\nenv_file:\n")
+		b.WriteString("  target: .env.local\n")
+		b.WriteString("  source: .env.local\n")
+	}
 
 	adapter := det.DBAdapter
 	if adapter == "" {
@@ -87,18 +97,20 @@ func rails(project, templateDB string, det *detect.Result) string {
 	b.WriteString("\ncopy_files:\n")
 	b.WriteString("  - config/master.key\n")
 
-	b.WriteString("\nenv:\n")
-	fmt.Fprintf(&b, "  PORT: \"{port}\"\n")
-	if adapter == "sqlite" {
-		fmt.Fprintf(&b, "  DATABASE_PATH: \"{database}\"\n")
-	} else {
-		fmt.Fprintf(&b, "  DATABASE_NAME: \"{database}\"\n")
+	if det.HasEnvFile {
+		b.WriteString("\nenv:\n")
+		fmt.Fprintf(&b, "  PORT: \"{port}\"\n")
+		if adapter == "sqlite" {
+			fmt.Fprintf(&b, "  DATABASE_PATH: \"{database}\"\n")
+		} else {
+			fmt.Fprintf(&b, "  DATABASE_NAME: \"{database}\"\n")
+		}
+		if det.HasRedis {
+			fmt.Fprintf(&b, "  REDIS_URL: \"{redis_url}\"\n")
+		}
+		fmt.Fprintf(&b, "  ESBUILD_PORT: \"{port_2}\"\n")
+		fmt.Fprintf(&b, "  APPLICATION_HOST: \"localhost:{port}\"\n")
 	}
-	if det.HasRedis {
-		fmt.Fprintf(&b, "  REDIS_URL: \"{redis_url}\"\n")
-	}
-	fmt.Fprintf(&b, "  ESBUILD_PORT: \"{port_2}\"\n")
-	fmt.Fprintf(&b, "  APPLICATION_HOST: \"localhost:{port}\"\n")
 
 	b.WriteString("\nsetup_commands:\n")
 	b.WriteString("  - bundle install --quiet\n")
@@ -113,11 +125,16 @@ func rails(project, templateDB string, det *detect.Result) string {
 func node(project string, det *detect.Result) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "project: %s\n", project)
-	b.WriteString("\nenv_file:\n")
-	b.WriteString("  target: .env\n")
-	b.WriteString("  source: .env\n")
-	b.WriteString("\nenv:\n")
-	b.WriteString("  PORT: \"{port}\"\n")
+	writeDefaultBranch(&b, det)
+
+	if det.HasEnvFile {
+		b.WriteString("\nenv_file:\n")
+		b.WriteString("  target: .env\n")
+		b.WriteString("  source: .env\n")
+		b.WriteString("\nenv:\n")
+		b.WriteString("  PORT: \"{port}\"\n")
+	}
+
 	b.WriteString("\nsetup_commands:\n")
 	fmt.Fprintf(&b, "  - %s\n", installCmd(det))
 	return b.String()
@@ -126,25 +143,41 @@ func node(project string, det *detect.Result) string {
 func python(project string, det *detect.Result) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "project: %s\n", project)
-	b.WriteString("\nenv_file:\n")
-	b.WriteString("  target: .env\n")
-	b.WriteString("  source: .env\n")
-	b.WriteString("\nenv:\n")
-	b.WriteString("  PORT: \"{port}\"\n")
+	writeDefaultBranch(&b, det)
+
+	if det.HasEnvFile {
+		b.WriteString("\nenv_file:\n")
+		b.WriteString("  target: .env\n")
+		b.WriteString("  source: .env\n")
+		b.WriteString("\nenv:\n")
+		b.WriteString("  PORT: \"{port}\"\n")
+	}
+
 	b.WriteString("\nsetup_commands:\n")
 	b.WriteString("  - pip install -r requirements.txt\n")
 	return b.String()
 }
 
-func generic(project string) string {
+func generic(project string, det *detect.Result) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "project: %s\n", project)
-	b.WriteString("\nenv_file:\n")
-	b.WriteString("  target: .env\n")
-	b.WriteString("  source: .env\n")
-	b.WriteString("\nenv:\n")
-	b.WriteString("  PORT: \"{port}\"\n")
+	writeDefaultBranch(&b, det)
+
+	if det.HasEnvFile {
+		b.WriteString("\nenv_file:\n")
+		b.WriteString("  target: .env\n")
+		b.WriteString("  source: .env\n")
+		b.WriteString("\nenv:\n")
+		b.WriteString("  PORT: \"{port}\"\n")
+	}
+
 	return b.String()
+}
+
+func writeDefaultBranch(b *strings.Builder, det *detect.Result) {
+	if det.DefaultBranch != "" && det.DefaultBranch != "main" {
+		fmt.Fprintf(b, "default_branch: %s\n", det.DefaultBranch)
+	}
 }
 
 func installCmd(det *detect.Result) string {

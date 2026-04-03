@@ -11,6 +11,7 @@ import (
 func TestForDetection_NextJS(t *testing.T) {
 	det := &detect.Result{
 		Framework:      "nextjs",
+		HasEnvFile:     true,
 		PackageManager: "npm",
 		EnvFile:        ".env.local",
 	}
@@ -28,6 +29,7 @@ func TestForDetection_NextJS_Prisma(t *testing.T) {
 	det := &detect.Result{
 		Framework:      "nextjs",
 		HasPrisma:      true,
+		HasEnvFile:     true,
 		DBAdapter:      "postgresql",
 		PackageManager: "yarn",
 		EnvFile:        ".env.local",
@@ -44,6 +46,7 @@ func TestForDetection_NextJS_Prisma(t *testing.T) {
 func TestForDetection_Rails_PostgreSQL(t *testing.T) {
 	det := &detect.Result{
 		Framework:      "rails",
+		HasEnvFile:     true,
 		DBAdapter:      "postgresql",
 		HasRedis:       true,
 		PackageManager: "bundle",
@@ -62,6 +65,7 @@ func TestForDetection_Rails_PostgreSQL(t *testing.T) {
 func TestForDetection_Rails_SQLite(t *testing.T) {
 	det := &detect.Result{
 		Framework:      "rails",
+		HasEnvFile:     true,
 		DBAdapter:      "sqlite",
 		PackageManager: "bundle",
 		EnvFile:        ".env.local",
@@ -78,6 +82,7 @@ func TestForDetection_Rails_SQLite(t *testing.T) {
 func TestForDetection_Node(t *testing.T) {
 	det := &detect.Result{
 		Framework:      "node",
+		HasEnvFile:     true,
 		PackageManager: "npm",
 		EnvFile:        ".env",
 	}
@@ -90,9 +95,26 @@ func TestForDetection_Node(t *testing.T) {
 	assertNotContains(t, content, "database")
 }
 
+func TestForDetection_Node_NoEnvFile(t *testing.T) {
+	det := &detect.Result{
+		Framework:      "node",
+		HasEnvFile:     false,
+		PackageManager: "npm",
+		EnvFile:        ".env",
+	}
+	content := ForDetection("website", "", det)
+
+	assertValidYAML(t, content)
+	assertContains(t, content, "project: website")
+	assertContains(t, content, "npm install")
+	assertNotContains(t, content, "env_file")
+	assertNotContains(t, content, "PORT")
+}
+
 func TestForDetection_Python(t *testing.T) {
 	det := &detect.Result{
 		Framework:      "python",
+		HasEnvFile:     true,
 		PackageManager: "pip",
 		EnvFile:        ".env",
 	}
@@ -104,14 +126,70 @@ func TestForDetection_Python(t *testing.T) {
 
 func TestForDetection_Generic(t *testing.T) {
 	det := &detect.Result{
-		Framework: "unknown",
-		EnvFile:   ".env",
+		Framework:  "unknown",
+		HasEnvFile: true,
+		EnvFile:    ".env",
 	}
 	content := ForDetection("myapp", "", det)
 
 	assertValidYAML(t, content)
 	assertContains(t, content, "project: myapp")
 	assertContains(t, content, `PORT: "{port}"`)
+}
+
+func TestForDetection_Generic_NoEnvFile(t *testing.T) {
+	det := &detect.Result{
+		Framework:  "unknown",
+		HasEnvFile: false,
+		EnvFile:    ".env",
+	}
+	content := ForDetection("myapp", "", det)
+
+	assertValidYAML(t, content)
+	assertContains(t, content, "project: myapp")
+	assertNotContains(t, content, "env_file")
+	assertNotContains(t, content, "PORT")
+}
+
+func TestForDetection_DefaultBranch_NonMain(t *testing.T) {
+	det := &detect.Result{
+		Framework:     "node",
+		HasEnvFile:    true,
+		PackageManager: "npm",
+		EnvFile:       ".env",
+		DefaultBranch: "develop",
+	}
+	content := ForDetection("myapp", "", det)
+
+	assertValidYAML(t, content)
+	assertContains(t, content, "default_branch: develop")
+}
+
+func TestForDetection_DefaultBranch_Main_Omitted(t *testing.T) {
+	det := &detect.Result{
+		Framework:     "node",
+		HasEnvFile:    true,
+		PackageManager: "npm",
+		EnvFile:       ".env",
+		DefaultBranch: "main",
+	}
+	content := ForDetection("myapp", "", det)
+
+	assertValidYAML(t, content)
+	assertNotContains(t, content, "default_branch")
+}
+
+func TestForDetection_DefaultBranch_Empty_Omitted(t *testing.T) {
+	det := &detect.Result{
+		Framework:     "node",
+		HasEnvFile:    true,
+		PackageManager: "npm",
+		EnvFile:       ".env",
+	}
+	content := ForDetection("myapp", "", det)
+
+	assertValidYAML(t, content)
+	assertNotContains(t, content, "default_branch")
 }
 
 func assertValidYAML(t *testing.T, content string) {

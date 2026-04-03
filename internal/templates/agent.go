@@ -53,12 +53,12 @@ func appendClaudeMD(path, project string, det *detect.Result) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
 
 	if _, err := f.WriteString(section); err != nil {
+		_ = f.Close()
 		return "", err
 	}
-	return path, nil
+	return path, f.Close()
 }
 
 func buildAgentContent(project string, det *detect.Result) string {

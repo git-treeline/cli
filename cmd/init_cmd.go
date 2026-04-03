@@ -10,6 +10,7 @@ import (
 	"github.com/git-treeline/git-treeline/internal/detect"
 	"github.com/git-treeline/git-treeline/internal/platform"
 	"github.com/git-treeline/git-treeline/internal/templates"
+	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
 )
 
@@ -55,6 +56,7 @@ var initCmd = &cobra.Command{
 
 		cwd, _ := os.Getwd()
 		detection := detect.Detect(cwd)
+		detection.DefaultBranch = worktree.DetectDefaultBranch(cwd)
 		content := templates.ForDetection(project, templateDB, detection)
 
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

@@ -18,8 +18,10 @@ type Result struct {
 	HasPrisma      bool
 	DBAdapter      string // "postgresql", "sqlite", ""
 	HasRedis       bool
+	HasEnvFile     bool   // true if .env, .env.local, or .env.example exists on disk
 	EnvFile        string // ".env.local", ".env", ""
 	PackageManager string // "npm", "yarn", "pnpm", "bundle", "cargo", "pip", ""
+	DefaultBranch  string // set by caller when git context is available
 }
 
 func Detect(root string) *Result {
@@ -76,7 +78,7 @@ func (r *Result) detectFramework(root string) {
 func (r *Result) detectDatabase(root string) {
 	dbYml := filepath.Join(root, "config", "database.yml")
 	if f, err := os.Open(dbYml); err == nil {
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
@@ -136,13 +138,16 @@ func (r *Result) detectPackageManager(root string) {
 
 func (r *Result) detectEnvFile(root string) {
 	switch r.Framework {
-	case "nextjs":
-		r.EnvFile = ".env.local"
-	case "rails":
+	case "nextjs", "rails":
 		r.EnvFile = ".env.local"
 	default:
 		r.EnvFile = ".env"
 	}
+
+	r.HasEnvFile = fileExistsAny(root,
+		".env", ".env.local", ".env.example",
+		".env.development", ".env.development.local",
+	)
 }
 
 func (r *Result) detectPrisma(root string) {

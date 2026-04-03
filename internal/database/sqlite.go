@@ -29,19 +29,19 @@ func (s *SQLite) Clone(template, target string) error {
 	if err != nil {
 		return fmt.Errorf("opening template database %s: %w", template, err)
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 
 	dst, err := os.Create(target)
 	if err != nil {
 		return fmt.Errorf("creating target database %s: %w", target, err)
 	}
-	defer dst.Close()
 
 	if _, err := io.Copy(dst, src); err != nil {
+		_ = dst.Close()
 		return fmt.Errorf("copying database %s -> %s: %w", template, target, err)
 	}
 
-	return nil
+	return dst.Close()
 }
 
 func (s *SQLite) Drop(target string) error {
