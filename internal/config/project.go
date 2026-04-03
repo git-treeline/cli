@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -25,7 +26,7 @@ var ProjectDefaults = map[string]any{
 	"setup_commands":  []any{},
 	"editor":          map[string]any{},
 	"start_command":   "",
-	"default_branch":  "",
+	"merge_target":    "",
 }
 
 type ProjectConfig struct {
@@ -36,6 +37,7 @@ type ProjectConfig struct {
 func LoadProjectConfig(projectRoot string) *ProjectConfig {
 	pc := &ProjectConfig{ProjectRoot: projectRoot}
 	pc.Data = pc.load()
+	pc.migrateDefaultBranch()
 	return pc
 }
 
@@ -156,8 +158,9 @@ func (pc *ProjectConfig) StartCommand() string {
 	return ""
 }
 
-func (pc *ProjectConfig) DefaultBranch() string {
-	if v, ok := pc.Data["default_branch"].(string); ok {
+// MergeTarget returns the branch that prune --merged checks against.
+func (pc *ProjectConfig) MergeTarget() string {
+	if v, ok := pc.Data["merge_target"].(string); ok {
 		return v
 	}
 	return ""
@@ -166,6 +169,28 @@ func (pc *ProjectConfig) DefaultBranch() string {
 func (pc *ProjectConfig) Exists() bool {
 	_, err := os.Stat(pc.configPath())
 	return err == nil
+}
+
+// migrateDefaultBranch rewrites default_branch → merge_target in the YAML
+// file if the old key is present. Runs once per load, idempotent.
+func (pc *ProjectConfig) migrateDefaultBranch() {
+	old, ok := pc.Data["default_branch"].(string)
+	if !ok || old == "" {
+		return
+	}
+
+	if mt, _ := pc.Data["merge_target"].(string); mt == "" {
+		pc.Data["merge_target"] = old
+	}
+	delete(pc.Data, "default_branch")
+
+	path := pc.configPath()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	content := strings.Replace(string(raw), "default_branch:", "merge_target:", 1)
+	_ = os.WriteFile(path, []byte(content), 0o644)
 }
 
 func (pc *ProjectConfig) configPath() string {

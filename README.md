@@ -122,7 +122,7 @@ gtl prune --stale
 gtl prune --merged --drop-db
 ```
 
-`--stale` removes allocations for worktrees that no longer exist on disk. `--merged` targets branches already merged into the default branch. Treeline auto-detects the default branch via git (works with any remote host), but you can set `default_branch` in `.treeline.yml` if your repo uses something other than `main`/`master` (e.g. `develop`, `staging`).
+`--stale` removes allocations for worktrees that no longer exist on disk. `--merged` targets branches already merged into the merge target branch. Treeline auto-detects the merge target via git (works with any remote host), but you can set `merge_target` in `.treeline.yml` if your repo uses something other than `main`/`master` (e.g. `develop`, `staging`).
 
 ## Framework examples
 
@@ -197,7 +197,7 @@ start_command: node server.js
 
 ```yaml
 project: myapp
-default_branch: develop   # omit if your default branch is main
+merge_target: develop     # branch that prune --merged checks against (auto-detected if omitted)
 ports_needed: 2
 
 env_file:
@@ -278,7 +278,7 @@ See [Framework examples](#framework-examples) for complete examples. Available f
 | Field | Description |
 |---|---|
 | `project` | Project name (defaults to directory name) |
-| `default_branch` | Default branch name for `prune --merged` (auto-detected if omitted) |
+| `merge_target` | Branch that `prune --merged` checks against (auto-detected if omitted) |
 | `ports_needed` | Number of contiguous ports per worktree (default: 1) |
 | `env_file.target` | Env file written in the worktree |
 | `env_file.source` | Env file copied from main repo as a starting point |

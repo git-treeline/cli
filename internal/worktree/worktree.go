@@ -95,7 +95,7 @@ func MergedBranches(repoPath, defaultBranchOverride string) ([]string, error) {
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("git branch --merged %s: %w\n\nSet default_branch in .treeline.yml if your default branch is not main/master", defaultBranch, err)
+		return nil, fmt.Errorf("git branch --merged %s: %w\n\nSet merge_target in .treeline.yml if your integration branch is not main/master", defaultBranch, err)
 	}
 
 	var branches []string

@@ -30,7 +30,7 @@ func ForDetection(project, templateDB string, det *detect.Result) string {
 func nextJS(project, templateDB string, det *detect.Result) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "project: %s\n", project)
-	writeDefaultBranch(&b, det)
+	writeMergeTarget(&b, det)
 
 	if det.HasEnvFile {
 		writeEnvFileBlock(&b, det.EnvFile)
@@ -68,7 +68,7 @@ func nextJS(project, templateDB string, det *detect.Result) string {
 func rails(project, templateDB string, det *detect.Result) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "project: %s\n", project)
-	writeDefaultBranch(&b, det)
+	writeMergeTarget(&b, det)
 	b.WriteString("ports_needed: 2\n")
 
 	if det.HasEnvFile {
@@ -121,7 +121,7 @@ func rails(project, templateDB string, det *detect.Result) string {
 func node(project string, det *detect.Result) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "project: %s\n", project)
-	writeDefaultBranch(&b, det)
+	writeMergeTarget(&b, det)
 
 	if det.HasEnvFile {
 		writeEnvFileBlock(&b, det.EnvFile)
@@ -137,7 +137,7 @@ func node(project string, det *detect.Result) string {
 func python(project string, det *detect.Result) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "project: %s\n", project)
-	writeDefaultBranch(&b, det)
+	writeMergeTarget(&b, det)
 
 	if det.HasEnvFile {
 		writeEnvFileBlock(&b, det.EnvFile)
@@ -153,7 +153,7 @@ func python(project string, det *detect.Result) string {
 func generic(project string, det *detect.Result) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "project: %s\n", project)
-	writeDefaultBranch(&b, det)
+	writeMergeTarget(&b, det)
 
 	if det.HasEnvFile {
 		writeEnvFileBlock(&b, det.EnvFile)
@@ -170,9 +170,9 @@ func writeEnvFileBlock(b *strings.Builder, envFile string) {
 	fmt.Fprintf(b, "  source: %s\n", envFile)
 }
 
-func writeDefaultBranch(b *strings.Builder, det *detect.Result) {
-	if det.DefaultBranch != "" && det.DefaultBranch != "main" {
-		fmt.Fprintf(b, "default_branch: %s\n", det.DefaultBranch)
+func writeMergeTarget(b *strings.Builder, det *detect.Result) {
+	if det.MergeTarget != "" && det.MergeTarget != "main" {
+		fmt.Fprintf(b, "merge_target: %s\n", det.MergeTarget)
 	}
 }
 

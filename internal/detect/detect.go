@@ -22,7 +22,7 @@ type Result struct {
 	EnvFile        string   // best candidate: ".env.local", ".env.development", ".env", etc.
 	EnvFiles       []string // all env files found, in priority order
 	PackageManager string   // "npm", "yarn", "pnpm", "bundle", "cargo", "pip", ""
-	DefaultBranch  string   // set by caller when git context is available
+	MergeTarget    string   // set by caller when git context is available
 }
 
 func Detect(root string) *Result {

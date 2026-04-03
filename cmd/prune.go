@@ -65,7 +65,7 @@ func runPruneMerged() error {
 	repoPath := worktree.DetectMainRepo(cwd)
 	pc := config.LoadProjectConfig(repoPath)
 
-	mergedBranches, err := worktree.MergedBranches(repoPath, pc.DefaultBranch())
+	mergedBranches, err := worktree.MergedBranches(repoPath, pc.MergeTarget())
 	if err != nil {
 		return fmt.Errorf("failed to detect merged branches: %w", err)
 	}

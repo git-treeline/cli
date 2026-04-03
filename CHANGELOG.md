@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+## [0.13.0]
+
+### Breaking
+
+- Rename `default_branch` → `merge_target` in `.treeline.yml`
+- Auto-migration: existing configs with `default_branch` are rewritten to `merge_target` on first load — no manual cleanup needed
+- If both keys exist, `merge_target` wins and `default_branch` is silently removed
+
 ## [0.12.0]
 
 - Smarter env file detection: `init` finds which env file actually exists (`.env.local`, `.env.development`, `.env`, etc.) instead of hardcoding per framework
@@ -17,7 +25,7 @@
 
 ## [0.10.0]
 
-- Add `default_branch` config field: `prune --merged` now works with any default branch (develop, staging, trunk, etc.)
+- Add merge target config field: `prune --merged` now works with any target branch (develop, staging, trunk, etc.)
 - Improve default branch detection: tries `origin/HEAD`, then `git remote show origin`, then local candidates — works with any git host
 - Smarter `init`: only emits `env_file` and `env` sections when env files are detected on disk
 - Fix path resolution in registry lookups (macOS symlink normalization)

@@ -151,45 +151,45 @@ func TestForDetection_Generic_NoEnvFile(t *testing.T) {
 	assertNotContains(t, content, "PORT")
 }
 
-func TestForDetection_DefaultBranch_NonMain(t *testing.T) {
+func TestForDetection_MergeTarget_NonMain(t *testing.T) {
 	det := &detect.Result{
-		Framework:     "node",
-		HasEnvFile:    true,
+		Framework:      "node",
+		HasEnvFile:     true,
 		PackageManager: "npm",
-		EnvFile:       ".env",
-		DefaultBranch: "develop",
+		EnvFile:        ".env",
+		MergeTarget:    "develop",
 	}
 	content := ForDetection("myapp", "", det)
 
 	assertValidYAML(t, content)
-	assertContains(t, content, "default_branch: develop")
+	assertContains(t, content, "merge_target: develop")
 }
 
-func TestForDetection_DefaultBranch_Main_Omitted(t *testing.T) {
+func TestForDetection_MergeTarget_Main_Omitted(t *testing.T) {
 	det := &detect.Result{
-		Framework:     "node",
-		HasEnvFile:    true,
+		Framework:      "node",
+		HasEnvFile:     true,
 		PackageManager: "npm",
-		EnvFile:       ".env",
-		DefaultBranch: "main",
+		EnvFile:        ".env",
+		MergeTarget:    "main",
 	}
 	content := ForDetection("myapp", "", det)
 
 	assertValidYAML(t, content)
-	assertNotContains(t, content, "default_branch")
+	assertNotContains(t, content, "merge_target")
 }
 
-func TestForDetection_DefaultBranch_Empty_Omitted(t *testing.T) {
+func TestForDetection_MergeTarget_Empty_Omitted(t *testing.T) {
 	det := &detect.Result{
-		Framework:     "node",
-		HasEnvFile:    true,
+		Framework:      "node",
+		HasEnvFile:     true,
 		PackageManager: "npm",
-		EnvFile:       ".env",
+		EnvFile:        ".env",
 	}
 	content := ForDetection("myapp", "", det)
 
 	assertValidYAML(t, content)
-	assertNotContains(t, content, "default_branch")
+	assertNotContains(t, content, "merge_target")
 }
 
 func TestForDetection_Rails_EnvDevelopment(t *testing.T) {

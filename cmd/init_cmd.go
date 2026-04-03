@@ -58,7 +58,7 @@ var initCmd = &cobra.Command{
 
 		cwd, _ := os.Getwd()
 		detection := detect.Detect(cwd)
-		detection.DefaultBranch = worktree.DetectDefaultBranch(cwd)
+		detection.MergeTarget = worktree.DetectDefaultBranch(cwd)
 
 		if len(detection.EnvFiles) > 1 {
 			idx := confirm.Select(

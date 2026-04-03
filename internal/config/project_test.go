@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -74,24 +75,57 @@ editor:
 	}
 }
 
-func TestProjectConfig_DefaultBranch(t *testing.T) {
+func TestProjectConfig_MergeTarget(t *testing.T) {
 	dir := t.TempDir()
 	yml := `project: myapp
-default_branch: develop
+merge_target: develop
 `
 	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
 	pc := LoadProjectConfig(dir)
 
-	if pc.DefaultBranch() != "develop" {
-		t.Errorf("expected develop, got %s", pc.DefaultBranch())
+	if pc.MergeTarget() != "develop" {
+		t.Errorf("expected develop, got %s", pc.MergeTarget())
 	}
 }
 
-func TestProjectConfig_DefaultBranch_Empty(t *testing.T) {
+func TestProjectConfig_MigrateDefaultBranch(t *testing.T) {
+	dir := t.TempDir()
+	yml := "project: myapp\ndefault_branch: staging\n"
+	path := filepath.Join(dir, ".treeline.yml")
+	_ = os.WriteFile(path, []byte(yml), 0o644)
+
+	pc := LoadProjectConfig(dir)
+
+	if pc.MergeTarget() != "staging" {
+		t.Errorf("expected staging after migration, got %s", pc.MergeTarget())
+	}
+
+	data, _ := os.ReadFile(path)
+	content := string(data)
+	if strings.Contains(content, "default_branch") {
+		t.Error("expected default_branch to be replaced in file")
+	}
+	if !strings.Contains(content, "merge_target: staging") {
+		t.Errorf("expected merge_target: staging in file, got:\n%s", content)
+	}
+}
+
+func TestProjectConfig_MigrateDefaultBranch_NoClobber(t *testing.T) {
+	dir := t.TempDir()
+	yml := "project: myapp\ndefault_branch: staging\nmerge_target: production\n"
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+
+	pc := LoadProjectConfig(dir)
+	if pc.MergeTarget() != "production" {
+		t.Errorf("expected existing merge_target to be preserved, got %s", pc.MergeTarget())
+	}
+}
+
+func TestProjectConfig_MergeTarget_Empty(t *testing.T) {
 	dir := t.TempDir()
 	pc := LoadProjectConfig(dir)
 
-	if pc.DefaultBranch() != "" {
-		t.Errorf("expected empty string, got %s", pc.DefaultBranch())
+	if pc.MergeTarget() != "" {
+		t.Errorf("expected empty string, got %s", pc.MergeTarget())
 	}
 }
