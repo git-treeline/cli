@@ -1,3 +1,7 @@
+// Package templates provides YAML and agent context generation.
+// It generates framework-specific .treeline.yml configurations based
+// on detection results, and optionally creates Cursor rules or
+// CLAUDE.md sections for AI coding assistants.
 package templates
 
 import (

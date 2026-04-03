@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/git-treeline/internal/format"
 	"github.com/git-treeline/git-treeline/internal/github"
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/git-treeline/git-treeline/internal/setup"
@@ -110,13 +111,13 @@ resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 }
 
 func printExistingAllocation(prNumber int, branch, path string, alloc registry.Allocation) {
-	ports := getPorts(alloc)
+	ports := format.GetPorts(format.Allocation(alloc))
 	fmt.Println()
 	fmt.Printf("PR #%d already has a worktree:\n", prNumber)
 	fmt.Printf("  Branch:   %s\n", branch)
 	fmt.Printf("  Path:     %s\n", path)
 	if len(ports) > 0 {
-		fmt.Printf("  Port:     %s\n", joinInts(ports, ", "))
+		fmt.Printf("  Port:     %s\n", format.JoinInts(ports, ", "))
 		fmt.Printf("  URL:      http://localhost:%d\n", ports[0])
 	}
 }

@@ -1,3 +1,7 @@
+// Package interpolation provides template variable substitution for
+// environment files and configuration values. Supported tokens include
+// {port}, {database}, {redis_url}, {redis_prefix}, {project}, and
+// numbered ports like {port_1}, {port_2}.
 package interpolation
 
 import (

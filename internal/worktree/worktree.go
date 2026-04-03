@@ -1,3 +1,6 @@
+// Package worktree provides git worktree operations including creation,
+// branch detection, and repository inspection. It wraps git CLI commands
+// for worktree management and merged branch detection.
 package worktree
 
 import (

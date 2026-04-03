@@ -4,10 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/git-treeline/git-treeline/internal/confirm"
-	"github.com/git-treeline/git-treeline/internal/database"
+	"github.com/git-treeline/git-treeline/internal/format"
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/spf13/cobra"
 )
@@ -74,15 +73,17 @@ func runReleaseSingle(args []string) error {
 	}
 
 	if releaseDropDB {
-		dropSingleDB(alloc, absPath)
+		format.DropSingleDB(format.Allocation(alloc), absPath)
 	}
 
-	_, _ = reg.Release(absPath)
+	if _, err := reg.Release(absPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to release allocation: %s\n", err)
+	}
 	fmt.Printf("==> Released resources for %s\n", filepath.Base(absPath))
 
-	ports := getPorts(alloc)
+	ports := format.GetPorts(format.Allocation(alloc))
 	if len(ports) > 1 {
-		fmt.Printf("  Ports:    %s\n", joinInts(ports, ", "))
+		fmt.Printf("  Ports:    %s\n", format.JoinInts(ports, ", "))
 	} else if len(ports) == 1 {
 		fmt.Printf("  Port:     %d\n", ports[0])
 	}
@@ -112,7 +113,6 @@ func runReleaseBatch(project string, all bool) error {
 		return nil
 	}
 
-	// Collect unique projects for summary
 	projects := make(map[string]bool)
 	for _, a := range allocs {
 		if p, ok := a["project"].(string); ok {
@@ -127,21 +127,31 @@ func runReleaseBatch(project string, all bool) error {
 	}
 
 	for _, a := range allocs {
-		ports := getPorts(a)
-		name, _ := a["worktree_name"].(string)
-		db, _ := a["database"].(string)
-		proj, _ := a["project"].(string)
+		fa := format.Allocation(a)
+		ports := format.GetPorts(fa)
+		name := format.GetStr(fa, "worktree_name")
+		db := format.GetStr(fa, "database")
+		proj := format.GetStr(fa, "project")
 
-		line := fmt.Sprintf("  :%d  %s", ports[0], name)
-		if all {
-			line = fmt.Sprintf("  [%s] :%d  %s", proj, ports[0], name)
+		var line string
+		if len(ports) == 0 {
+			line = fmt.Sprintf("  (no port)  %s", name)
+			if all {
+				line = fmt.Sprintf("  [%s] (no port)  %s", proj, name)
+			}
+		} else {
+			line = fmt.Sprintf("  :%d  %s", ports[0], name)
+			if all {
+				line = fmt.Sprintf("  [%s] :%d  %s", proj, ports[0], name)
+			}
 		}
 		if db != "" {
 			line += fmt.Sprintf("  db:%s", db)
 		}
 		fmt.Println(line)
 
-		if wt, ok := a["worktree"].(string); ok && wt != "" {
+		wt := format.GetStr(fa, "worktree")
+		if wt != "" {
 			if _, err := os.Stat(wt); err == nil {
 				fmt.Printf("    (worktree dir still exists at %s)\n", wt)
 			}
@@ -159,7 +169,11 @@ func runReleaseBatch(project string, all bool) error {
 	}
 
 	if releaseDropDB {
-		dropDatabases(allocs)
+		formatAllocs := make([]format.Allocation, len(allocs))
+		for i, a := range allocs {
+			formatAllocs[i] = format.Allocation(a)
+		}
+		format.DropDatabases(formatAllocs)
 	}
 
 	paths := make([]string, 0, len(allocs))
@@ -176,49 +190,4 @@ func runReleaseBatch(project string, all bool) error {
 
 	fmt.Printf("Released %d allocation(s).\n", count)
 	return nil
-}
-
-func dropSingleDB(alloc registry.Allocation, worktreePath string) {
-	db, ok := alloc["database"].(string)
-	if !ok || db == "" {
-		return
-	}
-	adapterName, _ := alloc["database_adapter"].(string)
-	adapter, err := database.ForAdapter(adapterName)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: %s, skipping database drop\n", err)
-		return
-	}
-	dropTarget := db
-	if adapterName == "sqlite" {
-		dropTarget = filepath.Join(worktreePath, db)
-	}
-	fmt.Printf("==> Dropping database %s\n", db)
-	if err := adapter.Drop(dropTarget); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to drop database: %s\n", err)
-	}
-}
-
-func getPorts(a registry.Allocation) []int {
-	if ps, ok := a["ports"].([]any); ok {
-		result := make([]int, 0, len(ps))
-		for _, p := range ps {
-			if f, ok := p.(float64); ok {
-				result = append(result, int(f))
-			}
-		}
-		return result
-	}
-	if p, ok := a["port"].(float64); ok {
-		return []int{int(p)}
-	}
-	return nil
-}
-
-func joinInts(ints []int, sep string) string {
-	parts := make([]string, len(ints))
-	for i, v := range ints {
-		parts[i] = fmt.Sprintf("%d", v)
-	}
-	return strings.Join(parts, sep)
 }

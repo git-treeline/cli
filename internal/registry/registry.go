@@ -1,3 +1,6 @@
+// Package registry provides persistent allocation state with file locking.
+// Allocations (port, database, Redis assignments) are stored in registry.json
+// and protected by advisory file locks to support concurrent CLI invocations.
 package registry
 
 import (
@@ -22,13 +25,18 @@ func resolvePath(p string) string {
 
 const lockTimeout = 5 * time.Second
 
+// Allocation is a map representing a registry entry with fields like
+// "worktree", "port", "ports", "database", "database_adapter", "project", etc.
 type Allocation map[string]any
 
+// RegistryData is the JSON structure stored in registry.json.
 type RegistryData struct {
 	Version     int          `json:"version"`
 	Allocations []Allocation `json:"allocations"`
 }
 
+// Registry manages persistent allocation state in a JSON file.
+// All mutating operations use file locking to prevent corruption.
 type Registry struct {
 	Path string
 }
@@ -46,8 +54,9 @@ func (r *Registry) Allocations() []Allocation {
 }
 
 func (r *Registry) Find(worktreePath string) Allocation {
+	resolved := resolvePath(worktreePath)
 	for _, a := range r.Allocations() {
-		if getString(a, "worktree") == worktreePath {
+		if getString(a, "worktree") == resolved {
 			return a
 		}
 	}
@@ -92,10 +101,16 @@ func (r *Registry) UsedRedisDbs() []int {
 
 func (r *Registry) Allocate(entry Allocation) error {
 	return r.withLock(func(data *RegistryData) {
+		// Normalize worktree path to canonical form (resolve symlinks)
+		// This ensures consistent matching on systems like macOS where
+		// /var is a symlink to /private/var
 		worktree := getString(entry, "worktree")
+		resolved := resolvePath(worktree)
+		entry["worktree"] = resolved
+
 		filtered := make([]Allocation, 0, len(data.Allocations))
 		for _, a := range data.Allocations {
-			if getString(a, "worktree") != worktree {
+			if getString(a, "worktree") != resolved {
 				filtered = append(filtered, a)
 			}
 		}
@@ -107,11 +122,12 @@ func (r *Registry) Allocate(entry Allocation) error {
 }
 
 func (r *Registry) Release(worktreePath string) (bool, error) {
+	resolved := resolvePath(worktreePath)
 	removed := false
 	err := r.withLock(func(data *RegistryData) {
 		filtered := make([]Allocation, 0, len(data.Allocations))
 		for _, a := range data.Allocations {
-			if getString(a, "worktree") == worktreePath {
+			if getString(a, "worktree") == resolved {
 				removed = true
 			} else {
 				filtered = append(filtered, a)
@@ -124,7 +140,8 @@ func (r *Registry) Release(worktreePath string) (bool, error) {
 
 // FindMergedAllocations returns allocations whose worktree path maps to a
 // branch in the merged set. worktreeBranches maps worktree paths to branch
-// names (from git worktree list).
+// names (from git worktree list). Paths are compared using canonical form
+// (symlinks resolved) since Allocate normalizes paths on write.
 func (r *Registry) FindMergedAllocations(mergedBranches []string, worktreeBranches map[string]string) []Allocation {
 	branchSet := make(map[string]bool, len(mergedBranches))
 	for _, b := range mergedBranches {
@@ -133,7 +150,7 @@ func (r *Registry) FindMergedAllocations(mergedBranches []string, worktreeBranch
 
 	var result []Allocation
 	for _, a := range r.Allocations() {
-		wtPath := resolvePath(getString(a, "worktree"))
+		wtPath := getString(a, "worktree")
 		if branch, ok := worktreeBranches[wtPath]; ok && branchSet[branch] {
 			result = append(result, a)
 		}
@@ -146,7 +163,7 @@ func (r *Registry) FindMergedAllocations(mergedBranches []string, worktreeBranch
 func (r *Registry) ReleaseMany(worktreePaths []string) (int, error) {
 	pathSet := make(map[string]bool, len(worktreePaths))
 	for _, p := range worktreePaths {
-		pathSet[p] = true
+		pathSet[resolvePath(p)] = true
 	}
 
 	count := 0

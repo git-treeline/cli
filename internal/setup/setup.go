@@ -1,3 +1,6 @@
+// Package setup provides worktree provisioning orchestration.
+// It coordinates resource allocation, database cloning, environment
+// file generation, setup command execution, and editor configuration.
 package setup
 
 import (
@@ -13,16 +16,22 @@ import (
 	"github.com/git-treeline/git-treeline/internal/allocator"
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/database"
+	"github.com/git-treeline/git-treeline/internal/format"
 	"github.com/git-treeline/git-treeline/internal/interpolation"
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 )
 
+// Options controls setup behavior. DryRun prints what would happen without
+// making changes. RefreshOnly re-applies environment files without running
+// setup commands or cloning databases.
 type Options struct {
 	DryRun      bool
 	RefreshOnly bool
 }
 
+// Setup orchestrates worktree provisioning. It combines allocation, database
+// cloning, environment file generation, and setup command execution.
 type Setup struct {
 	WorktreePath  string
 	MainRepo      string
@@ -71,7 +80,7 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	if alloc.Reused {
 		s.log("Reusing existing allocation for '%s'", worktreeName)
 	} else if len(alloc.Ports) > 1 {
-		s.log("Allocating ports %s for '%s'", joinInts(alloc.Ports, ", "), worktreeName)
+		s.log("Allocating ports %s for '%s'", format.JoinInts(alloc.Ports, ", "), worktreeName)
 	} else {
 		s.log("Allocating port %d for '%s'", alloc.Port, worktreeName)
 	}
@@ -97,7 +106,7 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	s.log("")
 	s.log("Done! Worktree '%s' ready:", worktreeName)
 	if len(alloc.Ports) > 1 {
-		s.log("  Ports:    %s", joinInts(alloc.Ports, ", "))
+		s.log("  Ports:    %s", format.JoinInts(alloc.Ports, ", "))
 	} else {
 		s.log("  Port:     %d", alloc.Port)
 	}
@@ -149,7 +158,7 @@ func (s *Setup) printDryRun(alloc *allocator.Allocation, redisURL string) error 
 	}
 
 	if len(alloc.Ports) > 1 {
-		s.log("  Ports:    %s", joinInts(alloc.Ports, ", "))
+		s.log("  Ports:    %s", format.JoinInts(alloc.Ports, ", "))
 	} else {
 		s.log("  Port:     %d", alloc.Port)
 	}
@@ -330,12 +339,4 @@ func (s *Setup) log(format string, args ...any) {
 		return
 	}
 	_, _ = fmt.Fprintf(s.Log, "==> "+format+"\n", args...)
-}
-
-func joinInts(ints []int, sep string) string {
-	parts := make([]string, len(ints))
-	for i, v := range ints {
-		parts[i] = fmt.Sprintf("%d", v)
-	}
-	return strings.Join(parts, sep)
 }

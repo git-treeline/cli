@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/git-treeline/git-treeline/internal/confirm"
-	"github.com/git-treeline/git-treeline/internal/database"
+	"github.com/git-treeline/git-treeline/internal/format"
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
@@ -84,18 +84,18 @@ func runPruneMerged() error {
 
 	fmt.Printf("Found %d allocation(s) on merged branches:\n", len(matches))
 	for _, a := range matches {
-		port := getPortDisplay(a)
-		name := getStr(a, "worktree_name")
-		project := getStr(a, "project")
-		db := getStr(a, "database")
+		fa := format.Allocation(a)
+		port := format.PortDisplay(fa)
+		name := format.GetStr(fa, "worktree_name")
+		project := format.GetStr(fa, "project")
+		db := format.GetStr(fa, "database")
 		line := fmt.Sprintf("  %s:%s  %s", project, name, port)
 		if db != "" {
 			line += fmt.Sprintf("  db:%s", db)
 		}
 		fmt.Println(line)
 
-		// Note if worktree dir still exists
-		if wt := getStr(a, "worktree"); wt != "" {
+		if wt := format.GetStr(fa, "worktree"); wt != "" {
 			if _, err := os.Stat(wt); err == nil {
 				fmt.Printf("    (worktree dir still exists at %s — remove with: git worktree remove %s)\n", wt, filepath.Base(wt))
 			}
@@ -108,12 +108,16 @@ func runPruneMerged() error {
 	}
 
 	if pruneDropDB {
-		dropDatabases(matches)
+		formatAllocs := make([]format.Allocation, len(matches))
+		for i, a := range matches {
+			formatAllocs[i] = format.Allocation(a)
+		}
+		format.DropDatabases(formatAllocs)
 	}
 
 	paths := make([]string, 0, len(matches))
 	for _, a := range matches {
-		paths = append(paths, getStr(a, "worktree"))
+		paths = append(paths, format.GetStr(format.Allocation(a), "worktree"))
 	}
 
 	count, err := reg.ReleaseMany(paths)
@@ -123,42 +127,4 @@ func runPruneMerged() error {
 
 	fmt.Printf("Released %d allocation(s).\n", count)
 	return nil
-}
-
-func dropDatabases(allocs []registry.Allocation) {
-	for _, a := range allocs {
-		db := getStr(a, "database")
-		if db == "" {
-			continue
-		}
-		adapterName := getStr(a, "database_adapter")
-		adapter, err := database.ForAdapter(adapterName)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: %s, skipping database drop for %s\n", err, db)
-			continue
-		}
-		dropTarget := db
-		if adapterName == "sqlite" {
-			dropTarget = filepath.Join(getStr(a, "worktree"), db)
-		}
-		fmt.Printf("==> Dropping database %s\n", db)
-		if err := adapter.Drop(dropTarget); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to drop database %s: %s\n", db, err)
-		}
-	}
-}
-
-func getStr(a registry.Allocation, key string) string {
-	if v, ok := a[key].(string); ok {
-		return v
-	}
-	return ""
-}
-
-func getPortDisplay(a registry.Allocation) string {
-	ports := getPorts(a)
-	if len(ports) > 0 {
-		return fmt.Sprintf(":%d", ports[0])
-	}
-	return ""
 }

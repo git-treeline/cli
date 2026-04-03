@@ -1,3 +1,7 @@
+// Package allocator provides resource allocation for git worktrees.
+// It manages port assignment, database name generation, and Redis
+// isolation (via database numbers or key prefixes) to enable parallel
+// development environments.
 package allocator
 
 import (
@@ -13,12 +17,17 @@ import (
 
 const maxRedisDbs = 16
 
+// Allocator manages resource allocation using user and project configuration.
+// It tracks used resources via the registry to avoid conflicts between worktrees.
 type Allocator struct {
 	UserConfig    *config.UserConfig
 	ProjectConfig *config.ProjectConfig
 	Registry      *registry.Registry
 }
 
+// Allocation represents the resources assigned to a worktree including
+// ports, database name, and Redis configuration. Reused is true when
+// an existing allocation was found rather than creating a new one.
 type Allocation struct {
 	Project         string
 	Worktree        string

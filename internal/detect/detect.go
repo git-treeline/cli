@@ -1,3 +1,7 @@
+// Package detect provides framework and tooling auto-detection from
+// filesystem signals. It identifies frameworks (Rails, Next.js, etc.),
+// package managers, database adapters, and other project characteristics
+// to generate appropriate configuration templates.
 package detect
 
 import (
@@ -7,6 +11,8 @@ import (
 	"strings"
 )
 
+// Result contains the detection findings for a project directory.
+// All fields are populated by Detect() based on filesystem analysis.
 type Result struct {
 	Framework      string // "nextjs", "rails", "node", "django", "python", "rust", "go", "unknown"
 	HasPrisma      bool

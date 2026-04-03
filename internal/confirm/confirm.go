@@ -1,3 +1,5 @@
+// Package confirm provides interactive y/N confirmation prompts
+// for CLI commands that perform destructive operations.
 package confirm
 
 import (

@@ -1,3 +1,6 @@
+// Package github provides GitHub API integration via the gh CLI.
+// It supports looking up pull request metadata such as branch names
+// to enable the "gtl review <PR#>" workflow.
 package github
 
 import (

@@ -1,3 +1,7 @@
+// Package config provides user and project configuration management.
+// User config (config.json) defines global allocation policy like port
+// ranges and Redis strategy. Project config (.treeline.yml) defines
+// per-project settings like database templates and setup commands.
 package config
 
 // DeepMerge merges override into base. Override values win for present keys;

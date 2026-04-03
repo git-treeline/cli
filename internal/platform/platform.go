@@ -1,3 +1,7 @@
+// Package platform provides platform-specific configuration paths.
+// On macOS: ~/Library/Application Support/git-treeline/
+// On Linux: $XDG_CONFIG_HOME/git-treeline/ (or ~/.config/)
+// On Windows: %APPDATA%/git-treeline/
 package platform
 
 import (

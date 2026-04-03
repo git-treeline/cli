@@ -96,6 +96,9 @@ func (uc *UserConfig) load() map[string]any {
 	return DeepMerge(UserDefaults, userData)
 }
 
+// copyMap creates a deep copy of a map[string]any via JSON round-trip.
+// Errors are ignored because Marshal/Unmarshal of map[string]any with
+// primitive values (strings, floats, nested maps) cannot fail.
 func copyMap(m map[string]any) map[string]any {
 	data, _ := json.Marshal(m)
 	var result map[string]any

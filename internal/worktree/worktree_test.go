@@ -7,8 +7,16 @@ import (
 	"testing"
 )
 
+func skipIfNoGit(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available, skipping test")
+	}
+}
+
 func initTestRepo(t *testing.T) string {
 	t.Helper()
+	skipIfNoGit(t)
 	dir := t.TempDir()
 	// Resolve symlinks (macOS /var -> /private/var)
 	dir, _ = filepath.EvalSymlinks(dir)

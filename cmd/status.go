@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/git-treeline/git-treeline/internal/allocator"
+	"github.com/git-treeline/git-treeline/internal/format"
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/spf13/cobra"
 )
@@ -72,7 +73,7 @@ func renderStatus() error {
 
 	if statusCheck {
 		for _, a := range allocs {
-			ports := getPorts(a)
+			ports := format.GetPorts(format.Allocation(a))
 			a["listening"] = allocator.CheckPortsListening(ports)
 		}
 	}
@@ -106,11 +107,12 @@ func renderStatus() error {
 
 		fmt.Printf("\n%s:\n", project)
 		for _, a := range entries {
-			ports := getPorts(a)
-			portLabel := joinInts(ports, ",")
+			fa := format.Allocation(a)
+			ports := format.GetPorts(fa)
+			portLabel := format.JoinInts(ports, ",")
 
-			name, _ := a["worktree_name"].(string)
-			db, _ := a["database"].(string)
+			name := format.GetStr(fa, "worktree_name")
+			db := format.GetStr(fa, "database")
 
 			redis := ""
 			if prefix, ok := a["redis_prefix"].(string); ok && prefix != "" {
