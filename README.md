@@ -18,11 +18,19 @@ Git Treeline has two layers of configuration and a central registry.
 
 **User config** (`config.json`, on your machine) controls allocation policy: port range and increment. This is per-developer, not per-project — it governs how resources are handed out across everything on your machine.
 
-**The registry** (`registry.json`) is the ledger. When you run `git-treeline setup`, it allocates the next available port block, writes your env file, and records the allocation. When you run `git-treeline release`, it frees those resources. `git-treeline status` shows everything allocated across all projects.
+**The registry** (`registry.json`) is the ledger. When you run `gtl setup`, it allocates the next available port block, writes your env file, and records the allocation. When you run `gtl release`, it frees those resources. `gtl status` shows everything allocated across all projects.
 
 For projects that need it, Treeline can also clone PostgreSQL databases from a template and assign Redis namespaces — but those are opt-in.
 
 ## Install
+
+### Homebrew
+
+```bash
+brew install git-treeline/tap/git-treeline
+```
+
+This installs both `git-treeline` and the `gtl` shorthand alias.
 
 ### From source (requires Go 1.22+)
 
@@ -34,13 +42,15 @@ go install github.com/git-treeline/git-treeline@latest
 
 Download the latest binary from [GitHub Releases](https://github.com/git-treeline/git-treeline/releases), extract, and place on your `PATH`.
 
+> **Naming:** The binary is `git-treeline`, which also works as `git treeline` (git subcommand convention). Homebrew additionally installs `gtl` as a short alias. All three invocations are equivalent.
+
 ## Quick start
 
 ### 1. Initialize your project
 
 ```bash
 cd your-project
-git-treeline init --project myapp
+gtl init --project myapp
 ```
 
 This creates `.treeline.yml` — commit it so your team shares the same config. Edit it to match your needs (see [Framework examples](#framework-examples)).
@@ -49,7 +59,7 @@ This creates `.treeline.yml` — commit it so your team shares the same config. 
 
 ```bash
 git worktree add ../myapp-feature-x feature-x
-git-treeline setup ../myapp-feature-x
+gtl setup ../myapp-feature-x
 ```
 
 Git Treeline will:
@@ -70,7 +80,7 @@ Your app reads `PORT` from the env file and starts on 3010. The main copy runs o
 ### 4. Check what's allocated
 
 ```bash
-git-treeline status
+gtl status
 ```
 
 ```
@@ -85,7 +95,7 @@ api-service:
 ### 5. Release when done
 
 ```bash
-git-treeline release ../myapp-feature-x
+gtl release ../myapp-feature-x
 git worktree remove ../myapp-feature-x
 ```
 
@@ -204,7 +214,7 @@ setup_commands:
 
 ### User config (`config.json`)
 
-Controls allocation policy for your machine. Created automatically by `git-treeline init` or `git-treeline config`.
+Controls allocation policy for your machine. Created automatically by `gtl init` or `gtl config`.
 
 ```json
 {
@@ -265,7 +275,7 @@ If your project uses PostgreSQL, Treeline can clone your development database pe
 
 Set `database.template` in your `.treeline.yml` to enable this. Omit it entirely if your project doesn't need database isolation, or if you use migrations instead (e.g. `npx prisma migrate deploy` in `setup_commands`).
 
-Use `--drop-db` with `git-treeline release` to clean up cloned databases.
+Use `--drop-db` with `gtl release` to clean up cloned databases.
 
 ## Redis namespacing (optional)
 
@@ -287,10 +297,10 @@ Most agent frameworks support setup/teardown hooks:
 
 ```bash
 # On worktree creation
-git-treeline setup .
+gtl setup .
 
 # On worktree teardown
-git-treeline release . --drop-db
+gtl release . --drop-db
 ```
 
 ### Programmatic access
@@ -298,7 +308,7 @@ git-treeline release . --drop-db
 Use `--json` for machine-readable output:
 
 ```bash
-git-treeline status --json
+gtl status --json
 ```
 
 This returns the full registry as JSON — allocated ports, databases, Redis namespaces, and worktree paths. Useful for agent orchestrators that need to know what's running where.
@@ -307,8 +317,8 @@ This returns the full registry as JSON — allocated ports, databases, Redis nam
 
 ```json
 {
-  "setup": "git-treeline setup .",
-  "archive": "git-treeline release . --drop-db"
+  "setup": "gtl setup .",
+  "archive": "gtl release . --drop-db"
 }
 ```
 
@@ -316,17 +326,17 @@ This returns the full registry as JSON — allocated ports, databases, Redis nam
 
 | Command | Description |
 |---|---|
-| `git-treeline init` | Generate `.treeline.yml` for current project |
-| `git-treeline setup [PATH]` | Allocate resources and configure a worktree (idempotent — safe to re-run) |
-| `git-treeline setup --dry-run` | Print what would be allocated without writing anything |
-| `git-treeline refresh [PATH]` | Re-interpolate env file using existing allocation (no re-clone, no setup commands) |
-| `git-treeline release [PATH]` | Free allocated resources (`--drop-db` to also drop the database) |
-| `git-treeline status` | Show all allocations across projects (`--json` for machine output) |
-| `git-treeline status --check` | Probe allocated ports to show which services are actually running |
-| `git-treeline prune` | Remove allocations for deleted worktree directories |
-| `git-treeline prune --stale` | Also remove allocations not listed in `git worktree list` |
-| `git-treeline config` | Show or initialize user-level config |
-| `git-treeline version` | Print version |
+| `gtl init` | Generate `.treeline.yml` for current project |
+| `gtl setup [PATH]` | Allocate resources and configure a worktree (idempotent — safe to re-run) |
+| `gtl setup --dry-run` | Print what would be allocated without writing anything |
+| `gtl refresh [PATH]` | Re-interpolate env file using existing allocation (no re-clone, no setup commands) |
+| `gtl release [PATH]` | Free allocated resources (`--drop-db` to also drop the database) |
+| `gtl status` | Show all allocations across projects (`--json` for machine output) |
+| `gtl status --check` | Probe allocated ports to show which services are actually running |
+| `gtl prune` | Remove allocations for deleted worktree directories |
+| `gtl prune --stale` | Also remove allocations not listed in `git worktree list` |
+| `gtl config` | Show or initialize user-level config |
+| `gtl version` | Print version |
 
 ## License
 

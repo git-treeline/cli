@@ -19,5 +19,9 @@ vulncheck:
 build:
 	go build .
 
+install: build
+	cp git-treeline $(GOBIN)/git-treeline
+	ln -sf $(GOBIN)/git-treeline $(GOBIN)/gtl
+
 ci: test vet lint vulncheck build
 	@echo "\nAll checks passed."

@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+## [0.6.0]
+
+- Add `gtl` as a short alias for `git-treeline` (installed via Homebrew symlink)
+- Add test coverage for internal/setup pipeline
+
 ## [0.5.2] - 2026-04-03
 
 - Fix: main worktree allocation now scans for free ports instead of blindly assigning base ports
