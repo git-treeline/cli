@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+## [0.14.1]
+
+- Homebrew: `gtl` alias available via `brew install git-treeline`
+
+## [0.14.0]
+
+- `gtl config` CLI: `list`, `get`, `set`, `path`, `edit` subcommands for user-level config
+- Rails template: `ports_needed: 2` and `ESBUILD_PORT` only emitted when JS bundler detected
+- Fix incorrect Next.js PORT documentation
+- Drop git-treeline-rails gem reference
+
 ## [0.13.0]
 
 ### Breaking
