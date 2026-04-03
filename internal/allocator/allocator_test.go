@@ -246,14 +246,14 @@ func TestAllocate_MainWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if alloc.Port != 3000 {
-		t.Errorf("expected base port 3000 for main, got %d", alloc.Port)
-	}
 	if len(alloc.Ports) != 2 {
 		t.Errorf("expected 2 ports, got %d", len(alloc.Ports))
 	}
-	if alloc.Ports[0] != 3000 || alloc.Ports[1] != 3001 {
-		t.Errorf("expected ports [3000,3001], got %v", alloc.Ports)
+	if alloc.Ports[1] != alloc.Ports[0]+1 {
+		t.Errorf("expected contiguous ports, got %v", alloc.Ports)
+	}
+	if alloc.Port != alloc.Ports[0] {
+		t.Errorf("expected Port to match Ports[0], got %d vs %d", alloc.Port, alloc.Ports[0])
 	}
 	if alloc.Database != "test_dev" {
 		t.Errorf("expected template database 'test_dev', got %s", alloc.Database)
@@ -263,6 +263,30 @@ func TestAllocate_MainWorktree(t *testing.T) {
 	}
 	if alloc.RedisPrefix != "" {
 		t.Errorf("expected empty redis prefix for main, got %s", alloc.RedisPrefix)
+	}
+}
+
+func TestAllocate_MainWorktreeSkipsOccupiedPorts(t *testing.T) {
+	al, reg := testAllocator(t, 2, "")
+	// Simulate another allocation holding the base ports
+	other := &Allocation{
+		Project: "other", Worktree: "/wt/other", WorktreeName: "other",
+		Port: 3000, Ports: []int{3000, 3001},
+	}
+	_ = reg.Allocate(other.ToRegistryEntry())
+
+	alloc, err := al.Allocate("/repo/main", "main", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alloc.Port == 3000 || alloc.Port == 3001 {
+		t.Errorf("expected main to skip occupied base ports, got %d", alloc.Port)
+	}
+	if alloc.Ports[1] != alloc.Ports[0]+1 {
+		t.Errorf("expected contiguous ports, got %v", alloc.Ports)
+	}
+	if alloc.Database != "test_dev" {
+		t.Errorf("main should still get template database, got %s", alloc.Database)
 	}
 }
 

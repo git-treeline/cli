@@ -125,18 +125,19 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string) *Allocatio
 }
 
 func (al *Allocator) allocateMain(worktreePath, worktreeName string) (*Allocation, error) {
-	port := al.UserConfig.PortBase()
 	count := al.ProjectConfig.PortsNeeded()
-	ports := make([]int, count)
-	for i := range count {
-		ports[i] = port + i
+	if count > al.UserConfig.PortIncrement() {
+		return nil, fmt.Errorf("ports_needed (%d) exceeds port.increment (%d); increase port.increment in your config.json to at least %d",
+			count, al.UserConfig.PortIncrement(), count)
 	}
+
+	ports := al.nextAvailablePortsFrom(al.UserConfig.PortBase(), count)
 
 	return &Allocation{
 		Project:      al.ProjectConfig.Project(),
 		Worktree:     worktreePath,
 		WorktreeName: worktreeName,
-		Port:         port,
+		Port:         ports[0],
 		Ports:        ports,
 		Database:     al.ProjectConfig.DatabaseTemplate(),
 	}, nil
@@ -149,7 +150,7 @@ func (al *Allocator) allocateNew(worktreePath, worktreeName string) (*Allocation
 			count, al.UserConfig.PortIncrement(), count)
 	}
 
-	ports := al.nextAvailablePorts(count)
+	ports := al.nextAvailablePortsFrom(al.UserConfig.PortBase()+al.UserConfig.PortIncrement(), count)
 	redisDB, redisPrefix := al.allocateRedis(worktreeName)
 	database := al.buildDatabaseName(worktreeName)
 
@@ -170,13 +171,13 @@ func (al *Allocator) BuildRedisURL(alloc *Allocation) string {
 	return interpolation.BuildRedisURL(al.UserConfig.RedisURL(), m)
 }
 
-func (al *Allocator) nextAvailablePorts(count int) []int {
+func (al *Allocator) nextAvailablePortsFrom(start, count int) []int {
 	usedSet := make(map[int]bool)
 	for _, p := range al.Registry.UsedPorts() {
 		usedSet[p] = true
 	}
 
-	candidate := al.UserConfig.PortBase() + al.UserConfig.PortIncrement()
+	candidate := start
 	for {
 		block := make([]int, count)
 		conflict := false
