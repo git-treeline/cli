@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/git-treeline/git-treeline/internal/platform"
 )
@@ -66,6 +67,36 @@ func (uc *UserConfig) RedisURL() string {
 	return "redis://localhost:6379"
 }
 
+func (uc *UserConfig) Get(dottedKey string) any {
+	keys := splitDotted(dottedKey)
+	return Dig(uc.Data, keys...)
+}
+
+func (uc *UserConfig) Set(dottedKey string, value any) {
+	keys := splitDotted(dottedKey)
+	m := uc.Data
+	for _, k := range keys[:len(keys)-1] {
+		child, ok := m[k].(map[string]any)
+		if !ok {
+			child = make(map[string]any)
+			m[k] = child
+		}
+		m = child
+	}
+	m[keys[len(keys)-1]] = value
+}
+
+func (uc *UserConfig) Save() error {
+	if err := os.MkdirAll(filepath.Dir(uc.Path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(uc.Data, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(uc.Path, append(data, '\n'), 0o644)
+}
+
 func (uc *UserConfig) Exists() bool {
 	_, err := os.Stat(uc.Path)
 	return err == nil
@@ -94,6 +125,10 @@ func (uc *UserConfig) load() map[string]any {
 	}
 
 	return DeepMerge(UserDefaults, userData)
+}
+
+func splitDotted(key string) []string {
+	return strings.Split(key, ".")
 }
 
 // copyMap creates a deep copy of a map[string]any via JSON round-trip.
