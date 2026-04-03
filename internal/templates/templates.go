@@ -69,7 +69,9 @@ func rails(project, templateDB string, det *detect.Result) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "project: %s\n", project)
 	writeMergeTarget(&b, det)
-	b.WriteString("ports_needed: 2\n")
+	if det.HasJSBundler {
+		b.WriteString("ports_needed: 2\n")
+	}
 
 	if det.HasEnvFile {
 		writeEnvFileBlock(&b, det.EnvFile)
@@ -104,13 +106,17 @@ func rails(project, templateDB string, det *detect.Result) string {
 		if det.HasRedis {
 			fmt.Fprintf(&b, "  REDIS_URL: \"{redis_url}\"\n")
 		}
-		fmt.Fprintf(&b, "  ESBUILD_PORT: \"{port_2}\"\n")
+		if det.HasJSBundler {
+			fmt.Fprintf(&b, "  ESBUILD_PORT: \"{port_2}\"\n")
+		}
 		fmt.Fprintf(&b, "  APPLICATION_HOST: \"localhost:{port}\"\n")
 	}
 
 	b.WriteString("\nsetup_commands:\n")
 	b.WriteString("  - bundle install --quiet\n")
-	b.WriteString("  # - yarn install --silent\n")
+	if det.HasJSBundler {
+		b.WriteString("  - yarn install --silent\n")
+	}
 
 	b.WriteString("\neditor:\n")
 	b.WriteString("  vscode_title: '{project} (:{port}) — {branch} — ${activeEditorShort}'\n")

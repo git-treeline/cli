@@ -208,3 +208,40 @@ func TestDetect_Pnpm(t *testing.T) {
 		t.Errorf("expected pnpm, got %s", r.PackageManager)
 	}
 }
+
+func TestDetect_JSBundler_Gemfile(t *testing.T) {
+	dir := setup(t, "Gemfile", "config/application.rb", "config/database.yml")
+	_ = os.WriteFile(filepath.Join(dir, "Gemfile"), []byte("gem 'rails'\ngem 'jsbundling-rails'\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "config/database.yml"), []byte("development:\n  adapter: postgresql\n"), 0o644)
+	r := Detect(dir)
+	if !r.HasJSBundler {
+		t.Error("expected HasJSBundler=true with jsbundling-rails")
+	}
+}
+
+func TestDetect_JSBundler_CSSBundling(t *testing.T) {
+	dir := setup(t, "Gemfile", "config/application.rb")
+	_ = os.WriteFile(filepath.Join(dir, "Gemfile"), []byte("gem 'rails'\ngem 'cssbundling-rails'\n"), 0o644)
+	r := Detect(dir)
+	if !r.HasJSBundler {
+		t.Error("expected HasJSBundler=true with cssbundling-rails")
+	}
+}
+
+func TestDetect_JSBundler_ProcfileDev(t *testing.T) {
+	dir := setup(t, "Gemfile", "config/application.rb", "Procfile.dev")
+	_ = os.WriteFile(filepath.Join(dir, "Procfile.dev"), []byte("web: bin/rails server\njs: yarn build --watch\n"), 0o644)
+	r := Detect(dir)
+	if !r.HasJSBundler {
+		t.Error("expected HasJSBundler=true with multi-process Procfile.dev")
+	}
+}
+
+func TestDetect_NoJSBundler(t *testing.T) {
+	dir := setup(t, "Gemfile", "config/application.rb")
+	_ = os.WriteFile(filepath.Join(dir, "Gemfile"), []byte("gem 'rails'\ngem 'importmap-rails'\n"), 0o644)
+	r := Detect(dir)
+	if r.HasJSBundler {
+		t.Error("expected HasJSBundler=false with importmap-rails")
+	}
+}

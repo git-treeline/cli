@@ -79,7 +79,7 @@ cd ../myapp-feature-auth
 npm run dev    # or bin/dev, or whatever starts your app
 ```
 
-Your app reads `PORT` from the env file and starts on 3010. The main copy runs on 3000. No collisions.
+Your app starts on 3010. The main copy runs on 3000. No collisions. Some frameworks (Rails, Express) read `PORT` from the env file automatically; others (Next.js) need their dev script wired up — `gtl init` prints framework-specific guidance.
 
 ### 4. Review a pull request
 
@@ -147,7 +147,13 @@ setup_commands:
 start_command: npm run dev
 ```
 
-Next.js reads `PORT` from `.env.local` automatically. That's all most Next apps need.
+Next.js loads `.env.local` into `process.env` for your app code, but the dev server **does not** use `PORT` for its listen port. Update your `package.json` dev script:
+
+```json
+"dev": "next dev --port ${PORT:-3000}"
+```
+
+`gtl init` prints this guidance automatically for Next.js projects.
 
 ### Next.js with Prisma + Postgres
 
@@ -226,7 +232,7 @@ setup_commands:
 start_command: bin/dev
 ```
 
-For automatic ENV injection at Rails boot, see [git-treeline-rails](https://github.com/git-treeline/git-treeline-rails).
+Rails apps using `dotenv-rails` (most do) will load the env file automatically at boot. No additional gems needed.
 
 ### Frontend SPA (no server resources)
 

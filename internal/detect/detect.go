@@ -16,6 +16,7 @@ import (
 type Result struct {
 	Framework      string   // "nextjs", "rails", "node", "django", "python", "rust", "go", "unknown"
 	HasPrisma      bool
+	HasJSBundler   bool     // jsbundling-rails/cssbundling-rails or multi-process Procfile.dev
 	DBAdapter      string   // "postgresql", "sqlite", ""
 	HasRedis       bool
 	HasEnvFile     bool     // true if any env file exists on disk
@@ -30,6 +31,7 @@ func Detect(root string) *Result {
 
 	r.detectFramework(root)
 	r.detectPrisma(root)
+	r.detectJSBundler(root)
 	r.detectDatabase(root)
 	r.detectRedis(root)
 	r.detectPackageManager(root)
@@ -161,6 +163,29 @@ func (r *Result) detectEnvFile(root string) {
 
 func (r *Result) detectPrisma(root string) {
 	r.HasPrisma = fileExists(root, "prisma/schema.prisma")
+}
+
+func (r *Result) detectJSBundler(root string) {
+	if content, err := os.ReadFile(filepath.Join(root, "Gemfile")); err == nil {
+		s := string(content)
+		if strings.Contains(s, "jsbundling-rails") || strings.Contains(s, "cssbundling-rails") {
+			r.HasJSBundler = true
+			return
+		}
+	}
+	if fileExists(root, "Procfile.dev") {
+		if content, err := os.ReadFile(filepath.Join(root, "Procfile.dev")); err == nil {
+			lines := 0
+			for _, line := range strings.Split(string(content), "\n") {
+				if trimmed := strings.TrimSpace(line); trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+					lines++
+				}
+			}
+			if lines > 1 {
+				r.HasJSBundler = true
+			}
+		}
+	}
 }
 
 func fileExists(root string, rel ...string) bool {
