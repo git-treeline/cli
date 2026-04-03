@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+## [0.11.0]
+
+- Store `branch` name in allocation registry — enables external consumers (menulets, dashboards) to display the actual branch instead of the worktree directory name
+- `gtl status` syncs branches in parallel on every call, keeping the registry fresh without git hooks
+- Add `format.DisplayName()`: prefers `branch`, falls back to `worktree_name` — used across `status`, `release`, and `prune`
+- Add `registry.UpdateField()` for lock-safe single-field updates
+- Reuse detected branch in editor title config (eliminates redundant git call)
+
 ## [0.10.0]
 
 - Add `default_branch` config field: `prune --merged` now works with any default branch (develop, staging, trunk, etc.)
