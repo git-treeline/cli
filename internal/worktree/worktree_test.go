@@ -126,7 +126,7 @@ func TestMergedBranches(t *testing.T) {
 	run(t, repo, "git", "commit", "--allow-empty", "-m", "wip")
 	run(t, repo, "git", "checkout", "main")
 
-	branches, err := MergedBranches(repo)
+	branches, err := MergedBranches(repo, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,10 +148,163 @@ func TestMergedBranches(t *testing.T) {
 	}
 }
 
+func TestParseHeadBranch(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{
+			name: "main branch",
+			output: `* remote origin
+  Fetch URL: git@github.com:example/repo.git
+  Push  URL: git@github.com:example/repo.git
+  HEAD branch: main
+  Remote branches:
+    main tracked`,
+			want: "main",
+		},
+		{
+			name: "staging branch",
+			output: `* remote origin
+  HEAD branch: staging
+  Remote branches:
+    staging tracked`,
+			want: "staging",
+		},
+		{
+			name: "master branch",
+			output: `* remote origin
+  HEAD branch: master`,
+			want: "master",
+		},
+		{
+			name: "unknown HEAD",
+			output: `* remote origin
+  HEAD branch: (unknown)`,
+			want: "",
+		},
+		{
+			name:   "empty output",
+			output: "",
+			want:   "",
+		},
+		{
+			name:   "no HEAD line",
+			output: "* remote origin\n  Fetch URL: git@github.com:example/repo.git\n",
+			want:   "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseHeadBranch(tt.output)
+			if got != tt.want {
+				t.Errorf("parseHeadBranch() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDetectBranchFromLocalCandidates_Main(t *testing.T) {
+	repo := initTestRepo(t)
+	got := detectBranchFromLocalCandidates(repo)
+	if got != "main" {
+		t.Errorf("expected main, got %q", got)
+	}
+}
+
+func TestDetectBranchFromLocalCandidates_Master(t *testing.T) {
+	skipIfNoGit(t)
+	dir := t.TempDir()
+	dir, _ = filepath.EvalSymlinks(dir)
+	run(t, dir, "git", "init", "--initial-branch=master")
+	run(t, dir, "git", "commit", "--allow-empty", "-m", "init")
+
+	got := detectBranchFromLocalCandidates(dir)
+	if got != "master" {
+		t.Errorf("expected master, got %q", got)
+	}
+}
+
+func TestDetectBranchFromLocalCandidates_Develop(t *testing.T) {
+	skipIfNoGit(t)
+	dir := t.TempDir()
+	dir, _ = filepath.EvalSymlinks(dir)
+	run(t, dir, "git", "init", "--initial-branch=develop")
+	run(t, dir, "git", "commit", "--allow-empty", "-m", "init")
+
+	got := detectBranchFromLocalCandidates(dir)
+	if got != "develop" {
+		t.Errorf("expected develop, got %q", got)
+	}
+}
+
+func TestDetectDefaultBranch_FallsBackToLocalMain(t *testing.T) {
+	repo := initTestRepo(t)
+	got := DetectDefaultBranch(repo)
+	if got != "main" {
+		t.Errorf("expected main, got %q", got)
+	}
+}
+
+func TestDetectDefaultBranch_FallsBackToLocalDevelop(t *testing.T) {
+	skipIfNoGit(t)
+	dir := t.TempDir()
+	dir, _ = filepath.EvalSymlinks(dir)
+	run(t, dir, "git", "init", "--initial-branch=develop")
+	run(t, dir, "git", "commit", "--allow-empty", "-m", "init")
+
+	got := DetectDefaultBranch(dir)
+	if got != "develop" {
+		t.Errorf("expected develop, got %q", got)
+	}
+}
+
+func TestDetectBranchFromLocalCandidates_Staging_NotInList(t *testing.T) {
+	skipIfNoGit(t)
+	dir := t.TempDir()
+	dir, _ = filepath.EvalSymlinks(dir)
+	run(t, dir, "git", "init", "--initial-branch=staging")
+	run(t, dir, "git", "commit", "--allow-empty", "-m", "init")
+
+	got := detectBranchFromLocalCandidates(dir)
+	if got != "" {
+		t.Errorf("expected empty (staging not in candidate list), got %q", got)
+	}
+}
+
+func TestMergedBranches_WithOverride(t *testing.T) {
+	repo := initTestRepo(t)
+
+	run(t, repo, "git", "checkout", "-b", "develop")
+	run(t, repo, "git", "commit", "--allow-empty", "-m", "develop base")
+
+	run(t, repo, "git", "checkout", "-b", "feature-x")
+	run(t, repo, "git", "commit", "--allow-empty", "-m", "feature work")
+	run(t, repo, "git", "checkout", "develop")
+	run(t, repo, "git", "merge", "--no-ff", "feature-x", "-m", "merge feature-x")
+
+	branches, err := MergedBranches(repo, "develop")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+	for _, b := range branches {
+		if b == "feature-x" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected feature-x in merged branches with develop override, got %v", branches)
+	}
+}
+
 func TestMergedBranches_NoMerged(t *testing.T) {
 	repo := initTestRepo(t)
 
-	branches, err := MergedBranches(repo)
+	branches, err := MergedBranches(repo, "")
 	if err != nil {
 		t.Fatal(err)
 	}

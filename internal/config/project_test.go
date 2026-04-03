@@ -73,3 +73,25 @@ editor:
 		t.Errorf("unexpected editor title: %s", editor["vscode_title"])
 	}
 }
+
+func TestProjectConfig_DefaultBranch(t *testing.T) {
+	dir := t.TempDir()
+	yml := `project: myapp
+default_branch: develop
+`
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+	pc := LoadProjectConfig(dir)
+
+	if pc.DefaultBranch() != "develop" {
+		t.Errorf("expected develop, got %s", pc.DefaultBranch())
+	}
+}
+
+func TestProjectConfig_DefaultBranch_Empty(t *testing.T) {
+	dir := t.TempDir()
+	pc := LoadProjectConfig(dir)
+
+	if pc.DefaultBranch() != "" {
+		t.Errorf("expected empty string, got %s", pc.DefaultBranch())
+	}
+}

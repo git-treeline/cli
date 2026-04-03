@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/confirm"
 	"github.com/git-treeline/git-treeline/internal/format"
 	"github.com/git-treeline/git-treeline/internal/registry"
@@ -62,8 +63,9 @@ var pruneCmd = &cobra.Command{
 func runPruneMerged() error {
 	cwd, _ := os.Getwd()
 	repoPath := worktree.DetectMainRepo(cwd)
+	pc := config.LoadProjectConfig(repoPath)
 
-	mergedBranches, err := worktree.MergedBranches(repoPath)
+	mergedBranches, err := worktree.MergedBranches(repoPath, pc.DefaultBranch())
 	if err != nil {
 		return fmt.Errorf("failed to detect merged branches: %w", err)
 	}

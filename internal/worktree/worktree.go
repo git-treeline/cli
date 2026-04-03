@@ -83,15 +83,19 @@ func FindWorktreeForBranch(branch string) string {
 }
 
 // MergedBranches returns branch names that have been merged into the default
-// branch. The default branch is detected via symbolic-ref, falling back to
-// "main" then "master".
-func MergedBranches(repoPath string) ([]string, error) {
-	defaultBranch := detectDefaultBranch(repoPath)
+// branch. If defaultBranchOverride is non-empty it is used directly; otherwise
+// the default branch is detected via symbolic-ref, falling back to "main"
+// then "master".
+func MergedBranches(repoPath, defaultBranchOverride string) ([]string, error) {
+	defaultBranch := defaultBranchOverride
+	if defaultBranch == "" {
+		defaultBranch = DetectDefaultBranch(repoPath)
+	}
 	cmd := exec.Command("git", "branch", "--merged", defaultBranch)
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("git branch --merged %s: %w", defaultBranch, err)
+		return nil, fmt.Errorf("git branch --merged %s: %w\n\nSet default_branch in .treeline.yml if your default branch is not main/master", defaultBranch, err)
 	}
 
 	var branches []string
@@ -109,26 +113,70 @@ func MergedBranches(repoPath string) ([]string, error) {
 	return branches, nil
 }
 
-func detectDefaultBranch(repoPath string) string {
+// DetectDefaultBranch resolves the default branch for the repo at repoPath.
+// It tries (in order): local symbolic-ref, `git remote show origin` (network),
+// then common local branch names. Returns branch name and true if found,
+// or "main" and false if detection failed entirely.
+func DetectDefaultBranch(repoPath string) string {
+	if b := detectBranchFromSymbolicRef(repoPath); b != "" {
+		return b
+	}
+	if b := detectBranchFromRemoteShow(repoPath); b != "" {
+		return b
+	}
+	if b := detectBranchFromLocalCandidates(repoPath); b != "" {
+		return b
+	}
+	return "main"
+}
+
+func detectBranchFromSymbolicRef(repoPath string) string {
 	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
-	if err == nil {
-		ref := strings.TrimSpace(string(out))
-		parts := strings.Split(ref, "/")
-		if len(parts) > 0 {
-			return parts[len(parts)-1]
+	if err != nil {
+		return ""
+	}
+	ref := strings.TrimSpace(string(out))
+	parts := strings.Split(ref, "/")
+	if len(parts) > 0 {
+		return parts[len(parts)-1]
+	}
+	return ""
+}
+
+func detectBranchFromRemoteShow(repoPath string) string {
+	cmd := exec.Command("git", "remote", "show", "origin")
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return parseHeadBranch(string(out))
+}
+
+func parseHeadBranch(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "HEAD branch:") {
+			branch := strings.TrimSpace(strings.TrimPrefix(line, "HEAD branch:"))
+			if branch != "" && branch != "(unknown)" {
+				return branch
+			}
 		}
 	}
+	return ""
+}
 
-	for _, candidate := range []string{"main", "master"} {
+func detectBranchFromLocalCandidates(repoPath string) string {
+	for _, candidate := range []string{"main", "master", "develop", "trunk"} {
 		cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+candidate)
 		cmd.Dir = repoPath
 		if cmd.Run() == nil {
 			return candidate
 		}
 	}
-	return "main"
+	return ""
 }
 
 // WorktreeBranches returns a map of worktree absolute path → branch name
