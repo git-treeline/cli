@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+## [0.8.0]
+
+- Smarter `init`: auto-detects framework (Next.js, Rails, Node, Python, Rust, Go) and generates tailored .treeline.yml
+- Auto-generates agent context files (.cursor/rules/treeline.mdc or CLAUDE.md section) during init
+- Add --skip-agent-config flag to opt out of agent context generation
+- Detection signals: package.json, Gemfile, next.config.*, prisma/schema.prisma, config/database.yml, and more
+
 ## [0.7.0]
 
 - Add database adapter interface with pluggable clone/drop/exists

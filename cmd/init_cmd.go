@@ -7,16 +7,20 @@ import (
 	"path/filepath"
 
 	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/git-treeline/internal/detect"
 	"github.com/git-treeline/git-treeline/internal/platform"
+	"github.com/git-treeline/git-treeline/internal/templates"
 	"github.com/spf13/cobra"
 )
 
 var initProject string
 var initTemplateDB string
+var initSkipAgentConfig bool
 
 func init() {
 	initCmd.Flags().StringVar(&initProject, "project", "", "Project name")
 	initCmd.Flags().StringVar(&initTemplateDB, "template-db", "", "Template database name for cloning")
+	initCmd.Flags().BoolVar(&initSkipAgentConfig, "skip-agent-config", false, "Skip generating agent context files")
 	rootCmd.AddCommand(initCmd)
 }
 
@@ -49,48 +53,31 @@ var initCmd = &cobra.Command{
 			templateDB = project + "_development"
 		}
 
-		content := fmt.Sprintf(`project: %s
-
-# Number of ports to allocate per worktree (e.g. 2 for app + esbuild reload)
-# ports_needed: 1
-
-# Environment file configuration
-# target: file written in the worktree (e.g. .env.local, .env.development.local, .env)
-# source: file copied from main repo as a starting point
-env_file:
-  target: .env.local
-  source: .env.local
-
-database:
-  adapter: postgresql
-  template: %s
-  pattern: "{template}_{worktree}"
-
-copy_files:
-  - config/master.key
-
-env:
-  PORT: "{port}"
-  DATABASE_NAME: "{database}"
-  REDIS_URL: "{redis_url}"
-  APPLICATION_HOST: "localhost:{port}"
-
-setup_commands:
-  - bundle install --quiet
-  # - yarn install --silent
-
-editor:
-  vscode_title: '{project} (:{port}) — {branch} — ${activeEditorShort}'
-`, project, templateDB)
+		cwd, _ := os.Getwd()
+		detection := detect.Detect(cwd)
+		content := templates.ForDetection(project, templateDB, detection)
 
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			return err
 		}
 
-		fmt.Printf("==> Created %s for project '%s'\n", config.ProjectConfigFile, project)
+		fmt.Printf("==> Created %s for project '%s'", config.ProjectConfigFile, project)
+		if detection.Framework != "unknown" {
+			fmt.Printf(" (detected: %s)", detection.Framework)
+		}
+		fmt.Println()
 		fmt.Println()
 		fmt.Printf("Allocation policy (ports, Redis) is managed in your user config:\n")
 		fmt.Printf("  %s\n", platform.ConfigFile())
+
+		if !initSkipAgentConfig {
+			agentPath, err := templates.WriteAgentContext(cwd, project, detection)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to write agent context: %s\n", err)
+			} else if agentPath != "" {
+				fmt.Printf("==> Agent context written to %s\n", agentPath)
+			}
+		}
 
 		openInEditor(path)
 		return nil
