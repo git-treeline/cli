@@ -254,6 +254,134 @@ func TestForDetection_NextJS_EnvDevelopment(t *testing.T) {
 	assertContains(t, content, "target: .env.development")
 }
 
+func TestForDetection_Vite(t *testing.T) {
+	det := &detect.Result{
+		Framework:      "vite",
+		PackageManager: "npm",
+	}
+	content := ForDetection("website", "", det)
+
+	assertValidYAML(t, content)
+	assertContains(t, content, "project: website")
+	assertContains(t, content, "env_file:")
+	assertContains(t, content, "target: .env.local")
+	assertContains(t, content, `PORT: "{port}"`)
+	assertContains(t, content, "commands:")
+	assertContains(t, content, "npm install")
+	assertContains(t, content, "start: npx vite")
+	assertNotContains(t, content, "setup_commands")
+}
+
+func TestForDetection_Vite_NoEnvFile_StillEmitsEnv(t *testing.T) {
+	det := &detect.Result{
+		Framework:      "vite",
+		HasEnvFile:     false,
+		PackageManager: "npm",
+	}
+	content := ForDetection("myapp", "", det)
+
+	assertValidYAML(t, content)
+	assertContains(t, content, "env_file:")
+	assertContains(t, content, `PORT: "{port}"`)
+}
+
+func TestForDetection_NextJS_NoEnvFile_StillEmitsEnv(t *testing.T) {
+	det := &detect.Result{
+		Framework:      "nextjs",
+		HasEnvFile:     false,
+		PackageManager: "npm",
+	}
+	content := ForDetection("myapp", "myapp_dev", det)
+
+	assertValidYAML(t, content)
+	assertContains(t, content, "env_file:")
+	assertContains(t, content, "target: .env.local")
+}
+
+func TestForDetection_Node_NoEnvFile_NoDotenv_NoEnvBlock(t *testing.T) {
+	det := &detect.Result{
+		Framework:      "node",
+		HasEnvFile:     false,
+		PackageManager: "npm",
+	}
+	content := ForDetection("myapp", "", det)
+
+	assertValidYAML(t, content)
+	assertNotContains(t, content, "env_file")
+}
+
+func TestForDetection_Node_NoDotenv_WithEnvFile_EmitsEnv(t *testing.T) {
+	det := &detect.Result{
+		Framework:      "node",
+		HasEnvFile:     true,
+		EnvFile:        ".env",
+		PackageManager: "npm",
+	}
+	content := ForDetection("myapp", "", det)
+
+	assertValidYAML(t, content)
+	assertContains(t, content, "env_file:")
+}
+
+func TestDiagnose_Vite(t *testing.T) {
+	det := &detect.Result{Framework: "vite"}
+	diags := Diagnose(det)
+
+	hasPortWarning := false
+	hasEnvInfo := false
+	for _, d := range diags {
+		if strings.Contains(d.Message, "vite.config.js") {
+			hasPortWarning = true
+		}
+		if strings.Contains(d.Message, "auto-loads") {
+			hasEnvInfo = true
+		}
+	}
+	if !hasPortWarning {
+		t.Error("expected port wiring diagnostic for Vite")
+	}
+	if !hasEnvInfo {
+		t.Error("expected env auto-load info for Vite")
+	}
+}
+
+func TestDiagnose_Node_NoDotenv(t *testing.T) {
+	det := &detect.Result{Framework: "node", HasDotenv: false}
+	diags := Diagnose(det)
+
+	hasDotenvWarning := false
+	for _, d := range diags {
+		if d.Level == "warn" && strings.Contains(d.Message, "dotenv") {
+			hasDotenvWarning = true
+		}
+	}
+	if !hasDotenvWarning {
+		t.Error("expected dotenv warning for Node without dotenv")
+	}
+}
+
+func TestDiagnose_Rails_NoWarnings(t *testing.T) {
+	det := &detect.Result{Framework: "rails", HasEnvFile: true, EnvFile: ".env"}
+	diags := Diagnose(det)
+
+	for _, d := range diags {
+		if d.Level == "warn" {
+			t.Errorf("unexpected warning for Rails: %s", d.Message)
+		}
+	}
+}
+
+func TestPortHint_Vite(t *testing.T) {
+	det := &detect.Result{Framework: "vite"}
+	hint := PortHint(det)
+	if !strings.Contains(hint, "vite.config.js") {
+		t.Errorf("expected Vite port hint, got: %s", hint)
+	}
+	if !strings.Contains(hint, "loadEnv") {
+		t.Errorf("expected loadEnv in hint, got: %s", hint)
+	}
+}
+
 func TestPortHint_NextJS(t *testing.T) {
 	det := &detect.Result{Framework: "nextjs"}
 	hint := PortHint(det)

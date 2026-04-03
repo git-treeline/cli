@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+## [0.18.0]
+
+### New
+
+- **`gtl start` injects env vars** — the supervisor now reads the worktree's allocation from the registry, resolves env templates from `.treeline.yml`, and passes them into the child process environment. `PORT`, `DATABASE_URL`, etc. are available as real env vars without requiring the app to read `.env` files.
+- **Vite detection** — `gtl init` recognizes Vite projects (`vite.config.js/ts/mjs`) and generates a tailored `.treeline.yml` with `npx vite` start command and `.env.local` wiring
+- **Post-init/setup diagnostics** — `gtl init` and `gtl setup` now print actionable warnings:
+  - Vite: explains `vite.config.js` + `loadEnv` port wiring
+  - Node without dotenv: warns that `.env` won't be auto-read, suggests install
+  - Python without python-dotenv: same pattern
+  - Go/Rust: suggests sourcing env file in start command
+  - Missing `env_file` block when `env` vars are configured
+- **Smarter env_file emission** — templates now emit `env_file` for frameworks that natively load env files (Next.js, Vite, Rails) even when no `.env` file exists yet on disk
+- **dotenv detection** — detects `dotenv`, `dotenv-cli`, `python-dotenv`, `django-environ` in dependency files
+
 ## [0.17.0]
 
 ### Breaking

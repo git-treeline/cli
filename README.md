@@ -53,7 +53,9 @@ cd your-project
 gtl init
 ```
 
-`init` auto-detects your framework (Next.js, Rails, Express, Python, Rust, Go) and generates a tailored `.treeline.yml`. It also creates agent context files (`.cursor/rules/treeline.mdc` or `CLAUDE.md`) so AI tools understand the setup. Commit the config so your team shares it.
+`init` auto-detects your framework (Next.js, Vite, Rails, Express, Python, Rust, Go) and generates a tailored `.treeline.yml`. It also creates agent context files (`.cursor/rules/treeline.mdc` or `CLAUDE.md`) so AI tools understand the setup.
+
+After generating the config, `init` runs framework-aware diagnostics and prints actionable warnings — for example, if your Vite project needs `vite.config.js` changes to read the allocated port, or if your Node project lacks a dotenv library. Commit the config so your team shares it.
 
 Use `--project myapp` to set the project name explicitly, or `--skip-agent-config` to skip agent context generation.
 
@@ -228,6 +230,36 @@ commands:
     - npm install
     - npx prisma migrate deploy
   start: npm run dev
+```
+
+### Vite (React, Vue, Svelte, etc.)
+
+```yaml
+project: website
+
+env_file:
+  target: .env.local
+  source: .env.local
+
+env:
+  PORT: "{port}"
+
+commands:
+  setup:
+    - npm install
+  start: npx vite
+```
+
+**Port wiring:** Vite loads `.env.local` for `import.meta.env` but does _not_ use `PORT` for its dev server by default. Add this to your `vite.config.js`:
+
+```js
+import { defineConfig, loadEnv } from 'vite'
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  return {
+    server: { port: parseInt(env.PORT || '5173') }
+  }
+})
 ```
 
 ### Node.js / Express

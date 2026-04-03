@@ -201,10 +201,17 @@ func (s *Setup) copyFiles() {
 }
 
 func (s *Setup) buildEnvVars(alloc interpolation.Allocation, redisURL string) map[string]string {
-	tmpl := s.ProjectConfig.EnvTemplate()
+	return BuildEnvVars(s.ProjectConfig, alloc, redisURL)
+}
+
+// BuildEnvVars resolves the env template from a project config against an
+// allocation. Exported so gtl start can inject vars into the child process
+// without going through a full Setup.
+func BuildEnvVars(pc *config.ProjectConfig, alloc interpolation.Allocation, redisURL string) map[string]string {
+	tmpl := pc.EnvTemplate()
 	result := make(map[string]string, len(tmpl))
 	for key, pattern := range tmpl {
-		result[key] = interpolation.Interpolate(pattern, alloc, redisURL, s.ProjectConfig.Project())
+		result[key] = interpolation.Interpolate(pattern, alloc, redisURL, pc.Project())
 	}
 	return result
 }

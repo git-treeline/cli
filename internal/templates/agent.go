@@ -81,11 +81,7 @@ func buildAgentContent(project string, det *detect.Result) string {
 		}
 	}
 
-	envFile := det.EnvFile
-	if envFile == "" {
-		envFile = ".env"
-	}
-	fmt.Fprintf(&b, "- Allocated env vars: %s in %s\n", strings.Join(envVars, ", "), envFile)
+	fmt.Fprintf(&b, "- Allocated env vars: %s in %s\n", strings.Join(envVars, ", "), envTarget(det))
 
 	if hint := PortHint(det); hint != "" {
 		b.WriteString("\n### Port wiring\n\n")

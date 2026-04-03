@@ -81,6 +81,12 @@ func (pc *ProjectConfig) DatabasePattern() string {
 	return "{template}_{worktree}"
 }
 
+// HasEnvFileConfig returns true if the config explicitly declares an env_file block.
+func (pc *ProjectConfig) HasEnvFileConfig() bool {
+	_, ok := pc.Data["env_file"]
+	return ok
+}
+
 func (pc *ProjectConfig) EnvFileTarget() string {
 	if v, ok := Dig(pc.Data, "env_file", "target").(string); ok {
 		return v

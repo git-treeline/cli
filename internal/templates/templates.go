@@ -16,6 +16,8 @@ func ForDetection(project, templateDB string, det *detect.Result) string {
 	switch det.Framework {
 	case "nextjs":
 		return nextJS(project, templateDB, det)
+	case "vite":
+		return vite(project, det)
 	case "rails":
 		return rails(project, templateDB, det)
 	case "node":
@@ -32,8 +34,9 @@ func nextJS(project, templateDB string, det *detect.Result) string {
 	fmt.Fprintf(&b, "project: %s\n", project)
 	writeMergeTarget(&b, det)
 
-	if det.HasEnvFile {
-		writeEnvFileBlock(&b, det.EnvFile)
+	emit := shouldEmitEnv(det)
+	if emit {
+		writeEnvFileBlock(&b, envTarget(det))
 	}
 
 	envVars := map[string]string{
@@ -49,7 +52,7 @@ func nextJS(project, templateDB string, det *detect.Result) string {
 		envVars["DATABASE_URL"] = `"postgresql://localhost:5432/{database}"`
 	}
 
-	if det.HasEnvFile {
+	if emit {
 		b.WriteString("\nenv:\n")
 		for k, v := range envVars {
 			fmt.Fprintf(&b, "  %s: %s\n", k, v)
@@ -75,8 +78,9 @@ func rails(project, templateDB string, det *detect.Result) string {
 		b.WriteString("ports_needed: 2\n")
 	}
 
-	if det.HasEnvFile {
-		writeEnvFileBlock(&b, det.EnvFile)
+	emit := shouldEmitEnv(det)
+	if emit {
+		writeEnvFileBlock(&b, envTarget(det))
 	}
 
 	adapter := det.DBAdapter
@@ -97,7 +101,7 @@ func rails(project, templateDB string, det *detect.Result) string {
 	b.WriteString("\ncopy_files:\n")
 	b.WriteString("  - config/master.key\n")
 
-	if det.HasEnvFile {
+	if emit {
 		b.WriteString("\nenv:\n")
 		fmt.Fprintf(&b, "  PORT: \"{port}\"\n")
 		if adapter == "sqlite" {
@@ -128,13 +132,30 @@ func rails(project, templateDB string, det *detect.Result) string {
 	return b.String()
 }
 
+func vite(project string, det *detect.Result) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "project: %s\n", project)
+	writeMergeTarget(&b, det)
+
+	writeEnvFileBlock(&b, envTarget(det))
+	b.WriteString("\nenv:\n")
+	b.WriteString("  PORT: \"{port}\"\n")
+
+	b.WriteString("\ncommands:\n")
+	b.WriteString("  setup:\n")
+	fmt.Fprintf(&b, "    - %s\n", installCmd(det))
+	b.WriteString("  start: npx vite\n")
+
+	return b.String()
+}
+
 func node(project string, det *detect.Result) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "project: %s\n", project)
 	writeMergeTarget(&b, det)
 
-	if det.HasEnvFile {
-		writeEnvFileBlock(&b, det.EnvFile)
+	if shouldEmitEnv(det) {
+		writeEnvFileBlock(&b, envTarget(det))
 		b.WriteString("\nenv:\n")
 		b.WriteString("  PORT: \"{port}\"\n")
 	}
@@ -151,8 +172,8 @@ func python(project string, det *detect.Result) string {
 	fmt.Fprintf(&b, "project: %s\n", project)
 	writeMergeTarget(&b, det)
 
-	if det.HasEnvFile {
-		writeEnvFileBlock(&b, det.EnvFile)
+	if shouldEmitEnv(det) {
+		writeEnvFileBlock(&b, envTarget(det))
 		b.WriteString("\nenv:\n")
 		b.WriteString("  PORT: \"{port}\"\n")
 	}
@@ -169,8 +190,8 @@ func generic(project string, det *detect.Result) string {
 	fmt.Fprintf(&b, "project: %s\n", project)
 	writeMergeTarget(&b, det)
 
-	if det.HasEnvFile {
-		writeEnvFileBlock(&b, det.EnvFile)
+	if shouldEmitEnv(det) {
+		writeEnvFileBlock(&b, envTarget(det))
 		b.WriteString("\nenv:\n")
 		b.WriteString("  PORT: \"{port}\"\n")
 	}
@@ -184,6 +205,19 @@ func writeEnvFileBlock(b *strings.Builder, envFile string) {
 	fmt.Fprintf(b, "  source: %s\n", envFile)
 }
 
+// shouldEmitEnv returns true if the template should include env_file and env blocks.
+func shouldEmitEnv(det *detect.Result) bool {
+	return det.HasEnvFile || det.AutoLoadsEnvFile()
+}
+
+// envTarget returns the env file name to use in the template.
+func envTarget(det *detect.Result) string {
+	if det.EnvFile != "" {
+		return det.EnvFile
+	}
+	return det.DefaultEnvTarget()
+}
+
 func writeStartCommand(b *strings.Builder, det *detect.Result) {
 	if cmd := startCommandFor(det); cmd != "" {
 		fmt.Fprintf(b, "  start: %s\n", cmd)
@@ -194,6 +228,8 @@ func startCommandFor(det *detect.Result) string {
 	switch det.Framework {
 	case "nextjs":
 		return runCmd(det) + " dev"
+	case "vite":
+		return "" // already emitted inline for vite (npx vite)
 	case "rails":
 		return "" // already emitted inline for rails (bin/dev)
 	case "node":
@@ -227,10 +263,7 @@ func writeMergeTarget(b *strings.Builder, det *detect.Result) {
 func PortHint(det *detect.Result) string {
 	switch det.Framework {
 	case "nextjs":
-		envFile := det.EnvFile
-		if envFile == "" {
-			envFile = ".env.local"
-		}
+		envFile := envTarget(det)
 		return fmt.Sprintf(`Next.js does not read PORT from %s for the dev server.
 Update your package.json dev script:
 
@@ -240,6 +273,17 @@ Or use dotenv-cli to load %s before starting:
 
   npm install -D dotenv-cli
   "dev": "dotenv -e %s -- next dev --port $PORT"`, envFile, envFile, envFile)
+	case "vite":
+		return `Vite loads .env.local for import.meta.env but does NOT use PORT for the dev server.
+Add this to your vite.config.js:
+
+  import { defineConfig, loadEnv } from 'vite'
+  export default defineConfig(({ mode }) => {
+    const env = loadEnv(mode, process.cwd(), '')
+    return {
+      server: { port: parseInt(env.PORT || '5173') }
+    }
+  })`
 	case "node":
 		return `Ensure your server reads the allocated port from the environment:
 

@@ -193,6 +193,87 @@ func TestDetect_Go(t *testing.T) {
 	}
 }
 
+func TestDetect_Vite(t *testing.T) {
+	dir := setup(t, "package.json", "vite.config.js")
+	r := Detect(dir)
+	if r.Framework != "vite" {
+		t.Errorf("expected vite, got %s", r.Framework)
+	}
+	if !r.AutoLoadsEnvFile() {
+		t.Error("expected Vite to auto-load env files")
+	}
+	if r.DefaultEnvTarget() != ".env.local" {
+		t.Errorf("expected .env.local default, got %s", r.DefaultEnvTarget())
+	}
+}
+
+func TestDetect_Vite_TS(t *testing.T) {
+	dir := setup(t, "package.json", "vite.config.ts")
+	r := Detect(dir)
+	if r.Framework != "vite" {
+		t.Errorf("expected vite, got %s", r.Framework)
+	}
+}
+
+func TestDetect_Vite_NoEnvFile(t *testing.T) {
+	dir := setup(t, "package.json", "vite.config.js")
+	r := Detect(dir)
+	if r.HasEnvFile {
+		t.Error("expected HasEnvFile=false")
+	}
+	if !r.AutoLoadsEnvFile() {
+		t.Error("Vite should auto-load env even without existing file")
+	}
+}
+
+func TestDetect_NextJS_NotVite(t *testing.T) {
+	dir := setup(t, "package.json", "next.config.js", "vite.config.js")
+	r := Detect(dir)
+	if r.Framework != "nextjs" {
+		t.Errorf("expected nextjs (more specific), got %s", r.Framework)
+	}
+}
+
+func TestDetect_Dotenv_Node(t *testing.T) {
+	dir := setup(t, "package.json")
+	_ = os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"dependencies":{"dotenv":"^16.0.0"}}`), 0o644)
+	r := Detect(dir)
+	if !r.HasDotenv {
+		t.Error("expected HasDotenv=true with dotenv in dependencies")
+	}
+}
+
+func TestDetect_Dotenv_Python(t *testing.T) {
+	dir := setup(t, "requirements.txt")
+	_ = os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("django\npython-dotenv\n"), 0o644)
+	r := Detect(dir)
+	if !r.HasDotenv {
+		t.Error("expected HasDotenv=true with python-dotenv")
+	}
+}
+
+func TestDetect_AutoLoadsEnvFile(t *testing.T) {
+	cases := []struct {
+		framework string
+		files     []string
+		expected  bool
+	}{
+		{"nextjs", []string{"package.json", "next.config.js"}, true},
+		{"vite", []string{"package.json", "vite.config.js"}, true},
+		{"rails", []string{"Gemfile", "config/application.rb"}, true},
+		{"node", []string{"package.json"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.framework, func(t *testing.T) {
+			dir := setup(t, tc.files...)
+			r := Detect(dir)
+			if r.AutoLoadsEnvFile() != tc.expected {
+				t.Errorf("expected AutoLoadsEnvFile=%v for %s", tc.expected, tc.framework)
+			}
+		})
+	}
+}
+
 func TestDetect_Unknown(t *testing.T) {
 	dir := t.TempDir()
 	r := Detect(dir)

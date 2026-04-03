@@ -29,6 +29,7 @@ type Supervisor struct {
 	Command    string
 	Dir        string
 	SocketPath string
+	Env        map[string]string // extra env vars injected into the child process
 	Log        func(format string, args ...any)
 
 	mu           sync.Mutex
@@ -92,6 +93,13 @@ func (s *Supervisor) startChildLocked() error {
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	if len(s.Env) > 0 {
+		cmd.Env = os.Environ()
+		for k, v := range s.Env {
+			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+		}
+	}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting command: %w", err)

@@ -90,10 +90,13 @@ var initCmd = &cobra.Command{
 		fmt.Printf("Allocation policy (ports, Redis) is managed in your user config:\n")
 		fmt.Printf("  %s\n", platform.ConfigFile())
 
-		if hint := templates.PortHint(detection); hint != "" {
+		diags := templates.Diagnose(detection)
+		for _, d := range diags {
 			fmt.Println()
-			fmt.Println("⚠  Port wiring required:")
-			for _, line := range splitLines(hint) {
+			if d.Level == "warn" {
+				fmt.Println("⚠  Action needed:")
+			}
+			for _, line := range splitLines(d.Message) {
 				fmt.Printf("  %s\n", line)
 			}
 		}

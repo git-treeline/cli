@@ -7,6 +7,9 @@ import (
 	"strings"
 
 	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/git-treeline/internal/interpolation"
+	"github.com/git-treeline/git-treeline/internal/registry"
+	"github.com/git-treeline/git-treeline/internal/setup"
 	"github.com/git-treeline/git-treeline/internal/supervisor"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
@@ -62,6 +65,7 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 		}
 
 		sv := supervisor.New(startCommand, absPath, sockPath)
+		sv.Env = resolveEnvVars(pc, absPath)
 		return sv.Run()
 	},
 }
@@ -107,6 +111,22 @@ var restartCmd = &cobra.Command{
 		fmt.Println("Server restarted.")
 		return nil
 	},
+}
+
+// resolveEnvVars looks up the worktree's allocation from the registry and
+// interpolates the env template from the project config. Returns nil if
+// there's no allocation or no env template.
+func resolveEnvVars(pc *config.ProjectConfig, absPath string) map[string]string {
+	reg := registry.New("")
+	alloc := reg.Find(absPath)
+	if alloc == nil {
+		return nil
+	}
+	redisURL := interpolation.BuildRedisURL(
+		config.LoadUserConfig("").RedisURL(),
+		interpolation.Allocation(alloc),
+	)
+	return setup.BuildEnvVars(pc, interpolation.Allocation(alloc), redisURL)
 }
 
 func resolveSocket() (string, error) {

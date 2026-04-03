@@ -14,9 +14,10 @@ import (
 // Result contains the detection findings for a project directory.
 // All fields are populated by Detect() based on filesystem analysis.
 type Result struct {
-	Framework      string   // "nextjs", "rails", "node", "django", "python", "rust", "go", "unknown"
+	Framework      string   // "nextjs", "vite", "rails", "node", "django", "python", "rust", "go", "unknown"
 	HasPrisma      bool
 	HasJSBundler   bool     // jsbundling-rails/cssbundling-rails or multi-process Procfile.dev
+	HasDotenv      bool     // project has dotenv or equivalent wired up
 	DBAdapter      string   // "postgresql", "sqlite", ""
 	HasRedis       bool
 	HasEnvFile     bool     // true if any env file exists on disk
@@ -32,6 +33,7 @@ func Detect(root string) *Result {
 	r.detectFramework(root)
 	r.detectPrisma(root)
 	r.detectJSBundler(root)
+	r.detectDotenv(root)
 	r.detectDatabase(root)
 	r.detectRedis(root)
 	r.detectPackageManager(root)
@@ -59,6 +61,11 @@ func (r *Result) detectFramework(root string) {
 
 	if fileExists(root, "pyproject.toml") || fileExists(root, "requirements.txt") {
 		r.Framework = "python"
+		return
+	}
+
+	if fileExistsAny(root, "vite.config.js", "vite.config.ts", "vite.config.mjs") {
+		r.Framework = "vite"
 		return
 	}
 
@@ -158,6 +165,50 @@ func (r *Result) detectEnvFile(root string) {
 	if len(r.EnvFiles) > 0 {
 		r.HasEnvFile = true
 		r.EnvFile = r.EnvFiles[0]
+	}
+}
+
+// AutoLoadsEnvFile reports whether this framework natively loads .env files
+// without the user needing to install a dotenv library.
+func (r *Result) AutoLoadsEnvFile() bool {
+	switch r.Framework {
+	case "nextjs", "vite", "rails":
+		return true
+	default:
+		return r.HasDotenv
+	}
+}
+
+// DefaultEnvTarget returns the conventional env file name for a framework.
+func (r *Result) DefaultEnvTarget() string {
+	switch r.Framework {
+	case "nextjs", "vite":
+		return ".env.local"
+	case "rails":
+		return ".env"
+	default:
+		return ".env"
+	}
+}
+
+func (r *Result) detectDotenv(root string) {
+	if content, err := os.ReadFile(filepath.Join(root, "package.json")); err == nil {
+		s := string(content)
+		if strings.Contains(s, "\"dotenv\"") || strings.Contains(s, "\"dotenv-cli\"") {
+			r.HasDotenv = true
+			return
+		}
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "Gemfile")); err == nil {
+		if strings.Contains(string(content), "dotenv") {
+			r.HasDotenv = true
+			return
+		}
+	}
+	if content, err := os.ReadFile(filepath.Join(root, "requirements.txt")); err == nil {
+		if strings.Contains(string(content), "django-environ") || strings.Contains(string(content), "python-dotenv") {
+			r.HasDotenv = true
+		}
 	}
 }
 
