@@ -3,6 +3,7 @@ package worktree
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -76,6 +77,84 @@ func FindWorktreeForBranch(branch string) string {
 		}
 	}
 	return ""
+}
+
+// MergedBranches returns branch names that have been merged into the default
+// branch. The default branch is detected via symbolic-ref, falling back to
+// "main" then "master".
+func MergedBranches(repoPath string) ([]string, error) {
+	defaultBranch := detectDefaultBranch(repoPath)
+	cmd := exec.Command("git", "branch", "--merged", defaultBranch)
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git branch --merged %s: %w", defaultBranch, err)
+	}
+
+	var branches []string
+	for _, line := range strings.Split(string(out), "\n") {
+		name := strings.TrimSpace(line)
+		// Strip "* " (current branch) and "+ " (checked out in another worktree)
+		name = strings.TrimPrefix(name, "* ")
+		name = strings.TrimPrefix(name, "+ ")
+		name = strings.TrimSpace(name)
+		if name == "" || name == defaultBranch {
+			continue
+		}
+		branches = append(branches, name)
+	}
+	return branches, nil
+}
+
+func detectDefaultBranch(repoPath string) string {
+	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err == nil {
+		ref := strings.TrimSpace(string(out))
+		parts := strings.Split(ref, "/")
+		if len(parts) > 0 {
+			return parts[len(parts)-1]
+		}
+	}
+
+	for _, candidate := range []string{"main", "master"} {
+		cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+candidate)
+		cmd.Dir = repoPath
+		if cmd.Run() == nil {
+			return candidate
+		}
+	}
+	return "main"
+}
+
+// WorktreeBranches returns a map of worktree absolute path → branch name
+// by parsing `git worktree list --porcelain`. Paths are normalized via
+// filepath.EvalSymlinks to match the paths stored in the registry.
+func WorktreeBranches(repoPath string) map[string]string {
+	cmd := exec.Command("git", "worktree", "list", "--porcelain")
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+
+	result := make(map[string]string)
+	var currentPath string
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "worktree ") {
+			p := strings.TrimPrefix(line, "worktree ")
+			if resolved, err := filepath.EvalSymlinks(p); err == nil {
+				p = resolved
+			}
+			currentPath = p
+		}
+		if strings.HasPrefix(line, "branch refs/heads/") {
+			branch := strings.TrimPrefix(line, "branch refs/heads/")
+			result[currentPath] = branch
+		}
+	}
+	return result
 }
 
 // DetectMainRepo returns the root worktree path (the main repo) by parsing

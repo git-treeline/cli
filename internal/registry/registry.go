@@ -13,6 +13,13 @@ import (
 	"github.com/git-treeline/git-treeline/internal/platform"
 )
 
+func resolvePath(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return p
+}
+
 const lockTimeout = 5 * time.Second
 
 type Allocation map[string]any
@@ -113,6 +120,48 @@ func (r *Registry) Release(worktreePath string) (bool, error) {
 		data.Allocations = filtered
 	})
 	return removed, err
+}
+
+// FindMergedAllocations returns allocations whose worktree path maps to a
+// branch in the merged set. worktreeBranches maps worktree paths to branch
+// names (from git worktree list).
+func (r *Registry) FindMergedAllocations(mergedBranches []string, worktreeBranches map[string]string) []Allocation {
+	branchSet := make(map[string]bool, len(mergedBranches))
+	for _, b := range mergedBranches {
+		branchSet[b] = true
+	}
+
+	var result []Allocation
+	for _, a := range r.Allocations() {
+		wtPath := resolvePath(getString(a, "worktree"))
+		if branch, ok := worktreeBranches[wtPath]; ok && branchSet[branch] {
+			result = append(result, a)
+		}
+	}
+	return result
+}
+
+// ReleaseMany removes all allocations whose worktree paths match the given
+// list. Uses a single lock acquisition. Returns the number of entries removed.
+func (r *Registry) ReleaseMany(worktreePaths []string) (int, error) {
+	pathSet := make(map[string]bool, len(worktreePaths))
+	for _, p := range worktreePaths {
+		pathSet[p] = true
+	}
+
+	count := 0
+	err := r.withLock(func(data *RegistryData) {
+		filtered := make([]Allocation, 0, len(data.Allocations))
+		for _, a := range data.Allocations {
+			if pathSet[getString(a, "worktree")] {
+				count++
+			} else {
+				filtered = append(filtered, a)
+			}
+		}
+		data.Allocations = filtered
+	})
+	return count, err
 }
 
 func (r *Registry) Prune() (int, error) {

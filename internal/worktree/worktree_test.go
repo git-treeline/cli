@@ -103,3 +103,51 @@ func TestDetectMainRepo(t *testing.T) {
 		t.Errorf("DetectMainRepo = %q, want %q", result, repo)
 	}
 }
+
+func TestMergedBranches(t *testing.T) {
+	repo := initTestRepo(t)
+
+	// Create and merge a feature branch
+	run(t, repo, "git", "checkout", "-b", "feature-done")
+	run(t, repo, "git", "commit", "--allow-empty", "-m", "feature work")
+	run(t, repo, "git", "checkout", "main")
+	run(t, repo, "git", "merge", "--no-ff", "feature-done", "-m", "merge feature-done")
+
+	// Create an unmerged branch
+	run(t, repo, "git", "checkout", "-b", "feature-wip")
+	run(t, repo, "git", "commit", "--allow-empty", "-m", "wip")
+	run(t, repo, "git", "checkout", "main")
+
+	branches, err := MergedBranches(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+	for _, b := range branches {
+		if b == "feature-done" {
+			found = true
+		}
+		if b == "feature-wip" {
+			t.Error("feature-wip should NOT be in merged branches")
+		}
+		if b == "main" {
+			t.Error("main itself should be excluded from results")
+		}
+	}
+	if !found {
+		t.Errorf("expected feature-done in merged branches, got %v", branches)
+	}
+}
+
+func TestMergedBranches_NoMerged(t *testing.T) {
+	repo := initTestRepo(t)
+
+	branches, err := MergedBranches(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(branches) != 0 {
+		t.Errorf("expected no merged branches, got %v", branches)
+	}
+}

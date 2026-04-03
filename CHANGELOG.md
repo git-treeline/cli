@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+## [0.9.0]
+
+- Add `prune --merged`: detect and release allocations for worktrees on branches merged to main
+- Add `release --project`: batch release all allocations for a given project
+- Add `release --all`: release all allocations across all projects
+- Add `--force` flag to skip confirmation prompts on batch operations
+- Add `--dry-run` flag to `release --project` and `release --all`
+- Support `--drop-db` on `prune --merged` for database cleanup
+- Fix path normalization for macOS symlinks in worktree-to-branch mapping
+
 ## [0.8.0]
 
 - Smarter `init`: auto-detects framework (Next.js, Rails, Node, Python, Rust, Go) and generates tailored .treeline.yml

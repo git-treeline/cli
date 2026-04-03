@@ -132,3 +132,79 @@ func TestRegistry_PruneStale_RemovesMissingDirs(t *testing.T) {
 		t.Errorf("expected 1 pruned, got %d", count)
 	}
 }
+
+func TestRegistry_FindMergedAllocations(t *testing.T) {
+	reg := newTestRegistry(t)
+	_ = reg.Allocate(Allocation{"worktree": "/wt/a", "worktree_name": "dir-a", "project": "p1"})
+	_ = reg.Allocate(Allocation{"worktree": "/wt/b", "worktree_name": "dir-b", "project": "p1"})
+	_ = reg.Allocate(Allocation{"worktree": "/wt/c", "worktree_name": "dir-c", "project": "p1"})
+
+	wtBranches := map[string]string{
+		"/wt/a": "feature-a",
+		"/wt/b": "feature-b",
+		"/wt/c": "feature-c",
+	}
+
+	merged := reg.FindMergedAllocations([]string{"feature-a", "feature-c"}, wtBranches)
+	if len(merged) != 2 {
+		t.Fatalf("expected 2 merged allocations, got %d", len(merged))
+	}
+
+	paths := map[string]bool{}
+	for _, a := range merged {
+		paths[getString(a, "worktree")] = true
+	}
+	if !paths["/wt/a"] || !paths["/wt/c"] {
+		t.Errorf("expected /wt/a and /wt/c, got %v", paths)
+	}
+}
+
+func TestRegistry_FindMergedAllocations_NoneMatch(t *testing.T) {
+	reg := newTestRegistry(t)
+	_ = reg.Allocate(Allocation{"worktree": "/wt/a", "worktree_name": "dir-a"})
+
+	wtBranches := map[string]string{"/wt/a": "feature-a"}
+	merged := reg.FindMergedAllocations([]string{"other-branch"}, wtBranches)
+	if len(merged) != 0 {
+		t.Errorf("expected 0 matches, got %d", len(merged))
+	}
+}
+
+func TestRegistry_ReleaseMany(t *testing.T) {
+	reg := newTestRegistry(t)
+	_ = reg.Allocate(Allocation{"worktree": "/wt/a", "worktree_name": "a"})
+	_ = reg.Allocate(Allocation{"worktree": "/wt/b", "worktree_name": "b"})
+	_ = reg.Allocate(Allocation{"worktree": "/wt/c", "worktree_name": "c"})
+
+	count, err := reg.ReleaseMany([]string{"/wt/a", "/wt/c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 released, got %d", count)
+	}
+
+	allocs := reg.Allocations()
+	if len(allocs) != 1 {
+		t.Fatalf("expected 1 remaining, got %d", len(allocs))
+	}
+	if getString(allocs[0], "worktree_name") != "b" {
+		t.Errorf("expected 'b' remaining, got %v", allocs[0]["worktree_name"])
+	}
+}
+
+func TestRegistry_ReleaseMany_Empty(t *testing.T) {
+	reg := newTestRegistry(t)
+	_ = reg.Allocate(Allocation{"worktree": "/wt/a"})
+
+	count, err := reg.ReleaseMany([]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 released, got %d", count)
+	}
+	if len(reg.Allocations()) != 1 {
+		t.Error("expected allocation to remain")
+	}
+}
