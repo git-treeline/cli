@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+## [0.5.1] - 2026-03-31
+
+- Fix: root repo setup now uses base port and template database directly instead of treating it as a worktree
+
 ## [0.5.0] - 2026-03-31
 
 - Add `new` command: create worktree + allocate resources + run setup in one step

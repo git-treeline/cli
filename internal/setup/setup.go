@@ -63,7 +63,8 @@ func New(worktreePath string, mainRepo string, uc *config.UserConfig) *Setup {
 
 func (s *Setup) Run() (*allocator.Allocation, error) {
 	worktreeName := filepath.Base(s.WorktreePath)
-	alloc, err := s.Allocator.Allocate(s.WorktreePath, worktreeName)
+	isMain := s.WorktreePath == s.MainRepo
+	alloc, err := s.Allocator.Allocate(s.WorktreePath, worktreeName, isMain)
 	if err != nil {
 		return nil, err
 	}

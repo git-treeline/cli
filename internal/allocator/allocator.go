@@ -81,10 +81,14 @@ func New(uc *config.UserConfig, pc *config.ProjectConfig, reg *registry.Registry
 
 // Allocate returns an allocation for the given worktree. If an existing
 // allocation is found in the registry, it is reused (idempotent). Otherwise
-// a new allocation is created.
-func (al *Allocator) Allocate(worktreePath, worktreeName string) (*Allocation, error) {
+// a new allocation is created. When mainWorktree is true, base resources
+// (port_base, template DB, no redis prefix) are returned directly.
+func (al *Allocator) Allocate(worktreePath, worktreeName string, mainWorktree bool) (*Allocation, error) {
 	if existing := al.reuseExisting(worktreePath, worktreeName); existing != nil {
 		return existing, nil
+	}
+	if mainWorktree {
+		return al.allocateMain(worktreePath, worktreeName)
 	}
 	return al.allocateNew(worktreePath, worktreeName)
 }
@@ -118,6 +122,24 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string) *Allocatio
 	}
 
 	return alloc
+}
+
+func (al *Allocator) allocateMain(worktreePath, worktreeName string) (*Allocation, error) {
+	port := al.UserConfig.PortBase()
+	count := al.ProjectConfig.PortsNeeded()
+	ports := make([]int, count)
+	for i := range count {
+		ports[i] = port + i
+	}
+
+	return &Allocation{
+		Project:      al.ProjectConfig.Project(),
+		Worktree:     worktreePath,
+		WorktreeName: worktreeName,
+		Port:         port,
+		Ports:        ports,
+		Database:     al.ProjectConfig.DatabaseTemplate(),
+	}, nil
 }
 
 func (al *Allocator) allocateNew(worktreePath, worktreeName string) (*Allocation, error) {

@@ -41,7 +41,7 @@ func itoa(n int) string {
 
 func TestAllocate_SinglePort(t *testing.T) {
 	al, _ := testAllocator(t, 1, "")
-	alloc, err := al.Allocate("/wt/branch-a", "branch-a")
+	alloc, err := al.Allocate("/wt/branch-a", "branch-a", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestAllocate_SinglePort(t *testing.T) {
 
 func TestAllocate_MultiPort(t *testing.T) {
 	al, _ := testAllocator(t, 2, "")
-	alloc, err := al.Allocate("/wt/branch-a", "branch-a")
+	alloc, err := al.Allocate("/wt/branch-a", "branch-a", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,13 +73,13 @@ func TestAllocate_MultiPort(t *testing.T) {
 func TestAllocate_Idempotent(t *testing.T) {
 	al, reg := testAllocator(t, 1, "")
 
-	first, err := al.Allocate("/wt/branch-a", "branch-a")
+	first, err := al.Allocate("/wt/branch-a", "branch-a", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = reg.Allocate(first.ToRegistryEntry())
 
-	second, err := al.Allocate("/wt/branch-a", "branch-a")
+	second, err := al.Allocate("/wt/branch-a", "branch-a", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,10 +94,10 @@ func TestAllocate_Idempotent(t *testing.T) {
 func TestAllocate_IdempotentPreservesAllFields(t *testing.T) {
 	al, reg := testAllocator(t, 2, "")
 
-	first, _ := al.Allocate("/wt/branch-a", "branch-a")
+	first, _ := al.Allocate("/wt/branch-a", "branch-a", false)
 	_ = reg.Allocate(first.ToRegistryEntry())
 
-	second, _ := al.Allocate("/wt/branch-a", "branch-a")
+	second, _ := al.Allocate("/wt/branch-a", "branch-a", false)
 	if second.Database != first.Database {
 		t.Errorf("expected database %s, got %s", first.Database, second.Database)
 	}
@@ -117,7 +117,7 @@ func TestAllocate_SkipsUsedPorts(t *testing.T) {
 		"ports":    []any{float64(3010)},
 	})
 
-	alloc, err := al.Allocate("/wt/new", "new")
+	alloc, err := al.Allocate("/wt/new", "new", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestAllocate_MultiPort_NonOverlapping(t *testing.T) {
 		"ports":    []any{float64(3010), float64(3011)},
 	})
 
-	alloc, err := al.Allocate("/wt/new", "new")
+	alloc, err := al.Allocate("/wt/new", "new", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestAllocate_PortsNeededExceedsIncrement(t *testing.T) {
 	pc := config.LoadProjectConfig(projDir)
 
 	al := New(uc, pc, reg)
-	_, err := al.Allocate("/wt/x", "x")
+	_, err := al.Allocate("/wt/x", "x", false)
 	if err == nil {
 		t.Fatal("expected error when ports_needed > increment")
 	}
@@ -168,7 +168,7 @@ func TestAllocate_PortsNeededExceedsIncrement(t *testing.T) {
 
 func TestAllocate_DatabaseName(t *testing.T) {
 	al, _ := testAllocator(t, 1, "")
-	alloc, err := al.Allocate("/wt/feature-branch", "feature-branch")
+	alloc, err := al.Allocate("/wt/feature-branch", "feature-branch", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestAllocate_DatabaseName(t *testing.T) {
 
 func TestAllocate_RedisPrefix(t *testing.T) {
 	al, _ := testAllocator(t, 1, "")
-	alloc, err := al.Allocate("/wt/my-branch", "my-branch")
+	alloc, err := al.Allocate("/wt/my-branch", "my-branch", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestAllocate_RedisDatabaseStrategy(t *testing.T) {
 	pc := config.LoadProjectConfig(projDir)
 
 	al := New(uc, pc, reg)
-	alloc, err := al.Allocate("/wt/a", "a")
+	alloc, err := al.Allocate("/wt/a", "a", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,6 +237,32 @@ func TestToRegistryEntry_Format(t *testing.T) {
 		}
 	} else {
 		t.Error("expected ports array")
+	}
+}
+
+func TestAllocate_MainWorktree(t *testing.T) {
+	al, _ := testAllocator(t, 2, "")
+	alloc, err := al.Allocate("/repo/main", "main", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alloc.Port != 3000 {
+		t.Errorf("expected base port 3000 for main, got %d", alloc.Port)
+	}
+	if len(alloc.Ports) != 2 {
+		t.Errorf("expected 2 ports, got %d", len(alloc.Ports))
+	}
+	if alloc.Ports[0] != 3000 || alloc.Ports[1] != 3001 {
+		t.Errorf("expected ports [3000,3001], got %v", alloc.Ports)
+	}
+	if alloc.Database != "test_dev" {
+		t.Errorf("expected template database 'test_dev', got %s", alloc.Database)
+	}
+	if alloc.RedisDB != 0 {
+		t.Errorf("expected redis db 0 for main, got %d", alloc.RedisDB)
+	}
+	if alloc.RedisPrefix != "" {
+		t.Errorf("expected empty redis prefix for main, got %s", alloc.RedisPrefix)
 	}
 }
 
