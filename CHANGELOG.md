@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+## [0.15.0]
+
+- `gtl db` command group for worktree database management:
+  - `db name` — print the worktree's database name
+  - `db reset` — drop and re-clone from template
+  - `db reset --from <db>` — clone from a different local database
+  - `db restore <file>` — restore from pg_dump (auto-detects custom format vs plain SQL)
+  - `db drop` — drop without re-cloning
+- Document port-dependent data pattern (setup_commands for OAuth/webhook fixups)
+
 ## [0.14.1]
 
 - Homebrew: `gtl` alias available via `brew install git-treeline`
