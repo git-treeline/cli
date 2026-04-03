@@ -14,14 +14,15 @@ import (
 // Result contains the detection findings for a project directory.
 // All fields are populated by Detect() based on filesystem analysis.
 type Result struct {
-	Framework      string // "nextjs", "rails", "node", "django", "python", "rust", "go", "unknown"
+	Framework      string   // "nextjs", "rails", "node", "django", "python", "rust", "go", "unknown"
 	HasPrisma      bool
-	DBAdapter      string // "postgresql", "sqlite", ""
+	DBAdapter      string   // "postgresql", "sqlite", ""
 	HasRedis       bool
-	HasEnvFile     bool   // true if .env, .env.local, or .env.example exists on disk
-	EnvFile        string // ".env.local", ".env", ""
-	PackageManager string // "npm", "yarn", "pnpm", "bundle", "cargo", "pip", ""
-	DefaultBranch  string // set by caller when git context is available
+	HasEnvFile     bool     // true if any env file exists on disk
+	EnvFile        string   // best candidate: ".env.local", ".env.development", ".env", etc.
+	EnvFiles       []string // all env files found, in priority order
+	PackageManager string   // "npm", "yarn", "pnpm", "bundle", "cargo", "pip", ""
+	DefaultBranch  string   // set by caller when git context is available
 }
 
 func Detect(root string) *Result {
@@ -136,18 +137,26 @@ func (r *Result) detectPackageManager(root string) {
 	}
 }
 
+// EnvFileCandidates is the priority-ordered list of env file names to check.
+var EnvFileCandidates = []string{
+	".env.local",
+	".env.development",
+	".env.development.local",
+	".env",
+	".env.example",
+}
+
 func (r *Result) detectEnvFile(root string) {
-	switch r.Framework {
-	case "nextjs", "rails":
-		r.EnvFile = ".env.local"
-	default:
-		r.EnvFile = ".env"
+	for _, name := range EnvFileCandidates {
+		if fileExists(root, name) {
+			r.EnvFiles = append(r.EnvFiles, name)
+		}
 	}
 
-	r.HasEnvFile = fileExistsAny(root,
-		".env", ".env.local", ".env.example",
-		".env.development", ".env.development.local",
-	)
+	if len(r.EnvFiles) > 0 {
+		r.HasEnvFile = true
+		r.EnvFile = r.EnvFiles[0]
+	}
 }
 
 func (r *Result) detectPrisma(root string) {

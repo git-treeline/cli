@@ -33,9 +33,7 @@ func nextJS(project, templateDB string, det *detect.Result) string {
 	writeDefaultBranch(&b, det)
 
 	if det.HasEnvFile {
-		b.WriteString("\nenv_file:\n")
-		b.WriteString("  target: .env.local\n")
-		b.WriteString("  source: .env.local\n")
+		writeEnvFileBlock(&b, det.EnvFile)
 	}
 
 	envVars := map[string]string{
@@ -74,9 +72,7 @@ func rails(project, templateDB string, det *detect.Result) string {
 	b.WriteString("ports_needed: 2\n")
 
 	if det.HasEnvFile {
-		b.WriteString("\nenv_file:\n")
-		b.WriteString("  target: .env.local\n")
-		b.WriteString("  source: .env.local\n")
+		writeEnvFileBlock(&b, det.EnvFile)
 	}
 
 	adapter := det.DBAdapter
@@ -128,9 +124,7 @@ func node(project string, det *detect.Result) string {
 	writeDefaultBranch(&b, det)
 
 	if det.HasEnvFile {
-		b.WriteString("\nenv_file:\n")
-		b.WriteString("  target: .env\n")
-		b.WriteString("  source: .env\n")
+		writeEnvFileBlock(&b, det.EnvFile)
 		b.WriteString("\nenv:\n")
 		b.WriteString("  PORT: \"{port}\"\n")
 	}
@@ -146,9 +140,7 @@ func python(project string, det *detect.Result) string {
 	writeDefaultBranch(&b, det)
 
 	if det.HasEnvFile {
-		b.WriteString("\nenv_file:\n")
-		b.WriteString("  target: .env\n")
-		b.WriteString("  source: .env\n")
+		writeEnvFileBlock(&b, det.EnvFile)
 		b.WriteString("\nenv:\n")
 		b.WriteString("  PORT: \"{port}\"\n")
 	}
@@ -164,9 +156,7 @@ func generic(project string, det *detect.Result) string {
 	writeDefaultBranch(&b, det)
 
 	if det.HasEnvFile {
-		b.WriteString("\nenv_file:\n")
-		b.WriteString("  target: .env\n")
-		b.WriteString("  source: .env\n")
+		writeEnvFileBlock(&b, det.EnvFile)
 		b.WriteString("\nenv:\n")
 		b.WriteString("  PORT: \"{port}\"\n")
 	}
@@ -174,9 +164,49 @@ func generic(project string, det *detect.Result) string {
 	return b.String()
 }
 
+func writeEnvFileBlock(b *strings.Builder, envFile string) {
+	b.WriteString("\nenv_file:\n")
+	fmt.Fprintf(b, "  target: %s\n", envFile)
+	fmt.Fprintf(b, "  source: %s\n", envFile)
+}
+
 func writeDefaultBranch(b *strings.Builder, det *detect.Result) {
 	if det.DefaultBranch != "" && det.DefaultBranch != "main" {
 		fmt.Fprintf(b, "default_branch: %s\n", det.DefaultBranch)
+	}
+}
+
+// PortHint returns framework-specific guidance on wiring the allocated PORT
+// into the dev server. Returns empty string if no hint is needed.
+func PortHint(det *detect.Result) string {
+	switch det.Framework {
+	case "nextjs":
+		envFile := det.EnvFile
+		if envFile == "" {
+			envFile = ".env.local"
+		}
+		return fmt.Sprintf(`Next.js does not read PORT from %s for the dev server.
+Update your package.json dev script:
+
+  "dev": "next dev --port ${PORT:-3000}"
+
+Or use dotenv-cli to load %s before starting:
+
+  npm install -D dotenv-cli
+  "dev": "dotenv -e %s -- next dev --port $PORT"`, envFile, envFile, envFile)
+	case "node":
+		return `Ensure your server reads the allocated port from the environment:
+
+  const port = process.env.PORT || 3000;
+  app.listen(port);`
+	case "django", "python":
+		return `Pass the allocated port to your dev server:
+
+  python manage.py runserver 0.0.0.0:${PORT:-8000}
+
+Or in your WSGI/ASGI config, read os.environ["PORT"].`
+	default:
+		return ""
 	}
 }
 

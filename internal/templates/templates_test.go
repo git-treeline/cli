@@ -192,6 +192,68 @@ func TestForDetection_DefaultBranch_Empty_Omitted(t *testing.T) {
 	assertNotContains(t, content, "default_branch")
 }
 
+func TestForDetection_Rails_EnvDevelopment(t *testing.T) {
+	det := &detect.Result{
+		Framework:      "rails",
+		HasEnvFile:     true,
+		DBAdapter:      "postgresql",
+		PackageManager: "bundle",
+		EnvFile:        ".env.development",
+	}
+	content := ForDetection("myapp", "myapp_dev", det)
+
+	assertValidYAML(t, content)
+	assertContains(t, content, "source: .env.development")
+	assertContains(t, content, "target: .env.development")
+	assertNotContains(t, content, ".env.local")
+}
+
+func TestForDetection_NextJS_EnvDevelopment(t *testing.T) {
+	det := &detect.Result{
+		Framework:      "nextjs",
+		HasEnvFile:     true,
+		PackageManager: "npm",
+		EnvFile:        ".env.development",
+	}
+	content := ForDetection("myapp", "myapp_dev", det)
+
+	assertValidYAML(t, content)
+	assertContains(t, content, "source: .env.development")
+	assertContains(t, content, "target: .env.development")
+}
+
+func TestPortHint_NextJS(t *testing.T) {
+	det := &detect.Result{Framework: "nextjs"}
+	hint := PortHint(det)
+	if !strings.Contains(hint, "next dev --port") {
+		t.Errorf("expected Next.js port hint, got: %s", hint)
+	}
+}
+
+func TestPortHint_Node(t *testing.T) {
+	det := &detect.Result{Framework: "node"}
+	hint := PortHint(det)
+	if !strings.Contains(hint, "process.env.PORT") {
+		t.Errorf("expected Node port hint, got: %s", hint)
+	}
+}
+
+func TestPortHint_Rails(t *testing.T) {
+	det := &detect.Result{Framework: "rails"}
+	hint := PortHint(det)
+	if hint != "" {
+		t.Errorf("expected no hint for Rails, got: %s", hint)
+	}
+}
+
+func TestPortHint_Python(t *testing.T) {
+	det := &detect.Result{Framework: "django"}
+	hint := PortHint(det)
+	if !strings.Contains(hint, "manage.py runserver") {
+		t.Errorf("expected Django port hint, got: %s", hint)
+	}
+}
+
 func assertValidYAML(t *testing.T, content string) {
 	t.Helper()
 	var data map[string]any

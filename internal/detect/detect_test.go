@@ -98,8 +98,8 @@ func TestDetect_Node(t *testing.T) {
 	if r.Framework != "node" {
 		t.Errorf("expected node, got %s", r.Framework)
 	}
-	if r.EnvFile != ".env" {
-		t.Errorf("expected .env, got %s", r.EnvFile)
+	if r.EnvFile != "" {
+		t.Errorf("expected empty EnvFile when no env file exists, got %s", r.EnvFile)
 	}
 	if r.HasEnvFile {
 		t.Error("expected HasEnvFile=false when no .env file exists")
@@ -114,6 +114,36 @@ func TestDetect_Node_WithEnvFile(t *testing.T) {
 	}
 	if !r.HasEnvFile {
 		t.Error("expected HasEnvFile=true when .env exists")
+	}
+}
+
+func TestDetect_Node_EnvDevelopment(t *testing.T) {
+	dir := setup(t, "package.json", ".env.development")
+	r := Detect(dir)
+	if !r.HasEnvFile {
+		t.Error("expected HasEnvFile=true")
+	}
+	if r.EnvFile != ".env.development" {
+		t.Errorf("expected .env.development, got %s", r.EnvFile)
+	}
+}
+
+func TestDetect_MultipleEnvFiles(t *testing.T) {
+	dir := setup(t, "package.json", ".env.development", ".env", ".env.example")
+	r := Detect(dir)
+	if r.EnvFile != ".env.development" {
+		t.Errorf("expected .env.development as primary, got %s", r.EnvFile)
+	}
+	if len(r.EnvFiles) != 3 {
+		t.Errorf("expected 3 env files, got %d: %v", len(r.EnvFiles), r.EnvFiles)
+	}
+}
+
+func TestDetect_EnvLocalTakesPriority(t *testing.T) {
+	dir := setup(t, "Gemfile", "config/application.rb", ".env.local", ".env.development")
+	r := Detect(dir)
+	if r.EnvFile != ".env.local" {
+		t.Errorf("expected .env.local (higher priority), got %s", r.EnvFile)
 	}
 }
 

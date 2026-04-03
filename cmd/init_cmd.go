@@ -5,8 +5,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/git-treeline/internal/confirm"
 	"github.com/git-treeline/git-treeline/internal/detect"
 	"github.com/git-treeline/git-treeline/internal/platform"
 	"github.com/git-treeline/git-treeline/internal/templates"
@@ -57,6 +59,22 @@ var initCmd = &cobra.Command{
 		cwd, _ := os.Getwd()
 		detection := detect.Detect(cwd)
 		detection.DefaultBranch = worktree.DetectDefaultBranch(cwd)
+
+		if len(detection.EnvFiles) > 1 {
+			idx := confirm.Select(
+				"==> Found multiple env files:",
+				detection.EnvFiles, 0, nil,
+			)
+			detection.EnvFile = detection.EnvFiles[idx]
+		} else if len(detection.EnvFiles) == 1 {
+			if confirm.Prompt(fmt.Sprintf("==> Found %s — use as env file source?", detection.EnvFiles[0]), false, nil) {
+				detection.EnvFile = detection.EnvFiles[0]
+			} else {
+				detection.HasEnvFile = false
+				detection.EnvFile = ""
+			}
+		}
+
 		content := templates.ForDetection(project, templateDB, detection)
 
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
@@ -72,6 +90,14 @@ var initCmd = &cobra.Command{
 		fmt.Printf("Allocation policy (ports, Redis) is managed in your user config:\n")
 		fmt.Printf("  %s\n", platform.ConfigFile())
 
+		if hint := templates.PortHint(detection); hint != "" {
+			fmt.Println()
+			fmt.Println("⚠  Port wiring required:")
+			for _, line := range splitLines(hint) {
+				fmt.Printf("  %s\n", line)
+			}
+		}
+
 		if !initSkipAgentConfig {
 			agentPath, err := templates.WriteAgentContext(cwd, project, detection)
 			if err != nil {
@@ -84,6 +110,10 @@ var initCmd = &cobra.Command{
 		openInEditor(path)
 		return nil
 	},
+}
+
+func splitLines(s string) []string {
+	return strings.Split(s, "\n")
 }
 
 func openInEditor(path string) {
