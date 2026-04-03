@@ -375,6 +375,44 @@ setup_commands:
 	}
 }
 
+func TestRun_SQLiteClone(t *testing.T) {
+	s, mainRepo, worktree := testSetup(t, `
+project: test
+env_file:
+  target: .env
+  source: .env
+database:
+  adapter: sqlite
+  template: db/development.sqlite3
+  pattern: "db/{worktree}.sqlite3"
+env:
+  PORT: "{port}"
+  DATABASE_PATH: "{database}"
+`)
+	_ = os.WriteFile(filepath.Join(mainRepo, ".env"), []byte(""), 0o644)
+	_ = os.MkdirAll(filepath.Join(mainRepo, "db"), 0o755)
+	_ = os.WriteFile(filepath.Join(mainRepo, "db", "development.sqlite3"), []byte("sqlite-data"), 0o644)
+
+	alloc, err := s.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if alloc.Database == "" {
+		t.Fatal("expected database name to be set")
+	}
+
+	// The cloned DB should exist in the worktree
+	clonedPath := filepath.Join(worktree, alloc.Database)
+	data, err := os.ReadFile(clonedPath)
+	if err != nil {
+		t.Fatalf("expected cloned SQLite file at %s: %v", clonedPath, err)
+	}
+	if string(data) != "sqlite-data" {
+		t.Errorf("expected cloned content, got %q", string(data))
+	}
+}
+
 func TestRun_SuccessfulSetup(t *testing.T) {
 	s, mainRepo, worktree := testSetup(t, `
 project: test

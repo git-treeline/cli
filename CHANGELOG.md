@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+## [0.7.0]
+
+- Add database adapter interface with pluggable clone/drop/exists
+- Add SQLite database adapter: clones via file copy, drops via file removal
+- Store database adapter in registry for correct cleanup on release
+- Fix empty database name matching in PostgreSQL existence check
+- Backward compatible with existing PostgreSQL-only registries
+
 ## [0.6.0]
 
 - Add `gtl` as a short alias for `git-treeline` (installed via Homebrew symlink)

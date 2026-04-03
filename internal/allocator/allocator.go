@@ -20,25 +20,27 @@ type Allocator struct {
 }
 
 type Allocation struct {
-	Project      string
-	Worktree     string
-	WorktreeName string
-	Port         int
-	Ports        []int
-	Database     string
-	RedisDB      int
-	RedisPrefix  string
-	Reused       bool
+	Project         string
+	Worktree        string
+	WorktreeName    string
+	Port            int
+	Ports           []int
+	Database        string
+	DatabaseAdapter string
+	RedisDB         int
+	RedisPrefix     string
+	Reused          bool
 }
 
 func (a *Allocation) ToRegistryEntry() registry.Allocation {
 	entry := registry.Allocation{
-		"project":       a.Project,
-		"worktree":      a.Worktree,
-		"worktree_name": a.WorktreeName,
-		"port":          a.Port,
-		"ports":         intsToAny(a.Ports),
-		"database":      a.Database,
+		"project":          a.Project,
+		"worktree":         a.Worktree,
+		"worktree_name":    a.WorktreeName,
+		"port":             a.Port,
+		"ports":            intsToAny(a.Ports),
+		"database":         a.Database,
+		"database_adapter": a.DatabaseAdapter,
 	}
 
 	for i, p := range a.Ports {
@@ -105,13 +107,14 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string) *Allocatio
 	}
 
 	alloc := &Allocation{
-		Project:      getString(entry, "project"),
-		Worktree:     worktreePath,
-		WorktreeName: worktreeName,
-		Port:         ports[0],
-		Ports:        ports,
-		Database:     getString(entry, "database"),
-		Reused:       true,
+		Project:         getString(entry, "project"),
+		Worktree:        worktreePath,
+		WorktreeName:    worktreeName,
+		Port:            ports[0],
+		Ports:           ports,
+		Database:        getString(entry, "database"),
+		DatabaseAdapter: getString(entry, "database_adapter"),
+		Reused:          true,
 	}
 
 	if prefix := getString(entry, "redis_prefix"); prefix != "" {
@@ -134,12 +137,13 @@ func (al *Allocator) allocateMain(worktreePath, worktreeName string) (*Allocatio
 	ports := al.nextAvailablePortsFrom(al.UserConfig.PortBase(), count)
 
 	return &Allocation{
-		Project:      al.ProjectConfig.Project(),
-		Worktree:     worktreePath,
-		WorktreeName: worktreeName,
-		Port:         ports[0],
-		Ports:        ports,
-		Database:     al.ProjectConfig.DatabaseTemplate(),
+		Project:         al.ProjectConfig.Project(),
+		Worktree:        worktreePath,
+		WorktreeName:    worktreeName,
+		Port:            ports[0],
+		Ports:           ports,
+		Database:        al.ProjectConfig.DatabaseTemplate(),
+		DatabaseAdapter: al.ProjectConfig.DatabaseAdapter(),
 	}, nil
 }
 
@@ -155,14 +159,15 @@ func (al *Allocator) allocateNew(worktreePath, worktreeName string) (*Allocation
 	database := al.buildDatabaseName(worktreeName)
 
 	return &Allocation{
-		Project:      al.ProjectConfig.Project(),
-		Worktree:     worktreePath,
-		WorktreeName: worktreeName,
-		Port:         ports[0],
-		Ports:        ports,
-		Database:     database,
-		RedisDB:      redisDB,
-		RedisPrefix:  redisPrefix,
+		Project:         al.ProjectConfig.Project(),
+		Worktree:        worktreePath,
+		WorktreeName:    worktreeName,
+		Port:            ports[0],
+		Ports:           ports,
+		Database:        database,
+		DatabaseAdapter: al.ProjectConfig.DatabaseAdapter(),
+		RedisDB:         redisDB,
+		RedisPrefix:     redisPrefix,
 	}, nil
 }
 

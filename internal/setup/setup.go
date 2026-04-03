@@ -1,7 +1,6 @@
 package setup
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,19 +9,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
 
 	"github.com/git-treeline/git-treeline/internal/allocator"
 	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/git-treeline/internal/database"
 	"github.com/git-treeline/git-treeline/internal/interpolation"
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 )
-
-var dbIdentifierRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
-
-// Per-template lock for serializing concurrent database clones.
-var templateLocks sync.Map
 
 type Options struct {
 	DryRun      bool
@@ -132,7 +126,7 @@ func (s *Setup) runPostAllocation(alloc *allocator.Allocation, redisURL string) 
 	}
 
 	if alloc.Database != "" && !alloc.Reused {
-		if err := s.cloneDatabase(alloc.Database); err != nil {
+		if err := s.cloneDatabase(alloc); err != nil {
 			return err
 		}
 	}
@@ -249,56 +243,42 @@ func updateOrAppend(file, key, value string) error {
 	return os.WriteFile(file, []byte(content), 0o644)
 }
 
-func (s *Setup) cloneDatabase(dbName string) error {
-	if s.ProjectConfig.DatabaseAdapter() != "postgresql" {
-		return nil
+func (s *Setup) cloneDatabase(alloc *allocator.Allocation) error {
+	adapterName := s.ProjectConfig.DatabaseAdapter()
+	adapter, err := database.ForAdapter(adapterName)
+	if err != nil {
+		return err
 	}
+
 	template := s.ProjectConfig.DatabaseTemplate()
 	if template == "" {
 		return nil
 	}
 
-	if !dbIdentifierRe.MatchString(dbName) {
-		return fmt.Errorf("invalid database identifier: %q", dbName)
-	}
-	if !dbIdentifierRe.MatchString(template) {
-		return fmt.Errorf("invalid database identifier: %q", template)
-	}
+	target := alloc.Database
 
-	out, _ := exec.Command("psql", "-lqt").Output()
-	scanner := bufio.NewScanner(strings.NewReader(string(out)))
-	for scanner.Scan() {
-		parts := strings.Split(scanner.Text(), "|")
-		if len(parts) > 0 && strings.TrimSpace(parts[0]) == dbName {
-			s.log("Database %s already exists, skipping", dbName)
-			return nil
-		}
+	// SQLite uses file paths relative to the worktree/main repo
+	if adapterName == "sqlite" {
+		target = filepath.Join(s.WorktreePath, alloc.Database)
+		template = filepath.Join(s.MainRepo, template)
 	}
 
-	// Serialize clones from the same template to avoid PostgreSQL conflicts.
-	mu := getTemplateLock(template)
-	mu.Lock()
-	defer mu.Unlock()
+	exists, err := adapter.Exists(target)
+	if err != nil {
+		return err
+	}
+	if exists {
+		s.log("Database %s already exists, skipping", alloc.Database)
+		return nil
+	}
 
-	s.log("Terminating connections to %s", template)
-	terminateSQL := fmt.Sprintf("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s' AND pid <> pg_backend_pid();", template)
-	_ = exec.Command("psql", "-d", "postgres", "-c", terminateSQL).Run()
-
-	s.log("Cloning database %s -> %s", template, dbName)
-	cmd := exec.Command("createdb", dbName, "--template", template)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to clone database %s -> %s: %w", template, dbName, err)
+	s.log("Cloning database %s -> %s", s.ProjectConfig.DatabaseTemplate(), alloc.Database)
+	if err := adapter.Clone(template, target); err != nil {
+		return err
 	}
 
 	s.log("Database cloned")
 	return nil
-}
-
-func getTemplateLock(template string) *sync.Mutex {
-	actual, _ := templateLocks.LoadOrStore(template, &sync.Mutex{})
-	return actual.(*sync.Mutex)
 }
 
 func (s *Setup) runSetupCommands() error {

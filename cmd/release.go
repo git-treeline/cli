@@ -3,10 +3,10 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"github.com/git-treeline/git-treeline/internal/database"
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/spf13/cobra"
 )
@@ -38,8 +38,21 @@ var releaseCmd = &cobra.Command{
 
 		if releaseDropDB {
 			if db, ok := alloc["database"].(string); ok && db != "" {
-				fmt.Printf("==> Dropping database %s\n", db)
-				_ = exec.Command("dropdb", "--if-exists", db).Run()
+				adapterName, _ := alloc["database_adapter"].(string)
+				adapter, err := database.ForAdapter(adapterName)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: %s, skipping database drop\n", err)
+				} else {
+					dropTarget := db
+					// SQLite paths are relative to the worktree directory
+					if adapterName == "sqlite" {
+						dropTarget = filepath.Join(absPath, db)
+					}
+					fmt.Printf("==> Dropping database %s\n", db)
+					if err := adapter.Drop(dropTarget); err != nil {
+						fmt.Fprintf(os.Stderr, "Warning: failed to drop database: %s\n", err)
+					}
+				}
 			}
 		}
 
