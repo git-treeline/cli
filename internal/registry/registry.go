@@ -181,6 +181,19 @@ func (r *Registry) ReleaseMany(worktreePaths []string) (int, error) {
 	return count, err
 }
 
+// UpdateField sets a single field on the allocation matching worktreePath.
+func (r *Registry) UpdateField(worktreePath, key, value string) error {
+	resolved := resolvePath(worktreePath)
+	return r.withLock(func(data *RegistryData) {
+		for _, a := range data.Allocations {
+			if resolvePath(getString(a, "worktree")) == resolved {
+				a[key] = value
+				return
+			}
+		}
+	})
+}
+
 func (r *Registry) Prune() (int, error) {
 	count := 0
 	err := r.withLock(func(data *RegistryData) {

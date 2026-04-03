@@ -235,7 +235,7 @@ editor:
 		}
 	}
 
-	alloc := &allocator.Allocation{Port: 3010}
+	alloc := &allocator.Allocation{Port: 3010, Branch: "feature-x"}
 	s.configureEditor(alloc)
 
 	data, err := os.ReadFile(filepath.Join(worktree, ".vscode", "settings.json"))
@@ -265,7 +265,7 @@ func TestConfigureEditor_SkipsWhenNoConfig(t *testing.T) {
 project: test
 `)
 
-	alloc := &allocator.Allocation{Port: 3010}
+	alloc := &allocator.Allocation{Port: 3010, Branch: "main"}
 	s.configureEditor(alloc)
 
 	if _, err := os.Stat(filepath.Join(worktree, ".vscode")); err == nil {

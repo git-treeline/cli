@@ -88,7 +88,7 @@ func runPruneMerged() error {
 	for _, a := range matches {
 		fa := format.Allocation(a)
 		port := format.PortDisplay(fa)
-		name := format.GetStr(fa, "worktree_name")
+		name := format.DisplayName(fa)
 		project := format.GetStr(fa, "project")
 		db := format.GetStr(fa, "database")
 		line := fmt.Sprintf("  %s:%s  %s", project, name, port)

@@ -71,6 +71,8 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	alloc.Branch = s.detectBranch()
 	redisURL := s.Allocator.BuildRedisURL(alloc)
 
 	if s.Options.DryRun {
@@ -78,6 +80,9 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	}
 
 	if alloc.Reused {
+		if alloc.Branch != "" {
+			_ = s.Registry.UpdateField(s.WorktreePath, "branch", alloc.Branch)
+		}
 		s.log("Reusing existing allocation for '%s'", worktreeName)
 	} else if len(alloc.Ports) > 1 {
 		s.log("Allocating ports %s for '%s'", format.JoinInts(alloc.Ports, ", "), worktreeName)
@@ -314,15 +319,10 @@ func (s *Setup) configureEditor(alloc *allocator.Allocation) {
 		return
 	}
 
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = s.WorktreePath
-	out, _ := cmd.Output()
-	branch := strings.TrimSpace(string(out))
-
 	title := strings.NewReplacer(
 		"{project}", s.ProjectConfig.Project(),
 		"{port}", fmt.Sprintf("%d", alloc.Port),
-		"{branch}", branch,
+		"{branch}", alloc.Branch,
 	).Replace(titleTemplate)
 
 	vscodeDir := filepath.Join(s.WorktreePath, ".vscode")
@@ -331,6 +331,16 @@ func (s *Setup) configureEditor(alloc *allocator.Allocation) {
 	data, _ := json.MarshalIndent(settings, "", "  ")
 	_ = os.WriteFile(filepath.Join(vscodeDir, "settings.json"), append(data, '\n'), 0o644)
 	s.log(".vscode/settings.json written")
+}
+
+func (s *Setup) detectBranch() string {
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = s.WorktreePath
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func (s *Setup) log(format string, args ...any) {

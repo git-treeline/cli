@@ -52,6 +52,15 @@ func GetStr(a Allocation, key string) string {
 	return ""
 }
 
+// DisplayName returns the best human-readable label for an allocation.
+// Prefers branch (if set), falls back to worktree_name.
+func DisplayName(a Allocation) string {
+	if b := GetStr(a, "branch"); b != "" {
+		return b
+	}
+	return GetStr(a, "worktree_name")
+}
+
 // PortDisplay returns a formatted port string like ":3000" or empty if no ports.
 func PortDisplay(a Allocation) string {
 	ports := GetPorts(a)

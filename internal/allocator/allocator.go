@@ -32,6 +32,7 @@ type Allocation struct {
 	Project         string
 	Worktree        string
 	WorktreeName    string
+	Branch          string
 	Port            int
 	Ports           []int
 	Database        string
@@ -46,6 +47,7 @@ func (a *Allocation) ToRegistryEntry() registry.Allocation {
 		"project":          a.Project,
 		"worktree":         a.Worktree,
 		"worktree_name":    a.WorktreeName,
+		"branch":           a.Branch,
 		"port":             a.Port,
 		"ports":            intsToAny(a.Ports),
 		"database":         a.Database,
@@ -119,6 +121,7 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string) *Allocatio
 		Project:         getString(entry, "project"),
 		Worktree:        worktreePath,
 		WorktreeName:    worktreeName,
+		Branch:          getString(entry, "branch"),
 		Port:            ports[0],
 		Ports:           ports,
 		Database:        getString(entry, "database"),

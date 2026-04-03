@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/git-treeline/git-treeline/internal/allocator"
@@ -64,12 +67,45 @@ func runStatusWatch() error {
 	}
 }
 
+func syncBranches(reg *registry.Registry, allocs []registry.Allocation) {
+	var wg sync.WaitGroup
+	for i := range allocs {
+		a := allocs[i]
+		wt, _ := a["worktree"].(string)
+		if wt == "" {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+			cmd.Dir = wt
+			out, err := cmd.Output()
+			if err != nil {
+				return
+			}
+			branch := strings.TrimSpace(string(out))
+			if branch == "" || branch == "HEAD" {
+				return
+			}
+			old, _ := a["branch"].(string)
+			if branch != old {
+				a["branch"] = branch
+				_ = reg.UpdateField(wt, "branch", branch)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
 func renderStatus() error {
 	reg := registry.New("")
 	allocs := reg.Allocations()
 	if statusProject != "" {
 		allocs = reg.FindByProject(statusProject)
 	}
+
+	syncBranches(reg, allocs)
 
 	if statusCheck {
 		for _, a := range allocs {
@@ -111,7 +147,7 @@ func renderStatus() error {
 			ports := format.GetPorts(fa)
 			portLabel := format.JoinInts(ports, ",")
 
-			name := format.GetStr(fa, "worktree_name")
+			name := format.DisplayName(fa)
 			db := format.GetStr(fa, "database")
 
 			redis := ""

@@ -217,6 +217,7 @@ func TestToRegistryEntry_Format(t *testing.T) {
 		Project:      "salt",
 		Worktree:     "/wt/branch",
 		WorktreeName: "branch",
+		Branch:       "feature-auth",
 		Port:         3010,
 		Ports:        []int{3010, 3011},
 		Database:     "salt_dev_branch",
@@ -230,6 +231,9 @@ func TestToRegistryEntry_Format(t *testing.T) {
 
 	if parsed["project"] != "salt" {
 		t.Errorf("expected salt, got %v", parsed["project"])
+	}
+	if parsed["branch"] != "feature-auth" {
+		t.Errorf("expected feature-auth, got %v", parsed["branch"])
 	}
 	if ports, ok := parsed["ports"].([]any); ok {
 		if len(ports) != 2 {

@@ -193,6 +193,37 @@ func TestRegistry_ReleaseMany(t *testing.T) {
 	}
 }
 
+func TestRegistry_UpdateField(t *testing.T) {
+	reg := newTestRegistry(t)
+	_ = reg.Allocate(Allocation{"worktree": "/wt/a", "branch": "old-branch"})
+
+	if err := reg.UpdateField("/wt/a", "branch", "new-branch"); err != nil {
+		t.Fatal(err)
+	}
+
+	found := reg.Find("/wt/a")
+	if found == nil {
+		t.Fatal("expected allocation")
+	}
+	if getString(found, "branch") != "new-branch" {
+		t.Errorf("expected new-branch, got %v", found["branch"])
+	}
+}
+
+func TestRegistry_UpdateField_NoMatch(t *testing.T) {
+	reg := newTestRegistry(t)
+	_ = reg.Allocate(Allocation{"worktree": "/wt/a", "branch": "main"})
+
+	if err := reg.UpdateField("/wt/nonexistent", "branch", "other"); err != nil {
+		t.Fatal(err)
+	}
+
+	found := reg.Find("/wt/a")
+	if getString(found, "branch") != "main" {
+		t.Errorf("expected main unchanged, got %v", found["branch"])
+	}
+}
+
 func TestRegistry_ReleaseMany_Empty(t *testing.T) {
 	reg := newTestRegistry(t)
 	_ = reg.Allocate(Allocation{"worktree": "/wt/a"})

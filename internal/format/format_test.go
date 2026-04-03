@@ -62,6 +62,27 @@ func TestGetStr(t *testing.T) {
 	}
 }
 
+func TestDisplayName_PrefersBranch(t *testing.T) {
+	a := Allocation{"branch": "feature-auth", "worktree_name": "abc123"}
+	if got := DisplayName(a); got != "feature-auth" {
+		t.Errorf("DisplayName = %q, want %q", got, "feature-auth")
+	}
+}
+
+func TestDisplayName_FallsBackToWorktreeName(t *testing.T) {
+	a := Allocation{"worktree_name": "my-worktree"}
+	if got := DisplayName(a); got != "my-worktree" {
+		t.Errorf("DisplayName = %q, want %q", got, "my-worktree")
+	}
+}
+
+func TestDisplayName_EmptyBranchFallsBack(t *testing.T) {
+	a := Allocation{"branch": "", "worktree_name": "dir-name"}
+	if got := DisplayName(a); got != "dir-name" {
+		t.Errorf("DisplayName = %q, want %q", got, "dir-name")
+	}
+}
+
 func TestPortDisplay(t *testing.T) {
 	tests := []struct {
 		name string

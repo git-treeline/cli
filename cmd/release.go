@@ -129,7 +129,7 @@ func runReleaseBatch(project string, all bool) error {
 	for _, a := range allocs {
 		fa := format.Allocation(a)
 		ports := format.GetPorts(fa)
-		name := format.GetStr(fa, "worktree_name")
+		name := format.DisplayName(fa)
 		db := format.GetStr(fa, "database")
 		proj := format.GetStr(fa, "project")
 
