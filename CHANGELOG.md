@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+## [0.5.2] - 2026-04-03
+
+- Fix: main worktree allocation now scans for free ports instead of blindly assigning base ports
+
 ## [0.5.1] - 2026-03-31
 
 - Fix: root repo setup now uses base port and template database directly instead of treating it as a worktree
