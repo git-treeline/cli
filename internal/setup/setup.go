@@ -65,6 +65,10 @@ func New(worktreePath string, mainRepo string, uc *config.UserConfig) *Setup {
 }
 
 func (s *Setup) Run() (*allocator.Allocation, error) {
+	if pruned, err := s.Registry.Prune(); err == nil && pruned > 0 {
+		s.log("Reclaimed %d stale allocation(s)", pruned)
+	}
+
 	worktreeName := filepath.Base(s.WorktreePath)
 	isMain := s.WorktreePath == s.MainRepo
 	branch := s.detectBranch()
@@ -318,67 +322,81 @@ func (s *Setup) runSetupCommands() error {
 }
 
 func (s *Setup) configureEditor(alloc *allocator.Allocation) {
-	editorCfg := s.ProjectConfig.Editor()
+	results := ConfigureEditor(s.WorktreePath, s.ProjectConfig, s.UserConfig, alloc.Port, alloc.Branch)
+	for _, r := range results {
+		if r.Err != nil {
+			_, _ = fmt.Fprintf(s.Log, "warning: %s: %v\n", r.Label, r.Err)
+		} else if r.Path != "" {
+			s.log("%s written to %s", r.Label, filepath.Base(r.Path))
+		}
+	}
+}
+
+// EditorResult captures the outcome of writing to one editor target.
+type EditorResult struct {
+	Label string
+	Path  string
+	Err   error
+}
+
+// ConfigureEditor resolves editor settings from project/user config and writes
+// to all detected editor targets. Extracted so both gtl setup and gtl editor refresh
+// can share the same logic.
+func ConfigureEditor(worktreePath string, pc *config.ProjectConfig, uc *config.UserConfig, port int, branch string) []EditorResult {
+	editorCfg := pc.Editor()
 	if editorCfg == nil {
-		return
+		return nil
 	}
 
-	project := s.ProjectConfig.Project()
+	project := pc.Project()
 	replacer := strings.NewReplacer(
 		"{project}", project,
-		"{port}", fmt.Sprintf("%d", alloc.Port),
-		"{branch}", alloc.Branch,
+		"{port}", fmt.Sprintf("%d", port),
+		"{branch}", branch,
 	)
 
-	// Resolve title
 	title := ""
 	if t := editorCfg["title"]; t != "" {
 		title = replacer.Replace(t)
 	}
 
-	// Resolve color: "auto" = deterministic from branch, explicit hex, or user override
 	color := ""
 	if c := editorCfg["color"]; c != "" {
 		if c == "auto" {
-			color = editor.ColorForBranch(alloc.Branch)
+			color = editor.ColorForBranch(branch)
 		} else {
 			color = c
 		}
 	}
-	if uc := s.UserConfig.EditorColor(project, alloc.Branch); uc != "" {
+	if uc := uc.EditorColor(project, branch); uc != "" {
 		color = uc
 	}
 
-	// Resolve theme: project config, then user override
 	theme := editorCfg["theme"]
-	if ut := s.UserConfig.EditorTheme(project, alloc.Branch); ut != "" {
+	if ut := uc.EditorTheme(project, branch); ut != "" {
 		theme = ut
 	}
 
 	if title == "" && color == "" && theme == "" {
-		return
+		return nil
 	}
 
-	// VS Code / Cursor
+	var results []EditorResult
+
 	vsSettings := editor.VSCodeSettings{
 		Title: title,
 		Color: color,
 		Theme: theme,
 	}
-	if target, err := editor.WriteVSCode(s.WorktreePath, vsSettings); err != nil {
-		_, _ = fmt.Fprintf(s.Log, "warning: editor settings: %v\n", err)
-	} else if target != "" {
-		s.log("Editor settings written to %s", filepath.Base(target))
+	target, err := editor.WriteVSCode(worktreePath, vsSettings)
+	results = append(results, EditorResult{Label: "Editor settings", Path: target, Err: err})
+
+	if color != "" && editor.DetectJetBrains(worktreePath) {
+		target, err := editor.WriteJetBrains(worktreePath, color)
+		results = append(results, EditorResult{Label: "JetBrains project color", Path: target, Err: err})
 	}
 
-	// JetBrains (color only, if .idea exists)
-	if color != "" && editor.DetectJetBrains(s.WorktreePath) {
-		if target, err := editor.WriteJetBrains(s.WorktreePath, color); err != nil {
-			_, _ = fmt.Fprintf(s.Log, "warning: JetBrains color: %v\n", err)
-		} else if target != "" {
-			s.log("JetBrains project color set in %s", filepath.Base(target))
-		}
-	}
+	return results
 }
 
 func (s *Setup) detectBranch() string {

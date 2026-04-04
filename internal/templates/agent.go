@@ -62,6 +62,7 @@ func buildAgentContent(project string, det *detect.Result) string {
 	var b strings.Builder
 	b.WriteString("This project uses git-treeline for port and resource allocation.\n")
 	b.WriteString("**Do not assume port 3000.** Ports are dynamically allocated per worktree.\n\n")
+	b.WriteString("- After creating a worktree, run `gtl setup .` to allocate ports and configure the environment.\n")
 	b.WriteString("- Get the allocated port: `gtl port`\n")
 	b.WriteString("- Full allocation details: `gtl status --json`\n")
 	b.WriteString("- Check if services are running: `gtl status --check`\n")
@@ -88,11 +89,6 @@ func buildAgentContent(project string, det *detect.Result) string {
 	}
 
 	return b.String()
-}
-
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
 }
 
 func fileExists(path string) bool {

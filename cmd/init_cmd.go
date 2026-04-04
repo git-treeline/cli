@@ -122,6 +122,15 @@ var initCmd = &cobra.Command{
 			}
 		}
 
+		if confirm.Prompt("==> Install Git post-checkout hook for automatic worktree setup?", false, nil) {
+			hookPath, err := templates.InstallPostCheckoutHook(cwd)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to install hook: %s\n", err)
+			} else if hookPath != "" {
+				fmt.Printf("==> Post-checkout hook installed at %s\n", hookPath)
+			}
+		}
+
 		openInEditor(path)
 		return nil
 	},
