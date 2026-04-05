@@ -72,9 +72,16 @@ func TestInsertPfRules_NoExistingRdrAnchor(t *testing.T) {
 
 func TestInsertPfRules_MarkerPresent(t *testing.T) {
 	result := insertPfRules(samplePfConf)
-	count := strings.Count(result, pfMarker)
+	count := strings.Count(result, pfMarker())
 	if count != 2 {
 		t.Errorf("expected 2 marker comments (rdr-anchor + load anchor), got %d", count)
+	}
+}
+
+func TestInsertPfRules_TrailingNewline(t *testing.T) {
+	result := insertPfRules(samplePfConf)
+	if !strings.HasSuffix(result, "\n") {
+		t.Error("pf.conf must end with a newline — pfctl will reject it otherwise")
 	}
 }
 

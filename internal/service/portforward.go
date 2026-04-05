@@ -6,15 +6,20 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+
+	"github.com/git-treeline/git-treeline/internal/platform"
 )
 
 const (
-	pfAnchorName = "dev.treeline.router"
-	pfAnchorPath = "/etc/pf.anchors/dev.treeline.router"
-	pfConfPath   = "/etc/pf.conf"
-	pfBackupPath = "/etc/pf.conf.bak.treeline"
-	pfMarker     = "# git-treeline"
+	basePfAnchorName = "dev.treeline.router"
+	pfConfPath       = "/etc/pf.conf"
+	pfBackupPath     = "/etc/pf.conf.bak.treeline"
+	basePfMarker     = "# git-treeline"
 )
+
+func pfAnchorName() string { return basePfAnchorName + platform.DevSuffix() }
+func pfAnchorPath() string { return "/etc/pf.anchors/" + pfAnchorName() }
+func pfMarker() string     { return basePfMarker + platform.DevSuffix() }
 
 // InstallPortForward sets up an OS-level redirect from port 443 to the
 // router port so users can access worktrees at https://{branch}.localhost
@@ -50,7 +55,7 @@ func IsPortForwardConfigured() bool {
 		if err != nil {
 			return false
 		}
-		return strings.Contains(string(data), pfMarker)
+		return strings.Contains(string(data), pfMarker())
 	case "linux":
 		return isLinuxPortForwardConfigured()
 	default:
@@ -75,9 +80,9 @@ func installDarwinPortForward(routerPort int) error {
 		return fmt.Errorf("could not read %s: %w", pfConfPath, err)
 	}
 
-	if strings.Contains(string(pfConf), pfMarker) {
+	if strings.Contains(string(pfConf), pfMarker()) {
 		fmt.Println("  Port forwarding already configured (443 → router).")
-		return nil
+		return reloadPf()
 	}
 
 	anchorContent := fmt.Sprintf(
@@ -110,7 +115,7 @@ func installDarwinPortForward(routerPort int) error {
 	script := fmt.Sprintf(
 		"cp '%s' '%s' && mkdir -p /etc/pf.anchors && cp '%s' '%s' && cp '%s' '%s' && pfctl -ef '%s' 2>/dev/null; true",
 		pfConfPath, pfBackupPath,
-		tmpAnchor.Name(), pfAnchorPath,
+		tmpAnchor.Name(), pfAnchorPath(),
 		tmpPfConf.Name(), pfConfPath,
 		pfConfPath,
 	)
@@ -129,16 +134,32 @@ func installDarwinPortForward(routerPort int) error {
 	return nil
 }
 
+// reloadPf ensures the kernel's pf rules match /etc/pf.conf. The config
+// file can have rules that the kernel doesn't — e.g. after a failed
+// uninstall or if pfctl was never invoked after writing.
+func reloadPf() error {
+	cmd := exec.Command("sudo", "-p",
+		"\nEnter your password to reload port forwarding: ",
+		"pfctl", "-ef", pfConfPath)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("pfctl reload failed: %w", err)
+	}
+	return nil
+}
+
 func uninstallDarwinPortForward() error {
 	data, err := os.ReadFile(pfConfPath)
-	if err != nil || !strings.Contains(string(data), pfMarker) {
+	if err != nil || !strings.Contains(string(data), pfMarker()) {
 		return nil
 	}
 
 	lines := strings.Split(string(data), "\n")
 	var filtered []string
 	for _, line := range lines {
-		if !strings.Contains(line, pfMarker) {
+		if !strings.Contains(line, pfMarker()) {
 			filtered = append(filtered, line)
 		}
 	}
@@ -157,7 +178,7 @@ func uninstallDarwinPortForward() error {
 	script := fmt.Sprintf(
 		"cp '%s' '%s' && rm -f '%s' && pfctl -f '%s' 2>/dev/null; true",
 		tmpPfConf.Name(), pfConfPath,
-		pfAnchorPath,
+		pfAnchorPath(),
 		pfConfPath,
 	)
 
@@ -175,8 +196,8 @@ func uninstallDarwinPortForward() error {
 // existing rules.
 func insertPfRules(pfConf string) string {
 	lines := strings.Split(pfConf, "\n")
-	rdrLine := fmt.Sprintf(`rdr-anchor "%s" %s`, pfAnchorName, pfMarker)
-	loadLine := fmt.Sprintf(`load anchor "%s" from "%s" %s`, pfAnchorName, pfAnchorPath, pfMarker)
+	rdrLine := fmt.Sprintf(`rdr-anchor "%s" %s`, pfAnchorName(), pfMarker())
+	loadLine := fmt.Sprintf(`load anchor "%s" from "%s" %s`, pfAnchorName(), pfAnchorPath(), pfMarker())
 
 	lastRdrAnchor := -1
 	for i, line := range lines {
@@ -198,7 +219,11 @@ func insertPfRules(pfConf string) string {
 	}
 
 	result = append(result, loadLine)
-	return strings.Join(result, "\n")
+	out := strings.Join(result, "\n")
+	if !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	return out
 }
 
 // --- Linux (iptables) ---

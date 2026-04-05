@@ -112,20 +112,50 @@ func (uc *UserConfig) RouterPort() int {
 	return 3001
 }
 
-// TunnelDomain returns the BYO domain for named tunnels (e.g. "myteam.dev").
-func (uc *UserConfig) TunnelDomain() string {
-	if v, ok := Dig(uc.Data, "tunnel", "domain").(string); ok {
+// TunnelDefault returns the name of the default tunnel config, or "".
+func (uc *UserConfig) TunnelDefault() string {
+	if v, ok := Dig(uc.Data, "tunnel", "default").(string); ok {
 		return v
 	}
 	return ""
 }
 
-// TunnelName returns the cloudflared tunnel name (e.g. "gtl").
-func (uc *UserConfig) TunnelName() string {
-	if v, ok := Dig(uc.Data, "tunnel", "name").(string); ok {
+// TunnelName resolves a tunnel name: returns override if non-empty, else the
+// configured default. Used by cmd/tunnel and cmd/share to support --tunnel.
+func (uc *UserConfig) TunnelName(override string) string {
+	if override != "" {
+		return override
+	}
+	return uc.TunnelDefault()
+}
+
+// TunnelDomain returns the domain for a tunnel. If override is non-empty it
+// selects that tunnel config; otherwise the default is used.
+func (uc *UserConfig) TunnelDomain(override string) string {
+	name := uc.TunnelName(override)
+	if name == "" {
+		return ""
+	}
+	if v, ok := Dig(uc.Data, "tunnel", "tunnels", name, "domain").(string); ok {
 		return v
 	}
 	return ""
+}
+
+// TunnelConfigs returns all configured tunnels as a map of name → domain.
+func (uc *UserConfig) TunnelConfigs() map[string]string {
+	raw, ok := Dig(uc.Data, "tunnel", "tunnels").(map[string]any)
+	if !ok {
+		return nil
+	}
+	result := make(map[string]string, len(raw))
+	for name, v := range raw {
+		if entry, ok := v.(map[string]any); ok {
+			domain, _ := entry["domain"].(string)
+			result[name] = domain
+		}
+	}
+	return result
 }
 
 // EditorName returns the stored editor name (e.g. "cursor", "vscode"), or empty.
@@ -226,7 +256,36 @@ func (uc *UserConfig) load() map[string]any {
 		return copyMap(UserDefaults)
 	}
 
-	return DeepMerge(UserDefaults, userData)
+	merged := DeepMerge(UserDefaults, userData)
+	migrateTunnelConfig(merged)
+	return merged
+}
+
+// migrateTunnelConfig converts the legacy flat tunnel config
+// (tunnel.name + tunnel.domain) to the multi-tunnel format
+// (tunnel.default + tunnel.tunnels map). No-op if already migrated.
+func migrateTunnelConfig(data map[string]any) {
+	tunnelData, ok := data["tunnel"].(map[string]any)
+	if !ok {
+		return
+	}
+	if _, hasTunnels := tunnelData["tunnels"]; hasTunnels {
+		return
+	}
+	name, hasName := tunnelData["name"].(string)
+	if !hasName || name == "" {
+		return
+	}
+	domain, _ := tunnelData["domain"].(string)
+
+	entry := map[string]any{}
+	if domain != "" {
+		entry["domain"] = domain
+	}
+	tunnelData["tunnels"] = map[string]any{name: entry}
+	tunnelData["default"] = name
+	delete(tunnelData, "name")
+	delete(tunnelData, "domain")
 }
 
 func splitDotted(key string) []string {

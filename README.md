@@ -93,6 +93,13 @@ gtl restart    # bounces the server in one step — logs keep flowing
 
 The supervisor communicates over a Unix socket. No background processes, no log files, no PID management. Your terminal owns the process; the socket is just a remote control.
 
+For agents and scripts that need to wait for the server:
+
+```bash
+gtl start --await                  # block until TCP-ready, then exit 0
+gtl start --await --await-timeout 120   # custom timeout (default 60s)
+```
+
 Your app starts on 3010. The main copy runs on 3000. No collisions. Some frameworks (Rails, Express) read `PORT` from the env file automatically; others (Next.js) need their dev script wired up — `gtl init` prints framework-specific guidance.
 
 ### 4. Access worktrees by name instead of port
@@ -136,7 +143,32 @@ Quick tunnels give you a random `*.trycloudflare.com` URL — good for one-off t
 
 Requires [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/). `gtl tunnel setup` walks you through authentication, tunnel creation, and DNS configuration interactively.
 
-### 5. Switch branches in a worktree
+#### `gtl share` — private branch sharing
+
+```bash
+gtl share               # share current worktree's port (Cloudflare)
+gtl share 3050          # share a specific port
+gtl share --tailscale   # share via Tailscale Serve (tailnet-only)
+```
+
+Creates a private URL for your dev server. Two backends:
+
+**Cloudflare (default):** Token-gated reverse proxy over a Cloudflare tunnel. The recipient opens the link, gets a session cookie, and sees clean URLs from there — no accounts, no installs. Uses your domain when a named tunnel is configured; falls back to `*.trycloudflare.com` otherwise. Use `--tunnel <name>` to pick a specific tunnel config.
+
+**Tailscale (`--tailscale`):** Exposes the port on your tailnet via `tailscale serve`. No tokens needed — Tailscale handles identity-based auth with WireGuard encryption. Only people on your tailnet can reach the URL. Requires Tailscale installed and running.
+
+Tokens (Cloudflare mode) rotate on every invocation. Both backends clean up on Ctrl+C. Unlike `gtl tunnel`, share URLs are not guessable from branch names. Use `share` to send a link to a teammate; use `tunnel` for stable webhook/OAuth URLs.
+
+### 5. Clone and set up a new project
+
+```bash
+gtl clone git@github.com:org/repo.git
+gtl clone git@github.com:org/repo.git -- --depth 1
+```
+
+Clones the repo, auto-detects the framework, generates `.treeline.yml` if absent, and runs `gtl setup`. All flags after the URL are passed through to `git clone`. Does not auto-start the server — cloning a foreign repo and running arbitrary shell commands is a trust boundary.
+
+### 6. Switch branches in a worktree
 
 ```bash
 gtl switch feature-payments
@@ -146,7 +178,7 @@ gtl switch 42 --setup          # re-run setup commands after switching
 
 Fetches from origin, checks out the branch, updates the registry, and refreshes the env file. Like `git switch` but Treeline-aware — handles fetch, env refresh, and PR lookup in one step.
 
-### 6. Review a pull request
+### 7. Review a pull request
 
 ```bash
 gtl review 42 --start
@@ -156,7 +188,15 @@ Fetches the PR branch via `gh`, creates a worktree, allocates resources, runs se
 
 `review` and `new` must be run from the main repo, not from inside a worktree. If you're in a worktree and want to change branches, use `gtl switch`.
 
-### 7. Check project health
+### 8. Open a worktree in the browser
+
+```bash
+gtl open
+```
+
+Opens the current worktree in your default browser. Prefers `https://{project}-{branch}.localhost` when `gtl serve` is running; falls back to `http://localhost:{port}`.
+
+### 9. Check project health
 
 ```bash
 gtl doctor
@@ -164,7 +204,7 @@ gtl doctor
 
 Checks config, allocation, runtime, and diagnostics in one view — whether `.treeline.yml` exists, env file is on disk, ports are allocated and listening, supervisor is running, and framework-specific guidance.
 
-### 8. Check what's allocated
+### 10. Check what's allocated
 
 ```bash
 gtl status
@@ -181,7 +221,17 @@ api-service:
 
 Use `--check` to probe ports and show which services are running. Use `--watch` for a live-updating dashboard.
 
-### 9. Release when done
+### 11. Inspect the environment
+
+```bash
+gtl env                   # print env file, annotate Treeline-managed keys
+gtl env --json            # structured output for agents
+gtl env --template        # show unresolved interpolation tokens
+```
+
+Prints the current worktree's env file contents. Keys that Treeline manages (defined in the `env:` block of `.treeline.yml`) are annotated with `[treeline]`. Use `--template` to see the raw tokens before interpolation.
+
+### 12. Release when done
 
 ```bash
 gtl release ../myapp-feature-auth --drop-db
@@ -190,7 +240,7 @@ git worktree remove ../myapp-feature-auth
 
 For bulk cleanup: `gtl release --project myapp --drop-db` or `gtl release --all --drop-db`.
 
-### 10. Refresh after config changes
+### 13. Refresh after config changes
 
 ```bash
 gtl refresh --dry-run    # preview what would change
@@ -199,7 +249,7 @@ gtl refresh              # apply changes, restart supervised servers
 
 After adding or changing port reservations (or `port_count`), `gtl refresh` walks every allocation and re-resolves ports. Supervised servers (`gtl start`) are restarted automatically. Servers you started manually are flagged so you know which ones to bounce.
 
-### 11. Prune stale allocations
+### 14. Prune stale allocations
 
 ```bash
 gtl prune --stale
@@ -208,7 +258,7 @@ gtl prune --merged --drop-db
 
 `--stale` removes allocations for worktrees that no longer exist on disk. `--merged` targets branches already merged into the merge target branch. Treeline auto-detects the merge target via git (works with any remote host), but you can set `merge_target` in `.treeline.yml` if your repo uses something other than `main`/`master` (e.g. `develop`, `staging`).
 
-### 12. Manage worktree databases
+### 15. Manage worktree databases
 
 ```bash
 gtl db name                          # print the worktree's database name
@@ -222,7 +272,40 @@ gtl db drop                          # just drop the database
 
 `db restore` auto-detects the dump format (pg_dump custom format vs plain SQL) and uses `pg_restore` or `psql` accordingly.
 
-### 13. Manage user config
+### 16. Resolve cross-worktree services
+
+```bash
+gtl resolve api                  # URL for api project on same branch
+gtl resolve api staging          # URL for api project on staging branch
+gtl resolve api --json           # structured output
+```
+
+Looks up another project's allocated URL from the registry. Uses same-branch matching by default — if your frontend and API repos both have `feature-auth` checked out, `gtl resolve api` returns the API's URL without any configuration.
+
+#### Runtime linking
+
+```bash
+gtl link api staging             # override: resolve api → staging branch
+gtl link api staging --restart   # override + bounce the supervised server
+gtl link                         # list active links
+gtl unlink api                   # revert to same-branch default
+```
+
+Links are stored in the registry and survive restarts, refresh, and re-setup. They're visible in `gtl status` and `gtl doctor`. Use links when you want your frontend worktree to talk to a specific API branch regardless of branch naming.
+
+#### Env template integration
+
+Use `{resolve:project}` in your `.treeline.yml` env block:
+
+```yaml
+env:
+  API_URL: "{resolve:api}"
+  AUTH_URL: "{resolve:auth/main}"
+```
+
+Tokens are resolved at setup time. `{resolve:api}` checks link overrides first, then falls back to same-branch matching. `{resolve:api/main}` always resolves to the `main` branch.
+
+### 17. Manage user config
 
 ```bash
 gtl config list                      # dump all settings
@@ -232,7 +315,7 @@ gtl config path                      # print the config file location
 gtl config edit                      # open in $EDITOR
 ```
 
-### 14. AI agent integration (MCP)
+### 18. AI agent integration (MCP)
 
 git-treeline speaks [MCP](https://modelcontextprotocol.io/) natively. Add this to your editor config and agents automatically get access to your worktree allocations, ports, databases, and dev server controls.
 
@@ -441,8 +524,10 @@ Controls allocation policy for your machine. Created automatically by `gtl init`
     "port": 3001
   },
   "tunnel": {
-    "name": "gtl",
-    "domain": "myteam.dev"
+    "default": "gtl",
+    "tunnels": {
+      "gtl": { "domain": "myteam.dev" }
+    }
   },
   "editor": {
     "name": "cursor",
@@ -454,7 +539,7 @@ Controls allocation policy for your machine. Created automatically by `gtl init`
 
 **Router config:** `router.port` sets the port the subdomain router listens on (default 3001). Port 443 is forwarded here by `gtl serve install`.
 
-**Tunnel config:** `tunnel.name` and `tunnel.domain` are set by `gtl tunnel setup`. Once configured, `gtl tunnel` automatically creates named tunnel URLs like `https://salt-staff-reporting.myteam.dev`.
+**Tunnel config:** `tunnel.tunnels` stores named tunnel configurations, each with a domain. `tunnel.default` selects which tunnel is used when no `--tunnel` flag is passed. Run `gtl tunnel setup` to add tunnels interactively. Use `gtl tunnel default <name>` to switch the default. Old configs (`tunnel.name`/`tunnel.domain`) are auto-migrated on first load.
 
 **Editor detection:** `gtl init` auto-detects your editor (Cursor, VS Code, Zed, JetBrains) and stores `editor.name`. The menulet uses this for "Open in Editor" labels. If detection fails, no name is stored — override manually with `gtl config set editor.name cursor`. The `themes` and `colors` maps are per-project or per-branch overrides for the `editor.theme` and `editor.color` settings in `.treeline.yml`.
 
@@ -499,6 +584,10 @@ See [Framework examples](#framework-examples) for complete examples. Available f
 | `editor.title` | Window title template — `{project}`, `{port}`, `{branch}` tokens (VS Code, Cursor) |
 | `editor.color` | Title/status bar color — `"auto"` (deterministic from branch), or hex like `"#1a5276"` |
 | `editor.theme` | Full IDE theme override (e.g. `"Monokai"`, `"GitHub Dark"`) |
+| `hooks.pre_setup` | Commands run before `commands.setup` — abort setup on failure |
+| `hooks.post_setup` | Commands run after all setup — warn on failure |
+| `hooks.pre_release` | Commands run before resource release — abort release on failure |
+| `hooks.post_release` | Commands run after resource release — warn on failure |
 
 ### Interpolation tokens
 
@@ -513,6 +602,8 @@ Available in `env` values:
 | `{redis_prefix}` | Redis key prefix (if using prefixed strategy) |
 | `{project}` | Project name |
 | `{worktree}` | Worktree name |
+| `{resolve:project}` | URL of another project's allocation (same-branch default, checks link overrides) |
+| `{resolve:project/branch}` | URL of another project's allocation on a specific branch |
 
 ## Database cloning (optional)
 
@@ -602,17 +693,26 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl doctor` | `--json` | Check config, allocation, runtime, and diagnostics |
 | `gtl status` | `--project` `--json` `--check` `--watch` `--interval` | Show allocations across projects |
 | `gtl prune` | `--stale` `--merged` `--drop-db` `--force` | Remove orphaned allocations |
-| `gtl start` | | Run `commands.start` under supervisor (or resume a stopped server) |
+| `gtl start` | `--await` `--await-timeout` | Run `commands.start` under supervisor (or resume). `--await` blocks until TCP-ready. |
 | `gtl stop` | | Stop the server process (supervisor stays alive) |
 | `gtl restart` | | Restart the server process in the original terminal |
+| `gtl open` | | Open current worktree in browser (prefers serve HTTPS URL) |
+| `gtl clone <url>` | (passthrough to git) | Clone + detect framework + init + setup in one step |
+| `gtl env` | `--json` `--template` | Print env file with Treeline-managed key annotations |
+| `gtl resolve <project> [branch]` | `--json` | Look up another project's allocated URL |
+| `gtl link <project> <branch>` | `--restart` `--json` | Override resolve target for a project |
+| `gtl unlink <project>` | | Revert resolve override to same-branch default |
+| `gtl completion <shell>` | | Output shell completion script (bash, zsh, fish, powershell) |
 | `gtl serve` | | Local HTTPS subdomain router (`https://{branch}.localhost`) |
 | `gtl serve install` | | One-time setup: CA trust, port forwarding, background service |
 | `gtl serve status` | | Show router routes and service health |
 | `gtl serve uninstall` | | Remove CA trust, port forwarding, and service |
 | `gtl proxy <port> [target]` | `--tls` | Forward traffic from a stable port to a worktree port |
-| `gtl tunnel [port]` | `--domain` | Expose a local port via Cloudflare tunnel (quick or named) |
+| `gtl tunnel [port]` | `--domain` `--tunnel` | Expose a local port via Cloudflare tunnel (quick or named) |
 | `gtl tunnel setup` | | Interactive setup for named tunnels with BYO domain |
-| `gtl tunnel status` | | Show tunnel configuration and readiness |
+| `gtl tunnel status` | | Show all tunnel configurations and readiness |
+| `gtl tunnel default [name]` | | Get or set the default tunnel configuration |
+| `gtl share [port]` | `--tunnel` `--tailscale` | Private share URL (Cloudflare token-gated or Tailscale tailnet) |
 | `gtl config` | | Show or initialize user-level config |
 | `gtl db` | `name` `reset` `restore` `drop` — `name --json` | Manage worktree databases |
 | `gtl mcp` | | MCP server for AI agents (started automatically by your editor) |

@@ -197,6 +197,236 @@ func TestUserConfig_EditorName_DoesNotClobberOtherEditorSettings(t *testing.T) {
 	}
 }
 
+func TestUserConfig_PortReservations_Empty(t *testing.T) {
+	uc := LoadUserConfig("/nonexistent/config.json")
+	if r := uc.PortReservations(); r != nil {
+		t.Errorf("expected nil, got %v", r)
+	}
+}
+
+func TestUserConfig_PortReservations_Valid(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"port":{"base":3000,"increment":10,"reservations":{"myapp":4000,"other":5000}}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	r := uc.PortReservations()
+	if r == nil {
+		t.Fatal("expected non-nil reservations")
+	}
+	if r["myapp"] != 4000 {
+		t.Errorf("expected myapp=4000, got %d", r["myapp"])
+	}
+	if r["other"] != 5000 {
+		t.Errorf("expected other=5000, got %d", r["other"])
+	}
+}
+
+func TestUserConfig_PortReservations_SkipsNonFloat(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"port":{"reservations":{"a":4000,"b":"not-a-number"}}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	r := uc.PortReservations()
+	if len(r) != 1 {
+		t.Errorf("expected 1 entry (skipping string), got %d: %v", len(r), r)
+	}
+}
+
+func TestUserConfig_ReservedPorts_Empty(t *testing.T) {
+	uc := LoadUserConfig("/nonexistent/config.json")
+	if r := uc.ReservedPorts(); r != nil {
+		t.Errorf("expected nil, got %v", r)
+	}
+}
+
+func TestUserConfig_ReservedPorts_CoversFullRange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"port":{"increment":3,"reservations":{"a":5000}}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	r := uc.ReservedPorts()
+	for i := range 3 {
+		if !r[5000+i] {
+			t.Errorf("expected port %d to be reserved", 5000+i)
+		}
+	}
+	if r[5003] {
+		t.Error("port 5003 should not be reserved")
+	}
+}
+
+func TestUserConfig_RouterPort_Default(t *testing.T) {
+	uc := LoadUserConfig("/nonexistent/config.json")
+	if uc.RouterPort() != 3001 {
+		t.Errorf("expected 3001, got %d", uc.RouterPort())
+	}
+}
+
+func TestUserConfig_RouterPort_Custom(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"router":{"port":8443}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	if uc.RouterPort() != 8443 {
+		t.Errorf("expected 8443, got %d", uc.RouterPort())
+	}
+}
+
+func TestUserConfig_TunnelDefault_Empty(t *testing.T) {
+	uc := LoadUserConfig("/nonexistent/config.json")
+	if uc.TunnelDefault() != "" {
+		t.Errorf("expected empty, got %s", uc.TunnelDefault())
+	}
+}
+
+func TestUserConfig_TunnelName_Empty(t *testing.T) {
+	uc := LoadUserConfig("/nonexistent/config.json")
+	if uc.TunnelName("") != "" {
+		t.Errorf("expected empty, got %s", uc.TunnelName(""))
+	}
+}
+
+func TestUserConfig_TunnelName_Override(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"tunnel":{"default":"gtl","tunnels":{"gtl":{"domain":"myteam.dev"}}}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	if uc.TunnelName("") != "gtl" {
+		t.Errorf("expected gtl from default, got %s", uc.TunnelName(""))
+	}
+	if uc.TunnelName("other") != "other" {
+		t.Errorf("expected override to win, got %s", uc.TunnelName("other"))
+	}
+}
+
+func TestUserConfig_TunnelDomain_Empty(t *testing.T) {
+	uc := LoadUserConfig("/nonexistent/config.json")
+	if uc.TunnelDomain("") != "" {
+		t.Errorf("expected empty, got %s", uc.TunnelDomain(""))
+	}
+}
+
+func TestUserConfig_TunnelDomain_NewFormat(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"tunnel":{"default":"gtl","tunnels":{"gtl":{"domain":"myteam.dev"},"gtl-personal":{"domain":"personal.dev"}}}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	if uc.TunnelDomain("") != "myteam.dev" {
+		t.Errorf("expected myteam.dev from default, got %s", uc.TunnelDomain(""))
+	}
+	if uc.TunnelDomain("gtl-personal") != "personal.dev" {
+		t.Errorf("expected personal.dev from override, got %s", uc.TunnelDomain("gtl-personal"))
+	}
+	if uc.TunnelDomain("nonexistent") != "" {
+		t.Errorf("expected empty for unknown tunnel, got %s", uc.TunnelDomain("nonexistent"))
+	}
+}
+
+func TestUserConfig_TunnelConfigs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"tunnel":{"default":"gtl","tunnels":{"gtl":{"domain":"myteam.dev"},"gtl-personal":{"domain":"personal.dev"}}}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	configs := uc.TunnelConfigs()
+	if len(configs) != 2 {
+		t.Fatalf("expected 2 configs, got %d", len(configs))
+	}
+	if configs["gtl"] != "myteam.dev" {
+		t.Errorf("expected myteam.dev, got %s", configs["gtl"])
+	}
+	if configs["gtl-personal"] != "personal.dev" {
+		t.Errorf("expected personal.dev, got %s", configs["gtl-personal"])
+	}
+}
+
+func TestUserConfig_TunnelConfigs_Empty(t *testing.T) {
+	uc := LoadUserConfig("/nonexistent/config.json")
+	if configs := uc.TunnelConfigs(); configs != nil {
+		t.Errorf("expected nil, got %v", configs)
+	}
+}
+
+// --- Migration from legacy tunnel config ---
+
+func TestUserConfig_TunnelMigration_LegacyFormat(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"tunnel":{"name":"gtl","domain":"myteam.dev"}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	if uc.TunnelDefault() != "gtl" {
+		t.Errorf("expected migrated default 'gtl', got %q", uc.TunnelDefault())
+	}
+	if uc.TunnelName("") != "gtl" {
+		t.Errorf("expected migrated name 'gtl', got %q", uc.TunnelName(""))
+	}
+	if uc.TunnelDomain("") != "myteam.dev" {
+		t.Errorf("expected migrated domain 'myteam.dev', got %q", uc.TunnelDomain(""))
+	}
+	configs := uc.TunnelConfigs()
+	if len(configs) != 1 {
+		t.Fatalf("expected 1 migrated config, got %d", len(configs))
+	}
+}
+
+func TestUserConfig_TunnelMigration_PersistsOnSave(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"tunnel":{"name":"gtl","domain":"myteam.dev"}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	if err := uc.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded := LoadUserConfig(path)
+	if reloaded.TunnelDefault() != "gtl" {
+		t.Errorf("expected default preserved after save, got %q", reloaded.TunnelDefault())
+	}
+	if reloaded.TunnelDomain("") != "myteam.dev" {
+		t.Errorf("expected domain preserved after save, got %q", reloaded.TunnelDomain(""))
+	}
+	// Legacy keys should be gone
+	if reloaded.Get("tunnel.name") != nil {
+		t.Error("expected legacy tunnel.name to be removed after save")
+	}
+	if reloaded.Get("tunnel.domain") != nil {
+		t.Error("expected legacy tunnel.domain to be removed after save")
+	}
+}
+
+func TestUserConfig_TunnelMigration_NameOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"tunnel":{"name":"gtl"}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	if uc.TunnelDefault() != "gtl" {
+		t.Errorf("expected migrated default, got %q", uc.TunnelDefault())
+	}
+	if uc.TunnelDomain("") != "" {
+		t.Errorf("expected empty domain, got %q", uc.TunnelDomain(""))
+	}
+}
+
+func TestUserConfig_TunnelMigration_NoopIfAlreadyNew(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"tunnel":{"default":"gtl","tunnels":{"gtl":{"domain":"myteam.dev"}}}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	if uc.TunnelDomain("") != "myteam.dev" {
+		t.Errorf("expected myteam.dev, got %q", uc.TunnelDomain(""))
+	}
+}
+
 func TestUserConfig_Save_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

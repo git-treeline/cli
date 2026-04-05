@@ -5,9 +5,12 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/confirm"
 	"github.com/git-treeline/git-treeline/internal/format"
 	"github.com/git-treeline/git-treeline/internal/registry"
+	"github.com/git-treeline/git-treeline/internal/setup"
+	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
 )
 
@@ -96,6 +99,17 @@ func runReleaseSingle(args []string) error {
 		return nil
 	}
 
+	mainRepo := worktree.DetectMainRepo(absPath)
+	pc := config.LoadProjectConfig(mainRepo)
+	hooks := pc.Hooks()
+	if cmds, ok := hooks["pre_release"]; ok && len(cmds) > 0 {
+		if err := setup.RunHookCommands("pre_release", cmds, absPath, func(f string, a ...any) {
+			fmt.Printf("==> "+f+"\n", a...)
+		}); err != nil {
+			return fmt.Errorf("%w — release aborted", err)
+		}
+	}
+
 	if releaseDropDB {
 		format.DropSingleDB(fa, absPath)
 	}
@@ -112,6 +126,14 @@ func runReleaseSingle(args []string) error {
 	}
 	if db != "" {
 		fmt.Printf("  Database: %s\n", db)
+	}
+
+	if cmds, ok := hooks["post_release"]; ok && len(cmds) > 0 {
+		if err := setup.RunHookCommands("post_release", cmds, absPath, func(f string, a ...any) {
+			fmt.Printf("==> "+f+"\n", a...)
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %s\n", err)
+		}
 	}
 
 	return nil

@@ -56,6 +56,10 @@ func handleStatus(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallTo
 		"database": format.GetStr(fa, "database"),
 	}
 
+	if links := reg.GetLinks(absPath); len(links) > 0 {
+		result["links"] = links
+	}
+
 	if len(ports) > 0 {
 		result["listening"] = allocator.CheckPortsListening(ports)
 	}
@@ -156,6 +160,9 @@ func handleDoctor(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallTo
 		fa := format.Allocation(alloc)
 		allocInfo["ports"] = format.GetPorts(fa)
 		allocInfo["database"] = format.GetStr(fa, "database")
+		if links := reg.GetLinks(absPath); len(links) > 0 {
+			allocInfo["links"] = links
+		}
 	} else {
 		allocInfo["status"] = "none — run gtl setup"
 	}

@@ -21,6 +21,7 @@ var ProjectDefaults = map[string]any{
 	},
 	"copy_files":   []any{},
 	"env":          map[string]any{},
+	"hooks":        map[string]any{},
 	"commands":     map[string]any{},
 	"editor":       map[string]any{},
 	"merge_target": "",
@@ -137,6 +138,30 @@ func (pc *ProjectConfig) EnvTemplate() map[string]string {
 	for k, v := range raw {
 		if s, ok := v.(string); ok {
 			result[k] = s
+		}
+	}
+	return result
+}
+
+// Hooks returns lifecycle hook commands keyed by hook name (pre_setup,
+// post_setup, pre_release, post_release). Returns nil if no hooks are configured.
+func (pc *ProjectConfig) Hooks() map[string][]string {
+	raw, ok := pc.Data["hooks"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	result := make(map[string][]string, len(raw))
+	for name, v := range raw {
+		if items, ok := v.([]any); ok {
+			cmds := make([]string, 0, len(items))
+			for _, item := range items {
+				if s, ok := item.(string); ok {
+					cmds = append(cmds, s)
+				}
+			}
+			if len(cmds) > 0 {
+				result[name] = cmds
+			}
 		}
 	}
 	return result

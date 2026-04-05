@@ -1,5 +1,8 @@
 // Package service manages the git-treeline router as a system service.
 // Supports macOS LaunchAgents and Linux systemd user units.
+//
+// When GTL_HOME is set, labels and paths are suffixed with ".dev" to avoid
+// colliding with the production install.
 package service
 
 import (
@@ -10,10 +13,15 @@ import (
 	"runtime"
 	"strings"
 	"text/template"
+
+	"github.com/git-treeline/git-treeline/internal/platform"
 )
 
-const launchLabel = "dev.treeline.router"
-const systemdUnit = "git-treeline-router.service"
+const baseLaunchLabel = "dev.treeline.router"
+const baseSystemdUnit = "git-treeline-router"
+
+func LaunchLabel() string { return baseLaunchLabel + platform.DevSuffix() }
+func SystemdUnit() string { return baseSystemdUnit + platform.DevSuffix() + ".service" }
 
 // Install writes a service definition and activates it.
 // Returns the path to the written file.
@@ -44,10 +52,10 @@ func Uninstall() error {
 func IsRunning() bool {
 	switch runtime.GOOS {
 	case "darwin":
-		out, err := exec.Command("launchctl", "list", launchLabel).CombinedOutput()
+		out, err := exec.Command("launchctl", "list", LaunchLabel()).CombinedOutput()
 		return err == nil && len(out) > 0
 	case "linux":
-		err := exec.Command("systemctl", "--user", "is-active", "--quiet", systemdUnit).Run()
+		err := exec.Command("systemctl", "--user", "is-active", "--quiet", SystemdUnit()).Run()
 		return err == nil
 	default:
 		return false
@@ -82,7 +90,7 @@ var plistTemplate = template.Must(template.New("plist").Parse(`<?xml version="1.
 
 func PlistPath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "LaunchAgents", launchLabel+".plist")
+	return filepath.Join(home, "Library", "LaunchAgents", LaunchLabel()+".plist")
 }
 
 func logDir() string {
@@ -109,7 +117,7 @@ func installLaunchAgent(gtlPath string, _ int) (string, error) {
 		GtlPath string
 		LogDir  string
 	}{
-		Label:   launchLabel,
+		Label:   LaunchLabel(),
 		GtlPath: gtlPath,
 		LogDir:  logDir(),
 	})
@@ -136,6 +144,62 @@ func uninstallLaunchAgent() error {
 	return nil
 }
 
+// InstalledBinaryPath reads the LaunchAgent plist (or systemd unit) and
+// returns the binary path embedded in the service definition. Returns ""
+// if the service file doesn't exist or can't be parsed.
+func InstalledBinaryPath() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return installedBinaryFromPlist()
+	case "linux":
+		return installedBinaryFromUnit()
+	default:
+		return ""
+	}
+}
+
+func installedBinaryFromPlist() string {
+	data, err := os.ReadFile(PlistPath())
+	if err != nil {
+		return ""
+	}
+	content := string(data)
+	const startTag = "<key>ProgramArguments</key>"
+	idx := strings.Index(content, startTag)
+	if idx < 0 {
+		return ""
+	}
+	rest := content[idx:]
+	const strStart = "<string>"
+	const strEnd = "</string>"
+	si := strings.Index(rest, strStart)
+	if si < 0 {
+		return ""
+	}
+	rest = rest[si+len(strStart):]
+	ei := strings.Index(rest, strEnd)
+	if ei < 0 {
+		return ""
+	}
+	return rest[:ei]
+}
+
+func installedBinaryFromUnit() string {
+	data, err := os.ReadFile(UnitPath())
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "ExecStart=") {
+			parts := strings.Fields(strings.TrimPrefix(line, "ExecStart="))
+			if len(parts) > 0 {
+				return parts[0]
+			}
+		}
+	}
+	return ""
+}
+
 // --- Linux systemd user unit ---
 
 var unitTemplate = template.Must(template.New("unit").Parse(`[Unit]
@@ -156,7 +220,7 @@ func UnitPath() string {
 		home, _ := os.UserHomeDir()
 		configDir = filepath.Join(home, ".config")
 	}
-	return filepath.Join(configDir, "systemd", "user", systemdUnit)
+	return filepath.Join(configDir, "systemd", "user", SystemdUnit())
 }
 
 func installSystemd(gtlPath string, _ int) (string, error) {
@@ -179,14 +243,14 @@ func installSystemd(gtlPath string, _ int) (string, error) {
 	}
 
 	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
-	if err := exec.Command("systemctl", "--user", "enable", "--now", systemdUnit).Run(); err != nil {
+	if err := exec.Command("systemctl", "--user", "enable", "--now", SystemdUnit()).Run(); err != nil {
 		return path, fmt.Errorf("wrote unit but failed to enable: %w", err)
 	}
 	return path, nil
 }
 
 func uninstallSystemd() error {
-	_ = exec.Command("systemctl", "--user", "disable", "--now", systemdUnit).Run()
+	_ = exec.Command("systemctl", "--user", "disable", "--now", SystemdUnit()).Run()
 	path := UnitPath()
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
@@ -203,7 +267,7 @@ func GeneratePlist(gtlPath string) (string, error) {
 		GtlPath string
 		LogDir  string
 	}{
-		Label:   launchLabel,
+		Label:   LaunchLabel(),
 		GtlPath: gtlPath,
 		LogDir:  logDir(),
 	})

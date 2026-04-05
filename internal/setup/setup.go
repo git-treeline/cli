@@ -19,6 +19,7 @@ import (
 	"github.com/git-treeline/git-treeline/internal/format"
 	"github.com/git-treeline/git-treeline/internal/interpolation"
 	"github.com/git-treeline/git-treeline/internal/registry"
+	"github.com/git-treeline/git-treeline/internal/resolve"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 )
 
@@ -41,6 +42,7 @@ type Setup struct {
 	Allocator     *allocator.Allocator
 	Log           io.Writer
 	Options       Options
+	Resolver      interpolation.ResolveFunc
 }
 
 func New(worktreePath string, mainRepo string, uc *config.UserConfig) *Setup {
@@ -72,6 +74,9 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	worktreeName := filepath.Base(s.WorktreePath)
 	isMain := s.WorktreePath == s.MainRepo
 	branch := s.detectBranch()
+	resolverPkg := resolve.New(s.Registry, s.WorktreePath, branch)
+	s.Resolver = resolverPkg.Resolve
+	hadExisting := s.Registry.Find(s.WorktreePath) != nil
 	alloc, err := s.Allocator.Allocate(s.WorktreePath, worktreeName, isMain, branch)
 	if err != nil {
 		return nil, err
@@ -89,6 +94,12 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 			_ = s.Registry.UpdateField(s.WorktreePath, "branch", alloc.Branch)
 		}
 		s.log("Reusing existing allocation for '%s'", worktreeName)
+	} else if hadExisting && !alloc.Reused {
+		if len(alloc.Ports) > 1 {
+			s.log("Previous ports were in use by another process, re-allocated to %s for '%s'", format.JoinInts(alloc.Ports, ", "), worktreeName)
+		} else {
+			s.log("Previous port was in use by another process, re-allocated to %d for '%s'", alloc.Port, worktreeName)
+		}
 	} else if len(alloc.Ports) > 1 {
 		s.log("Allocating ports %s for '%s'", format.JoinInts(alloc.Ports, ", "), worktreeName)
 	} else {
@@ -134,7 +145,10 @@ func (s *Setup) runPostAllocation(alloc *allocator.Allocation, redisURL string) 
 	s.copyFiles()
 
 	interpMap := alloc.ToInterpolationMap()
-	envVars := s.buildEnvVars(interpMap, redisURL)
+	envVars, err := s.buildEnvVars(interpMap, redisURL)
+	if err != nil {
+		return fmt.Errorf("resolving env vars: %w", err)
+	}
 	if err := s.writeEnvFile(envVars); err != nil {
 		return fmt.Errorf("writing env file: %w", err)
 	}
@@ -150,11 +164,20 @@ func (s *Setup) runPostAllocation(alloc *allocator.Allocation, redisURL string) 
 		}
 	}
 
+	if err := s.runHooks("pre_setup"); err != nil {
+		return err
+	}
+
 	if err := s.runSetupCommands(); err != nil {
 		return err
 	}
 
 	s.configureEditor(alloc)
+
+	if err := s.runHooks("post_setup"); err != nil {
+		s.log("Warning: post_setup hook failed: %s", err)
+	}
+
 	return nil
 }
 
@@ -179,7 +202,7 @@ func (s *Setup) printDryRun(alloc *allocator.Allocation, redisURL string) error 
 	s.log("  Dir:      %s", s.WorktreePath)
 
 	interpMap := alloc.ToInterpolationMap()
-	envVars := s.buildEnvVars(interpMap, redisURL)
+	envVars, _ := s.buildEnvVars(interpMap, redisURL)
 	s.log("  Env vars:")
 	for k, v := range envVars {
 		s.log("    %s=%s", k, v)
@@ -205,8 +228,11 @@ func (s *Setup) copyFiles() {
 	}
 }
 
-func (s *Setup) buildEnvVars(alloc interpolation.Allocation, redisURL string) map[string]string {
-	return BuildEnvVars(s.ProjectConfig, alloc, redisURL)
+func (s *Setup) buildEnvVars(alloc interpolation.Allocation, redisURL string) (map[string]string, error) {
+	if s.Resolver != nil {
+		return BuildEnvVarsWithResolver(s.ProjectConfig, alloc, redisURL, s.Resolver)
+	}
+	return BuildEnvVars(s.ProjectConfig, alloc, redisURL), nil
 }
 
 // BuildEnvVars resolves the env template from a project config against an
@@ -219,6 +245,21 @@ func BuildEnvVars(pc *config.ProjectConfig, alloc interpolation.Allocation, redi
 		result[key] = interpolation.Interpolate(pattern, alloc, redisURL, pc.Project())
 	}
 	return result
+}
+
+// BuildEnvVarsWithResolver resolves env templates including {resolve:...}
+// cross-worktree tokens. Returns an error if any resolve target is missing.
+func BuildEnvVarsWithResolver(pc *config.ProjectConfig, alloc interpolation.Allocation, redisURL string, resolver interpolation.ResolveFunc) (map[string]string, error) {
+	tmpl := pc.EnvTemplate()
+	result := make(map[string]string, len(tmpl))
+	for key, pattern := range tmpl {
+		val, err := interpolation.InterpolateWithResolver(pattern, alloc, redisURL, pc.Project(), resolver)
+		if err != nil {
+			return nil, err
+		}
+		result[key] = val
+	}
+	return result, nil
 }
 
 func (s *Setup) writeEnvFile(vars map[string]string) error {
@@ -304,6 +345,38 @@ func (s *Setup) cloneDatabase(alloc *allocator.Allocation) error {
 	}
 
 	s.log("Database cloned")
+	return nil
+}
+
+func (s *Setup) runHooks(name string) error {
+	hooks := s.ProjectConfig.Hooks()
+	if hooks == nil {
+		return nil
+	}
+	cmds, ok := hooks[name]
+	if !ok || len(cmds) == 0 {
+		return nil
+	}
+	return RunHookCommands(name, cmds, s.WorktreePath, func(f string, a ...any) {
+		s.log(f, a...)
+	})
+}
+
+// RunHookCommands executes a list of hook commands in the given directory.
+// The log function receives formatted status messages. Returns on first failure.
+func RunHookCommands(hookName string, cmds []string, dir string, log func(string, ...any)) error {
+	for _, cmdStr := range cmds {
+		if log != nil {
+			log("Hook [%s]: %s", hookName, cmdStr)
+		}
+		cmd := exec.Command("sh", "-c", cmdStr)
+		cmd.Dir = dir
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("hook %s failed: %s: %w", hookName, cmdStr, err)
+		}
+	}
 	return nil
 }
 

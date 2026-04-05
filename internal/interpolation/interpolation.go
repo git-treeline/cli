@@ -6,6 +6,7 @@ package interpolation
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -26,6 +27,49 @@ func Interpolate(pattern string, allocation Allocation, redisURL, project string
 		result = strings.ReplaceAll(result, token, value)
 	}
 	return result
+}
+
+// ResolveFunc looks up a project's URL by name and optional explicit branch.
+// Used by InterpolateWithResolver to expand {resolve:...} tokens.
+type ResolveFunc func(project string, branch ...string) (string, error)
+
+var resolveTokenRe = regexp.MustCompile(`\{resolve:([^}]+)\}`)
+
+// InterpolateWithResolver extends Interpolate with support for {resolve:project}
+// and {resolve:project/branch} tokens. If resolver is nil, resolve tokens are
+// left unmodified. Returns an error if any resolve target is not found.
+func InterpolateWithResolver(pattern string, allocation Allocation, redisURL, project string, resolver ResolveFunc) (string, error) {
+	result := Interpolate(pattern, allocation, redisURL, project)
+
+	if resolver == nil {
+		return result, nil
+	}
+
+	var resolveErr error
+	result = resolveTokenRe.ReplaceAllStringFunc(result, func(match string) string {
+		if resolveErr != nil {
+			return match
+		}
+		sub := resolveTokenRe.FindStringSubmatch(match)
+		if len(sub) < 2 {
+			return match
+		}
+		spec := sub[1]
+		parts := strings.SplitN(spec, "/", 2)
+		proj := parts[0]
+		var branch []string
+		if len(parts) > 1 {
+			branch = []string{parts[1]}
+		}
+		url, err := resolver(proj, branch...)
+		if err != nil {
+			resolveErr = fmt.Errorf("resolving {resolve:%s}: %w", spec, err)
+			return match
+		}
+		return url
+	})
+
+	return result, resolveErr
 }
 
 func buildTokenMap(allocation Allocation, redisURL, project string) map[string]string {

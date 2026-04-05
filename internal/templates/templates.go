@@ -60,6 +60,7 @@ func nextJS(project, templateDB string, det *detect.Result) string {
 			fmt.Fprintf(&b, "  DATABASE_URL: \"postgresql://localhost:5432/{database}\"\n")
 		}
 		b.WriteString(`  # NEXT_PUBLIC_APP_URL: "http://localhost:{port}"` + "\n")
+		writeResolveComment(&b)
 	}
 
 	b.WriteString("\ncommands:\n")
@@ -70,6 +71,7 @@ func nextJS(project, templateDB string, det *detect.Result) string {
 	}
 	writeStartCommand(&b, det)
 
+	writeHooksComment(&b)
 	writeEditorComment(&b)
 	return b.String()
 }
@@ -122,6 +124,7 @@ func rails(project, templateDB string, det *detect.Result) string {
 			b.WriteString(`  # ESBUILD_PORT: "{port_2}"       # requires port_count: 2` + "\n")
 		}
 		b.WriteString(`  # APPLICATION_HOST: "localhost:{port}"` + "\n")
+		writeResolveComment(&b)
 	}
 
 	b.WriteString("\ncommands:\n")
@@ -136,6 +139,7 @@ func rails(project, templateDB string, det *detect.Result) string {
 		b.WriteString("\n# merge_target: develop            # branch that prune --merged checks against\n")
 	}
 
+	writeHooksComment(&b)
 	writeEditorComment(&b)
 	return b.String()
 }
@@ -148,12 +152,14 @@ func vite(project string, det *detect.Result) string {
 	writeEnvFileBlock(&b, envTarget(det))
 	b.WriteString("\nenv:\n")
 	b.WriteString("  PORT: \"{port}\"\n")
+	writeResolveComment(&b)
 
 	b.WriteString("\ncommands:\n")
 	b.WriteString("  setup:\n")
 	fmt.Fprintf(&b, "    - %s\n", installCmd(det))
 	b.WriteString("  start: npx vite\n")
 
+	writeHooksComment(&b)
 	writeEditorComment(&b)
 	return b.String()
 }
@@ -167,6 +173,7 @@ func node(project string, det *detect.Result) string {
 		writeEnvFileBlock(&b, envTarget(det))
 		b.WriteString("\nenv:\n")
 		b.WriteString("  PORT: \"{port}\"\n")
+		writeResolveComment(&b)
 	}
 
 	b.WriteString("\ncommands:\n")
@@ -176,6 +183,7 @@ func node(project string, det *detect.Result) string {
 	if shouldEmitEnv(det) && !det.HasDotenv {
 		b.WriteString("\n# Note: ensure dotenv or similar is installed to auto-load this file\n")
 	}
+	writeHooksComment(&b)
 	writeEditorComment(&b)
 	return b.String()
 }
@@ -192,12 +200,14 @@ func python(project string, det *detect.Result) string {
 		if det.DBAdapter == "" && !det.HasPrisma {
 			b.WriteString(`  # DATABASE_URL: "postgresql://localhost:5432/{database}"` + "\n")
 		}
+		writeResolveComment(&b)
 	}
 
 	b.WriteString("\ncommands:\n")
 	b.WriteString("  setup:\n")
 	b.WriteString("    - pip install -r requirements.txt\n")
 	writeStartCommand(&b, det)
+	writeHooksComment(&b)
 	writeEditorComment(&b)
 	return b.String()
 }
@@ -211,10 +221,24 @@ func generic(project string, det *detect.Result) string {
 		writeEnvFileBlock(&b, envTarget(det))
 		b.WriteString("\nenv:\n")
 		b.WriteString("  PORT: \"{port}\"\n")
+		writeResolveComment(&b)
 	}
 
+	writeHooksComment(&b)
 	writeEditorComment(&b)
 	return b.String()
+}
+
+func writeHooksComment(b *strings.Builder) {
+	b.WriteString("\n# hooks:\n")
+	b.WriteString("#   pre_setup:\n")
+	b.WriteString("#     - echo \"before setup\"                 # aborts setup on failure\n")
+	b.WriteString("#   post_setup:\n")
+	b.WriteString("#     - echo \"after setup\"                  # warns on failure\n")
+}
+
+func writeResolveComment(b *strings.Builder) {
+	b.WriteString("  # API_URL: \"{resolve:api}\"               # cross-worktree service URL (same-branch default)\n")
 }
 
 func writeEditorComment(b *strings.Builder) {

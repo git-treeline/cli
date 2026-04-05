@@ -1,6 +1,7 @@
 package interpolation
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -30,10 +31,10 @@ func TestBuildRedisURL_TrailingSlash(t *testing.T) {
 
 func TestInterpolate_BasicTokens(t *testing.T) {
 	alloc := Allocation{
-		"port":         float64(3010),
-		"database":     "salt_dev_branch",
+		"port":          float64(3010),
+		"database":      "salt_dev_branch",
 		"worktree_name": "branch",
-		"redis_prefix": "salt:branch",
+		"redis_prefix":  "salt:branch",
 	}
 
 	tests := []struct {
@@ -91,5 +92,55 @@ func TestInterpolate_IntPorts(t *testing.T) {
 	result = Interpolate("{port_2}", alloc, "", "")
 	if result != "3011" {
 		t.Errorf("expected 3011, got %s", result)
+	}
+}
+
+func TestInterpolateWithResolver(t *testing.T) {
+	alloc := Allocation{"port": 3000, "database": "mydb"}
+	resolver := func(project string, branch ...string) (string, error) {
+		if project == "api" {
+			return "http://127.0.0.1:3010", nil
+		}
+		return "", fmt.Errorf("not found: %s", project)
+	}
+
+	result, err := InterpolateWithResolver("http://localhost:{port}", alloc, "redis://localhost:6379", "test", resolver)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "http://localhost:3000" {
+		t.Errorf("expected http://localhost:3000, got %s", result)
+	}
+
+	result, err = InterpolateWithResolver("{resolve:api}/health", alloc, "redis://localhost:6379", "test", resolver)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "http://127.0.0.1:3010/health" {
+		t.Errorf("expected http://127.0.0.1:3010/health, got %s", result)
+	}
+
+	result, err = InterpolateWithResolver("{resolve:api/develop}", alloc, "redis://localhost:6379", "test", resolver)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "http://127.0.0.1:3010" {
+		t.Errorf("expected http://127.0.0.1:3010, got %s", result)
+	}
+
+	_, err = InterpolateWithResolver("{resolve:missing}", alloc, "redis://localhost:6379", "test", resolver)
+	if err == nil {
+		t.Error("expected error for missing resolve target")
+	}
+}
+
+func TestInterpolateWithResolver_NilResolver(t *testing.T) {
+	alloc := Allocation{"port": 3000}
+	result, err := InterpolateWithResolver("{resolve:api}", alloc, "redis://localhost:6379", "test", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "{resolve:api}" {
+		t.Errorf("expected unresolved token, got %s", result)
 	}
 }

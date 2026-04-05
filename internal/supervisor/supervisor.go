@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -29,6 +30,7 @@ type Supervisor struct {
 	Command    string
 	Dir        string
 	SocketPath string
+	Port       int
 	Env        map[string]string // extra env vars injected into the child process
 	Log        func(format string, args ...any)
 
@@ -190,7 +192,9 @@ func (s *Supervisor) handleConn(conn net.Conn) {
 		return
 	}
 
-	cmd := strings.TrimSpace(string(buf[:n]))
+	raw := strings.TrimSpace(string(buf[:n]))
+	parts := strings.SplitN(raw, ":", 2)
+	cmd := parts[0]
 	switch cmd {
 	case "restart":
 		if err := s.restart(); err != nil {
@@ -230,21 +234,77 @@ func (s *Supervisor) handleConn(conn net.Conn) {
 		} else {
 			_, _ = fmt.Fprint(conn, "stopped")
 		}
+	case "wait-ready":
+		timeout := 60 * time.Second
+		if len(parts) > 1 {
+			if secs, err := strconv.Atoi(parts[1]); err == nil && secs > 0 {
+				timeout = time.Duration(secs) * time.Second
+			}
+		}
+		s.handleWaitReady(conn, timeout)
 	default:
-		_, _ = fmt.Fprintf(conn, "unknown command: %s", cmd)
+		_, _ = fmt.Fprintf(conn, "unknown command: %s", raw)
+	}
+}
+
+func (s *Supervisor) handleWaitReady(conn net.Conn, timeout time.Duration) {
+	if s.Port == 0 {
+		_, _ = fmt.Fprint(conn, "error: no port configured")
+		return
+	}
+
+	deadline := time.Now().Add(timeout)
+	addr := fmt.Sprintf("127.0.0.1:%d", s.Port)
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		c, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if err == nil {
+			_ = c.Close()
+			_, _ = fmt.Fprint(conn, "ok")
+			return
+		}
+
+		s.mu.Lock()
+		childDone := s.childDone
+		s.mu.Unlock()
+
+		if childDone == nil {
+			_, _ = fmt.Fprint(conn, "error: server not running")
+			return
+		}
+
+		select {
+		case <-childDone:
+			_, _ = fmt.Fprint(conn, "error: server exited before becoming ready")
+			return
+		case <-ticker.C:
+		}
+
+		if time.Now().After(deadline) {
+			_, _ = fmt.Fprint(conn, "error: timeout waiting for port")
+			return
+		}
 	}
 }
 
 // Send connects to a supervisor socket and sends a command.
-// Returns the response string.
+// Returns the response string. Uses a 30-second deadline.
 func Send(socketPath, command string) (string, error) {
+	return SendWithTimeout(socketPath, command, 30*time.Second)
+}
+
+// SendWithTimeout is like Send but with a caller-specified deadline.
+// Used by --await which may need to wait longer than the default 30s.
+func SendWithTimeout(socketPath, command string, timeout time.Duration) (string, error) {
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
 		return "", fmt.Errorf("server not running (no socket at %s)", socketPath)
 	}
 	defer func() { _ = conn.Close() }()
 
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	_ = conn.SetDeadline(time.Now().Add(timeout))
 	if _, err := conn.Write([]byte(command)); err != nil {
 		return "", fmt.Errorf("sending command: %w", err)
 	}

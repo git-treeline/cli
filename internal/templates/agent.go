@@ -81,6 +81,9 @@ func buildAgentContent(project string, det *detect.Result) string {
 	}
 
 	fmt.Fprintf(&b, "- Allocated env vars: %s in `%s`\n", strings.Join(envVars, ", "), envTarget(det))
+	b.WriteString("- Inspect the env file: `gtl env` (add `--json` for structured output)\n")
+	b.WriteString("- Start and wait for readiness: `gtl start --await`\n")
+	b.WriteString("- Resolve another project's URL: `gtl resolve <project> --json`\n")
 
 	if hint := PortHint(det); hint != "" {
 		b.WriteString("\n### Port wiring\n\n")

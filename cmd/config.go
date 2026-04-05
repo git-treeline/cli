@@ -59,6 +59,19 @@ var configGetCmd = &cobra.Command{
 	Use:   "get <key>",
 	Short: "Print a config value (dot notation: port.base)",
 	Args:  cobra.ExactArgs(1),
+	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		keys := []string{
+			"port.base", "port.increment", "port.reservations",
+			"redis.strategy", "redis.url",
+			"router.port",
+			"editor.name",
+			"tunnel.default",
+		}
+		return keys, cobra.ShellCompDirectiveNoFileComp
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		uc := config.LoadUserConfig("")
 		val := uc.Get(args[0])
@@ -86,6 +99,19 @@ var configSetCmd = &cobra.Command{
 	Use:   "set <key> <value>",
 	Short: "Set a config value (dot notation: port.base 4000)",
 	Args:  cobra.ExactArgs(2),
+	ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		keys := []string{
+			"port.base", "port.increment", "port.reservations",
+			"redis.strategy", "redis.url",
+			"router.port",
+			"editor.name",
+			"tunnel.default",
+		}
+		return keys, cobra.ShellCompDirectiveNoFileComp
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		uc := config.LoadUserConfig("")
 

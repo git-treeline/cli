@@ -67,9 +67,9 @@ func TestExtractTrycloudflareURL(t *testing.T) {
 		{"https://abc-123.trycloudflare.com is ready", "https://abc-123.trycloudflare.com"},
 	}
 	for _, tc := range cases {
-		got := extractTrycloudflareURL(tc.line)
+		got := ExtractTrycloudflareURL(tc.line)
 		if got != tc.want {
-			t.Errorf("extractTrycloudflareURL(%q) = %q, want %q", tc.line, got, tc.want)
+			t.Errorf("ExtractTrycloudflareURL(%q) = %q, want %q", tc.line, got, tc.want)
 		}
 	}
 }
@@ -100,9 +100,7 @@ func TestFilterLine_Errors(t *testing.T) {
 		{"error: dial tcp", true},
 	}
 	for _, tc := range cases {
-		// filterLine writes to stdout/stderr; we just verify it doesn't panic.
-		// The logic branches are what matter for coverage.
-		filterLine(tc.line)
+		FilterLine(tc.line)
 	}
 }
 

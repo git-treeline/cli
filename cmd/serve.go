@@ -66,9 +66,6 @@ After install, access worktrees at https://{project}-{branch}.localhost`,
 		if err != nil {
 			return fmt.Errorf("CA generation failed: %w", err)
 		}
-		if _, err := proxy.EnsureServerCert(); err != nil {
-			return fmt.Errorf("server cert generation failed: %w", err)
-		}
 
 		fmt.Println("gtl serve is a local HTTPS router that gives every worktree a URL:")
 		fmt.Println("  https://{project}-{branch}.localhost")

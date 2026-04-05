@@ -1,6 +1,10 @@
 package format
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestJoinInts(t *testing.T) {
 	tests := []struct {
@@ -99,5 +103,51 @@ func TestPortDisplay(t *testing.T) {
 				t.Errorf("PortDisplay = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDropSingleDB_EmptyName(t *testing.T) {
+	alloc := Allocation{"database": "", "database_adapter": "sqlite"}
+	DropSingleDB(alloc, t.TempDir())
+}
+
+func TestDropSingleDB_SQLite(t *testing.T) {
+	dir := t.TempDir()
+	dbFile := filepath.Join(dir, "test.db")
+	_ = os.WriteFile(dbFile, []byte("sqlite"), 0o644)
+
+	alloc := Allocation{
+		"database":         "test.db",
+		"database_adapter": "sqlite",
+	}
+	DropSingleDB(alloc, dir)
+
+	if _, err := os.Stat(dbFile); !os.IsNotExist(err) {
+		t.Error("expected sqlite file to be removed")
+	}
+}
+
+func TestDropSingleDB_UnknownAdapter(t *testing.T) {
+	alloc := Allocation{
+		"database":         "mydb",
+		"database_adapter": "nonexistent_adapter",
+	}
+	DropSingleDB(alloc, t.TempDir())
+}
+
+func TestDropDatabases_MixedEntries(t *testing.T) {
+	dir := t.TempDir()
+	dbFile := filepath.Join(dir, "drop_me.db")
+	_ = os.WriteFile(dbFile, []byte("data"), 0o644)
+
+	allocs := []Allocation{
+		{"database": "", "database_adapter": "sqlite"},
+		{"database": "drop_me.db", "database_adapter": "sqlite", "worktree": dir},
+		{"database": "x", "database_adapter": "nonexistent"},
+	}
+	DropDatabases(allocs)
+
+	if _, err := os.Stat(dbFile); !os.IsNotExist(err) {
+		t.Error("expected sqlite file to be removed by DropDatabases")
 	}
 }

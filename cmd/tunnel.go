@@ -21,11 +21,14 @@ import (
 )
 
 var tunnelDomain string
+var tunnelConfigName string
 
 func init() {
+	tunnelCmd.PersistentFlags().StringVar(&tunnelConfigName, "tunnel", "", "Named tunnel config to use (overrides default)")
 	tunnelCmd.Flags().StringVar(&tunnelDomain, "domain", "", "BYO domain (overrides saved config)")
 	tunnelCmd.AddCommand(tunnelSetupCmd)
 	tunnelCmd.AddCommand(tunnelStatusCmd)
+	tunnelCmd.AddCommand(tunnelDefaultCmd)
 	rootCmd.AddCommand(tunnelCmd)
 }
 
@@ -58,11 +61,11 @@ Related commands:
 
 		domain := tunnelDomain
 		if domain == "" {
-			domain = uc.TunnelDomain()
+			domain = uc.TunnelDomain(tunnelConfigName)
 		}
 
 		if domain != "" {
-			tunnelName := uc.TunnelName()
+			tunnelName := uc.TunnelName(tunnelConfigName)
 			if tunnelName == "" {
 				return fmt.Errorf("tunnel domain is configured but no tunnel name found\nRun 'gtl tunnel setup' to complete configuration")
 			}
@@ -137,7 +140,7 @@ Subdomains are derived from project and branch names, matching gtl serve routes.
 		fmt.Println("    The name is just an identifier — one tunnel handles all your projects.")
 		fmt.Println("    You'd only change this if you run multiple machines (e.g. gtl-work, gtl-home).")
 		fmt.Println()
-		tunnelName := uc.TunnelName()
+		tunnelName := uc.TunnelDefault()
 		if tunnelName == "" {
 			tunnelName = "gtl"
 		}
@@ -165,7 +168,7 @@ Subdomains are derived from project and branch names, matching gtl serve routes.
 		fmt.Println("    A wildcard DNS record (*.domain) will be created automatically.")
 		fmt.Println()
 
-		existingDomain := uc.TunnelDomain()
+		existingDomain := uc.TunnelDomain("")
 		domain := strings.TrimSpace(confirm.Input("    Domain (e.g. myteam.dev)", existingDomain, nil))
 		if domain == "" {
 			return fmt.Errorf("domain is required for named tunnel setup")
@@ -187,12 +190,20 @@ Subdomains are derived from project and branch names, matching gtl serve routes.
 		// Step 5: Save config
 		fmt.Println()
 		fmt.Println("  Step 5: Saving configuration")
-		uc.Set("tunnel.name", tunnelName)
-		uc.Set("tunnel.domain", domain)
+		uc.Set("tunnel.tunnels."+tunnelName+".domain", domain)
+		existingConfigs := uc.TunnelConfigs()
+		if uc.TunnelDefault() == "" || len(existingConfigs) <= 1 {
+			uc.Set("tunnel.default", tunnelName)
+		}
 		if err := uc.Save(); err != nil {
 			return fmt.Errorf("failed to save config: %w", err)
 		}
-		fmt.Printf("    Saved tunnel.name=%s, tunnel.domain=%s\n", tunnelName, domain)
+		if uc.TunnelDefault() == tunnelName {
+			fmt.Printf("    Saved tunnel %q (domain: %s, default)\n", tunnelName, domain)
+		} else {
+			fmt.Printf("    Saved tunnel %q (domain: %s)\n", tunnelName, domain)
+			fmt.Printf("    Default tunnel is %q. Switch with: gtl tunnel default %s\n", uc.TunnelDefault(), tunnelName)
+		}
 
 		fmt.Println()
 		fmt.Println("Done! You can now run:")
@@ -223,28 +234,78 @@ var tunnelStatusCmd = &cobra.Command{
 		}
 
 		// Config
-		tunnelName := uc.TunnelName()
-		domain := uc.TunnelDomain()
+		configs := uc.TunnelConfigs()
+		defaultName := uc.TunnelDefault()
 
-		if tunnelName != "" {
-			exists := tunnel.TunnelExists(tunnelName)
-			if exists {
-				fmt.Printf("Tunnel: %s (exists)\n", tunnelName)
-			} else {
-				fmt.Printf("Tunnel: %s (not found — run 'gtl tunnel setup')\n", tunnelName)
+		if len(configs) == 0 {
+			fmt.Println("Tunnels: not configured (run 'gtl tunnel setup')")
+		} else {
+			fmt.Println("Tunnels:")
+			for name, domain := range configs {
+				marker := "   "
+				suffix := ""
+				if name == defaultName {
+					marker = " * "
+					suffix = " (default)"
+				}
+				exists := tunnel.TunnelExists(name)
+				status := "exists"
+				if !exists {
+					status = "not found"
+				}
+				if domain != "" {
+					fmt.Printf("%s%s  *.%s  (%s)%s\n", marker, name, domain, status, suffix)
+				} else {
+					fmt.Printf("%s%s  (%s)%s\n", marker, name, status, suffix)
+				}
 			}
-		} else {
-			fmt.Println("Tunnel: not configured (run 'gtl tunnel setup')")
-		}
-
-		if domain != "" {
-			fmt.Printf("Domain: *.%s\n", domain)
-		} else {
-			fmt.Println("Domain: not configured (run 'gtl tunnel setup')")
 		}
 
 		return nil
 	},
+}
+
+var tunnelDefaultCmd = &cobra.Command{
+	Use:   "default [name]",
+	Short: "Get or set the default tunnel configuration",
+	Long: `Without arguments, prints the current default tunnel name.
+With an argument, sets the default to the named tunnel config.
+
+  gtl tunnel default                # print current default
+  gtl tunnel default gtl-personal   # switch default`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		uc := config.LoadUserConfig("")
+		if len(args) == 0 {
+			d := uc.TunnelDefault()
+			if d == "" {
+				fmt.Println("No default tunnel configured. Run 'gtl tunnel setup'.")
+			} else {
+				fmt.Println(d)
+			}
+			return nil
+		}
+
+		name := args[0]
+		configs := uc.TunnelConfigs()
+		if _, ok := configs[name]; !ok {
+			return fmt.Errorf("tunnel %q not found in config\nAvailable: %v\nRun 'gtl tunnel setup' to add a new tunnel", name, tunnelConfigNames(configs))
+		}
+		uc.Set("tunnel.default", name)
+		if err := uc.Save(); err != nil {
+			return fmt.Errorf("failed to save config: %w", err)
+		}
+		fmt.Printf("Default tunnel set to %q\n", name)
+		return nil
+	},
+}
+
+func tunnelConfigNames(configs map[string]string) []string {
+	names := make([]string, 0, len(configs))
+	for name := range configs {
+		names = append(names, name)
+	}
+	return names
 }
 
 func validateTunnelPrereqs(tunnelName string) error {

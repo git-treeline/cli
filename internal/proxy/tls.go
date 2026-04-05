@@ -15,13 +15,20 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/git-treeline/git-treeline/internal/platform"
 )
 
-func certsDir() string {
+var certsDirFunc = defaultCertsDir
+
+func defaultCertsDir() string {
 	return filepath.Join(platform.ConfigDir(), "certs")
+}
+
+func certsDir() string {
+	return certsDirFunc()
 }
 
 // resolveCert returns a TLS certificate for localhost. It tries mkcert first
@@ -120,9 +127,6 @@ func caCertPath() string { return filepath.Join(certsDir(), "ca.pem") }
 // CACertPath returns the path to the CA certificate (for display to the user).
 func CACertPath() string { return caCertPath() }
 
-func serverCertPath() string { return filepath.Join(certsDir(), "server.pem") }
-func serverKeyPath() string  { return filepath.Join(certsDir(), "server-key.pem") }
-
 // EnsureCA generates a local CA if one doesn't already exist. Returns
 // the path to the CA certificate (for trusting).
 func EnsureCA() (string, error) {
@@ -175,16 +179,20 @@ func EnsureCA() (string, error) {
 	return caCertPath(), nil
 }
 
-// EnsureServerCert generates a wildcard *.localhost server cert signed by
-// the local CA. Regenerates if the cert doesn't exist or is expired.
-func EnsureServerCert() (*tls.Certificate, error) {
-	if cert, err := tls.LoadX509KeyPair(serverCertPath(), serverKeyPath()); err == nil {
-		leaf, parseErr := x509.ParseCertificate(cert.Certificate[0])
-		if parseErr == nil && time.Now().Before(leaf.NotAfter.Add(-24*time.Hour)) {
-			return &cert, nil
-		}
-	}
+// CertManager generates per-hostname TLS certificates on demand, signed by
+// the local CA. This avoids wildcard certs (*.localhost) which Safari and
+// Chromium reject for the .localhost TLD.
+type CertManager struct {
+	caKey  *ecdsa.PrivateKey
+	caCert *x509.Certificate
+	mu     sync.RWMutex
+	cache  map[string]*tls.Certificate
+}
 
+// NewCertManager loads the local CA and returns a manager that generates
+// per-hostname certs via GetCertificate. Returns an error if the CA hasn't
+// been created yet (user needs to run 'gtl serve install').
+func NewCertManager() (*CertManager, error) {
 	caKeyPEM, err := os.ReadFile(caKeyPath())
 	if err != nil {
 		return nil, fmt.Errorf("CA key not found — run 'gtl serve install': %w", err)
@@ -212,7 +220,41 @@ func EnsureServerCert() (*tls.Certificate, error) {
 		return nil, fmt.Errorf("parsing CA cert: %w", err)
 	}
 
-	serverKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	return &CertManager{
+		caKey:  caKey,
+		caCert: caCert,
+		cache:  make(map[string]*tls.Certificate),
+	}, nil
+}
+
+// GetCertificate is a tls.Config callback that returns a cert with an exact
+// SAN for the requested hostname.
+func (cm *CertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	hostname := hello.ServerName
+	if hostname == "" {
+		hostname = "localhost"
+	}
+
+	cm.mu.RLock()
+	cert, ok := cm.cache[hostname]
+	cm.mu.RUnlock()
+	if ok {
+		return cert, nil
+	}
+
+	cert, err := cm.issueCert(hostname)
+	if err != nil {
+		return nil, err
+	}
+
+	cm.mu.Lock()
+	cm.cache[hostname] = cert
+	cm.mu.Unlock()
+	return cert, nil
+}
+
+func (cm *CertManager) issueCert(hostname string) (*tls.Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
 	}
@@ -220,39 +262,25 @@ func EnsureServerCert() (*tls.Certificate, error) {
 	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{Organization: []string{"git-treeline"}, CommonName: "*.localhost"},
+		Subject:      pkix.Name{Organization: []string{"git-treeline"}, CommonName: hostname},
 		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(825 * 24 * time.Hour), // ~2.25 years, under macOS 825-day limit
+		NotAfter:     time.Now().Add(825 * 24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{"localhost", "*.localhost"},
+		DNSNames:     []string{hostname, "localhost"},
 		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
 	}
 
-	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &serverKey.PublicKey, caKey)
+	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, cm.caCert, &key.PublicKey, cm.caKey)
 	if err != nil {
-		return nil, fmt.Errorf("creating server certificate: %w", err)
+		return nil, fmt.Errorf("creating certificate for %s: %w", hostname, err)
 	}
 
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-	keyDER, err := x509.MarshalECPrivateKey(serverKey)
-	if err != nil {
-		return nil, err
+	tlsCert := tls.Certificate{
+		Certificate: [][]byte{certDER, cm.caCert.Raw},
+		PrivateKey:  key,
 	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-
-	if err := os.WriteFile(serverCertPath(), certPEM, 0o600); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(serverKeyPath(), keyPEM, 0o600); err != nil {
-		return nil, err
-	}
-
-	cert, err := tls.LoadX509KeyPair(serverCertPath(), serverKeyPath())
-	if err != nil {
-		return nil, err
-	}
-	return &cert, nil
+	return &tlsCert, nil
 }
 
 // TrustCA adds the local CA certificate to the system trust store.
@@ -284,6 +312,24 @@ func UntrustCA() error {
 func IsCAInstalled() bool {
 	_, err := os.Stat(caCertPath())
 	return err == nil
+}
+
+// CACertExpiry returns the CA certificate's NotAfter time, or an error
+// if the cert can't be read/parsed. Used by gtl doctor for cert health.
+func CACertExpiry() (time.Time, error) {
+	data, err := os.ReadFile(caCertPath())
+	if err != nil {
+		return time.Time{}, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return time.Time{}, fmt.Errorf("CA cert is not valid PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return cert.NotAfter, nil
 }
 
 func trustDarwin(caCertFile string) error {

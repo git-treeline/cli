@@ -173,6 +173,12 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string, mainWorktr
 		}
 	}
 
+	for _, p := range ports {
+		if !IsPortFree(p) {
+			return nil
+		}
+	}
+
 	return alloc
 }
 
@@ -192,6 +198,9 @@ func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*A
 		}
 	} else {
 		ports = al.nextAvailablePortsFrom(al.UserConfig.PortBase(), count)
+	}
+	if ports == nil {
+		return nil, fmt.Errorf("no available port block of size %d found (all ports in use or reserved)", count)
 	}
 
 	return &Allocation{
@@ -224,6 +233,9 @@ func (al *Allocator) allocateNew(worktreePath, worktreeName, branch string) (*Al
 	}
 	if ports == nil {
 		ports = al.nextAvailablePortsFrom(al.UserConfig.PortBase()+al.UserConfig.PortIncrement(), count)
+	}
+	if ports == nil {
+		return nil, fmt.Errorf("no available port block of size %d found (all ports in use or reserved)", count)
 	}
 
 	redisDB, redisPrefix := al.allocateRedis(worktreeName)
@@ -285,7 +297,8 @@ func (al *Allocator) nextAvailablePortsFrom(start, count int) []int {
 	routerPort := al.UserConfig.RouterPort()
 
 	candidate := start
-	for {
+	maxPort := 65535
+	for candidate+count-1 <= maxPort {
 		block := make([]int, count)
 		conflict := false
 		for i := range count {
@@ -300,6 +313,7 @@ func (al *Allocator) nextAvailablePortsFrom(start, count int) []int {
 		}
 		candidate += al.UserConfig.PortIncrement()
 	}
+	return nil
 }
 
 // IsPortFree attempts a TCP listen to verify nothing is bound on the port.

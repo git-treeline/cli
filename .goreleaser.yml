@@ -33,6 +33,9 @@ brews:
       bin.install "git-treeline"
       bin.install_symlink "git-treeline" => "gtl"
 
+      generate_completions_from_executable(bin/"git-treeline", "completion")
+      generate_completions_from_executable(bin/"git-treeline", "completion", base_name: "gtl")
+
 changelog:
   sort: asc
   filters:

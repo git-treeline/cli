@@ -2,6 +2,7 @@ package allocator
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -643,6 +644,107 @@ func TestReservedPorts_CoversFullBlock(t *testing.T) {
 	}
 }
 
+func TestToInterpolationMap_Baseline(t *testing.T) {
+	alloc := &Allocation{
+		Port:         3010,
+		Ports:        []int{3010, 3011},
+		Database:     "mydb_branch",
+		WorktreeName: "branch",
+	}
+	m := alloc.ToInterpolationMap()
+	if m["port"] != 3010 {
+		t.Errorf("expected port=3010, got %v", m["port"])
+	}
+	if m["database"] != "mydb_branch" {
+		t.Errorf("expected database=mydb_branch, got %v", m["database"])
+	}
+	if m["worktree_name"] != "branch" {
+		t.Errorf("expected worktree_name=branch, got %v", m["worktree_name"])
+	}
+	if m["port_1"] != 3010 {
+		t.Errorf("expected port_1=3010, got %v", m["port_1"])
+	}
+	if m["port_2"] != 3011 {
+		t.Errorf("expected port_2=3011, got %v", m["port_2"])
+	}
+}
+
+func TestToInterpolationMap_RedisDB(t *testing.T) {
+	alloc := &Allocation{
+		Port: 3010, Ports: []int{3010},
+		RedisDB: 5,
+	}
+	m := alloc.ToInterpolationMap()
+	if m["redis_db"] != 5 {
+		t.Errorf("expected redis_db=5, got %v", m["redis_db"])
+	}
+	if _, ok := m["redis_prefix"]; ok {
+		t.Error("expected no redis_prefix when RedisDB > 0")
+	}
+}
+
+func TestToInterpolationMap_RedisPrefix(t *testing.T) {
+	alloc := &Allocation{
+		Port: 3010, Ports: []int{3010},
+		RedisPrefix: "myapp:branch",
+	}
+	m := alloc.ToInterpolationMap()
+	if m["redis_prefix"] != "myapp:branch" {
+		t.Errorf("expected redis_prefix=myapp:branch, got %v", m["redis_prefix"])
+	}
+	if _, ok := m["redis_db"]; ok {
+		t.Error("expected no redis_db when RedisDB == 0")
+	}
+}
+
+func TestBuildRedisURL_WithDB(t *testing.T) {
+	al, _ := testAllocator(t, 1, "")
+
+	alloc := &Allocation{
+		Port: 3010, Ports: []int{3010},
+		RedisDB: 3,
+	}
+	url := al.BuildRedisURL(alloc)
+	if url != "redis://localhost:6379/3" {
+		t.Errorf("expected redis://localhost:6379/3, got %s", url)
+	}
+}
+
+func TestBuildRedisURL_WithoutDB(t *testing.T) {
+	al, _ := testAllocator(t, 1, "")
+
+	alloc := &Allocation{
+		Port: 3010, Ports: []int{3010},
+		RedisPrefix: "myapp:x",
+	}
+	url := al.BuildRedisURL(alloc)
+	if url != "redis://localhost:6379" {
+		t.Errorf("expected redis://localhost:6379, got %s", url)
+	}
+}
+
+func TestBuildRedisURL_TrailingSlash(t *testing.T) {
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "registry.json")
+	reg := registry.New(regPath)
+
+	confPath := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(confPath, []byte(`{"port":{"base":3000,"increment":10},"redis":{"url":"redis://localhost:6379/"}}`), 0o644)
+	uc := config.LoadUserConfig(confPath)
+
+	projDir := filepath.Join(dir, "project")
+	_ = os.MkdirAll(projDir, 0o755)
+	_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"), []byte("project: test\n"), 0o644)
+	pc := config.LoadProjectConfig(projDir)
+
+	al := New(uc, pc, reg)
+	alloc := &Allocation{Port: 3010, Ports: []int{3010}, RedisDB: 2}
+	url := al.BuildRedisURL(alloc)
+	if url != "redis://localhost:6379/2" {
+		t.Errorf("expected trailing slash trimmed, got %s", url)
+	}
+}
+
 func TestIsPortFree(t *testing.T) {
 	if !IsPortFree(49999) {
 		t.Skip("port 49999 is in use, skipping")
@@ -652,5 +754,42 @@ func TestIsPortFree(t *testing.T) {
 func TestCheckPortsListening_NothingRunning(t *testing.T) {
 	if CheckPortsListening([]int{49998, 49999}) {
 		t.Skip("unexpected listener on test ports")
+	}
+}
+
+func TestReuseExisting_PortConflict(t *testing.T) {
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "registry.json")
+
+	regData := `{"version":1,"allocations":[{"project":"test","worktree":"/tmp/test-wt","worktree_name":"test-wt","port":49990,"ports":[49990],"database":"","database_adapter":"postgresql"}]}`
+	_ = os.WriteFile(regPath, []byte(regData), 0o644)
+	reg := registry.New(regPath)
+
+	confPath := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(confPath, []byte(`{"port":{"base":49980,"increment":10}}`), 0o644)
+	uc := config.LoadUserConfig(confPath)
+
+	projDir := filepath.Join(dir, "project")
+	_ = os.MkdirAll(projDir, 0o755)
+	_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"), []byte("project: test\n"), 0o644)
+	pc := config.LoadProjectConfig(projDir)
+
+	al := New(uc, pc, reg)
+
+	ln, err := net.Listen("tcp", ":49990")
+	if err != nil {
+		t.Skip("cannot bind test port 49990")
+	}
+	defer func() { _ = ln.Close() }()
+
+	alloc, err := al.Allocate("/tmp/test-wt", "test-wt", false)
+	if err != nil {
+		t.Fatalf("Allocate failed: %v", err)
+	}
+	if alloc.Port == 49990 {
+		t.Errorf("expected re-allocation away from occupied port 49990, got %d", alloc.Port)
+	}
+	if alloc.Reused {
+		t.Error("expected Reused=false after port conflict")
 	}
 }

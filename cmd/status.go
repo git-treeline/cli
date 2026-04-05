@@ -26,6 +26,18 @@ var statusInterval int
 
 func init() {
 	statusCmd.Flags().StringVar(&statusProject, "project", "", "Filter by project name")
+	_ = statusCmd.RegisterFlagCompletionFunc("project", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		reg := registry.New("")
+		seen := make(map[string]bool)
+		var projects []string
+		for _, a := range reg.Allocations() {
+			if p, ok := a["project"].(string); ok && !seen[p] {
+				seen[p] = true
+				projects = append(projects, p)
+			}
+		}
+		return projects, cobra.ShellCompDirectiveNoFileComp
+	})
 	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "Output as JSON")
 	statusCmd.Flags().BoolVar(&statusCheck, "check", false, "Probe allocated ports to check if services are running")
 	statusCmd.Flags().BoolVar(&statusWatch, "watch", false, "Auto-refresh status on a loop (implies --check)")
@@ -187,6 +199,13 @@ func renderStatus() error {
 			}
 
 			fmt.Println(line)
+			if links, ok := a["links"].(map[string]any); ok && len(links) > 0 {
+				for proj, branch := range links {
+					if b, ok := branch.(string); ok {
+						fmt.Printf("    → %s linked to %s\n", proj, b)
+					}
+				}
+			}
 		}
 	}
 

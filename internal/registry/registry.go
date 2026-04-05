@@ -73,6 +73,17 @@ func (r *Registry) FindByProject(project string) []Allocation {
 	return result
 }
 
+// FindProjectBranch returns the allocation matching both project name and branch.
+// Returns nil if no match is found.
+func (r *Registry) FindProjectBranch(project, branch string) Allocation {
+	for _, a := range r.Allocations() {
+		if getString(a, "project") == project && getString(a, "branch") == branch {
+			return a
+		}
+	}
+	return nil
+}
+
 func (r *Registry) UsedPorts() []int {
 	var ports []int
 	for _, a := range r.Allocations() {
@@ -112,6 +123,8 @@ func (r *Registry) Allocate(entry Allocation) error {
 		for _, a := range data.Allocations {
 			if getString(a, "worktree") != resolved {
 				filtered = append(filtered, a)
+			} else if links, ok := a["links"].(map[string]any); ok && len(links) > 0 {
+				entry["links"] = links
 			}
 		}
 		if entry["allocated_at"] == nil {
@@ -192,6 +205,66 @@ func (r *Registry) UpdateField(worktreePath, key, value string) error {
 			}
 		}
 	})
+}
+
+// SetLink stores a resolve override for the given worktree. When the worktree's
+// env template contains {resolve:project}, the link causes it to resolve against
+// the specified branch instead of the same-branch default.
+func (r *Registry) SetLink(worktreePath, project, branch string) error {
+	resolved := resolvePath(worktreePath)
+	return r.withLock(func(data *RegistryData) {
+		for _, a := range data.Allocations {
+			if resolvePath(getString(a, "worktree")) == resolved {
+				links, _ := a["links"].(map[string]any)
+				if links == nil {
+					links = make(map[string]any)
+				}
+				links[project] = branch
+				a["links"] = links
+				return
+			}
+		}
+	})
+}
+
+// RemoveLink removes a resolve override, reverting the worktree to same-branch
+// default resolution. No-op if the link doesn't exist.
+func (r *Registry) RemoveLink(worktreePath, project string) error {
+	resolved := resolvePath(worktreePath)
+	return r.withLock(func(data *RegistryData) {
+		for _, a := range data.Allocations {
+			if resolvePath(getString(a, "worktree")) == resolved {
+				links, _ := a["links"].(map[string]any)
+				if links != nil {
+					delete(links, project)
+					if len(links) == 0 {
+						delete(a, "links")
+					}
+				}
+				return
+			}
+		}
+	})
+}
+
+// GetLinks returns the active resolve overrides for a worktree as a map of
+// project name to branch. Returns nil if the worktree has no links.
+func (r *Registry) GetLinks(worktreePath string) map[string]string {
+	alloc := r.Find(worktreePath)
+	if alloc == nil {
+		return nil
+	}
+	raw, _ := alloc["links"].(map[string]any)
+	if raw == nil {
+		return nil
+	}
+	result := make(map[string]string, len(raw))
+	for k, v := range raw {
+		if s, ok := v.(string); ok {
+			result[k] = s
+		}
+	}
+	return result
 }
 
 func (r *Registry) Prune() (int, error) {

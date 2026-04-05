@@ -15,6 +15,36 @@ func TestConfigDir_NotEmpty(t *testing.T) {
 	}
 }
 
+func TestConfigDir_GTLHome(t *testing.T) {
+	t.Setenv("GTL_HOME", "/tmp/gtl-dev-test")
+	dir := ConfigDir()
+	if dir != "/tmp/gtl-dev-test" {
+		t.Errorf("expected /tmp/gtl-dev-test, got %s", dir)
+	}
+}
+
+func TestIsDevMode(t *testing.T) {
+	t.Setenv("GTL_HOME", "")
+	if IsDevMode() {
+		t.Error("expected IsDevMode=false when GTL_HOME is empty")
+	}
+	t.Setenv("GTL_HOME", "/tmp/gtl-dev")
+	if !IsDevMode() {
+		t.Error("expected IsDevMode=true when GTL_HOME is set")
+	}
+}
+
+func TestDevSuffix(t *testing.T) {
+	t.Setenv("GTL_HOME", "")
+	if s := DevSuffix(); s != "" {
+		t.Errorf("expected empty suffix, got %q", s)
+	}
+	t.Setenv("GTL_HOME", "/tmp/gtl-dev")
+	if s := DevSuffix(); s != ".dev" {
+		t.Errorf("expected .dev, got %q", s)
+	}
+}
+
 func TestConfigFile_EndsWithJSON(t *testing.T) {
 	f := ConfigFile()
 	if !strings.HasSuffix(f, "config.json") {

@@ -2,6 +2,9 @@
 // On macOS: ~/Library/Application Support/git-treeline/
 // On Linux: $XDG_CONFIG_HOME/git-treeline/ (or ~/.config/)
 // On Windows: %APPDATA%/git-treeline/
+//
+// Set GTL_HOME to override the config directory entirely. This is useful
+// for development/testing to avoid colliding with the installed binary.
 package platform
 
 import (
@@ -12,7 +15,25 @@ import (
 
 const appName = "git-treeline"
 
+// IsDevMode returns true when GTL_HOME is set, indicating this instance
+// should use an isolated state directory.
+func IsDevMode() bool {
+	return os.Getenv("GTL_HOME") != "" 
+}
+
+// DevSuffix returns ".dev" when GTL_HOME is set, empty string otherwise.
+// Used by the service layer to namespace LaunchAgent labels and pf anchors.
+func DevSuffix() string {
+	if IsDevMode() {
+		return ".dev"
+	}
+	return ""
+}
+
 func ConfigDir() string {
+	if home := os.Getenv("GTL_HOME"); home != "" {
+		return home
+	}
 	return filepath.Join(baseDir(), appName)
 }
 

@@ -5,3 +5,4 @@ gtl
 
 # OS
 .DS_Store
+.envrc

@@ -67,14 +67,14 @@ func (r *Router) Run() error {
 
 	scheme := "http"
 	if r.useTLS {
-		cert, certErr := EnsureServerCert()
+		cm, certErr := NewCertManager()
 		if certErr != nil {
 			_ = ln.Close()
 			return fmt.Errorf("TLS setup failed: %w", certErr)
 		}
 		server.TLSConfig = &tls.Config{
-			Certificates: []tls.Certificate{*cert},
-			MinVersion:   tls.VersionTLS12,
+			GetCertificate: cm.GetCertificate,
+			MinVersion:     tls.VersionTLS12,
 		}
 		ln = tls.NewListener(ln, server.TLSConfig)
 		scheme = "https"
@@ -138,9 +138,10 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	backendHost := resolveLocalhost(targetPort)
 	target := &url.URL{
 		Scheme: "http",
-		Host:   fmt.Sprintf("127.0.0.1:%d", targetPort),
+		Host:   fmt.Sprintf("%s:%d", backendHost, targetPort),
 	}
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -298,6 +299,22 @@ func getString(a registry.Allocation, key string) string {
 		return v
 	}
 	return ""
+}
+
+// resolveLocalhost checks whether a port is reachable on IPv4 (127.0.0.1)
+// or IPv6 (::1) and returns the appropriate address. Prefers IPv4; falls back
+// to IPv6 for dev servers that bind to localhost on dual-stack systems where
+// localhost resolves to ::1 (e.g. Vite 6 on macOS).
+func resolveLocalhost(port int) string {
+	for _, host := range []string{"127.0.0.1", "::1"} {
+		addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
+		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return host
+		}
+	}
+	return "127.0.0.1"
 }
 
 func sortedKeys(m map[string]int) []string {
