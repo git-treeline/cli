@@ -288,6 +288,179 @@ func TestHandleRestart_NotRunning(t *testing.T) {
 	}
 }
 
+func TestHandleDoctor_NoAllocation(t *testing.T) {
+	seedRegistry(t)
+
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, ".git"), 0o755)
+
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "doctor"
+	req.Params.Arguments = map[string]any{"path": dir}
+
+	result, err := handleDoctor(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := extractText(t, result)
+
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(text), &doc); err != nil {
+		t.Fatalf("failed to parse JSON: %v", err)
+	}
+
+	cfg, _ := doc["config"].(map[string]any)
+	if cfg["treeline_yml"] != "missing" {
+		t.Errorf("expected treeline_yml=missing, got %v", cfg["treeline_yml"])
+	}
+
+	alloc, _ := doc["allocation"].(map[string]any)
+	if alloc["status"] == nil {
+		t.Error("expected allocation.status to be set for missing allocation")
+	}
+
+	rt, _ := doc["runtime"].(map[string]any)
+	if rt["supervisor"] != "not running" {
+		t.Errorf("expected supervisor=not running, got %v", rt["supervisor"])
+	}
+}
+
+func TestHandleDoctor_WithConfig(t *testing.T) {
+	seedRegistry(t)
+
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, ".git"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: testapp\n"), 0o644)
+
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "doctor"
+	req.Params.Arguments = map[string]any{"path": dir}
+
+	result, err := handleDoctor(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := extractText(t, result)
+
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(text), &doc); err != nil {
+		t.Fatalf("failed to parse JSON: %v", err)
+	}
+
+	cfg, _ := doc["config"].(map[string]any)
+	if cfg["treeline_yml"] != "ok" {
+		t.Errorf("expected treeline_yml=ok, got %v", cfg["treeline_yml"])
+	}
+	if cfg["project"] != "testapp" {
+		t.Errorf("expected project=testapp, got %v", cfg["project"])
+	}
+}
+
+func TestHandleAllocationsResource(t *testing.T) {
+	seedRegistry(t)
+
+	req := mcplib.ReadResourceRequest{}
+	req.Params.URI = "gtl://allocations"
+
+	contents, err := handleAllocationsResource(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contents) != 1 {
+		t.Fatalf("expected 1 content, got %d", len(contents))
+	}
+
+	text := contents[0].(mcplib.TextResourceContents).Text
+	var allocs []map[string]any
+	if err := json.Unmarshal([]byte(text), &allocs); err != nil {
+		t.Fatalf("failed to parse JSON: %v", err)
+	}
+	if len(allocs) != 3 {
+		t.Errorf("expected 3 allocations, got %d", len(allocs))
+	}
+}
+
+func TestHandleUserConfigResource(t *testing.T) {
+	req := mcplib.ReadResourceRequest{}
+	req.Params.URI = "gtl://config/user"
+
+	contents, err := handleUserConfigResource(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contents) != 1 {
+		t.Fatalf("expected 1 content, got %d", len(contents))
+	}
+
+	text := contents[0].(mcplib.TextResourceContents).Text
+	var data map[string]any
+	if err := json.Unmarshal([]byte(text), &data); err != nil {
+		t.Fatalf("failed to parse valid JSON: %v", err)
+	}
+}
+
+func TestHandleConfigGet_ProjectScope(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, ".git"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: testapp\ndatabase:\n  adapter: postgresql\n"), 0o644)
+
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "config_get"
+	req.Params.Arguments = map[string]any{
+		"key":   "project",
+		"scope": "project",
+		"path":  dir,
+	}
+
+	result, err := handleConfigGet(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := extractText(t, result)
+	if text != "\"testapp\"" {
+		t.Errorf("expected \"testapp\", got %s", text)
+	}
+}
+
+func TestHandleConfigGet_ProjectScope_Nested(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, ".git"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: testapp\ndatabase:\n  adapter: postgresql\n"), 0o644)
+
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "config_get"
+	req.Params.Arguments = map[string]any{
+		"key":   "database.adapter",
+		"scope": "project",
+		"path":  dir,
+	}
+
+	result, err := handleConfigGet(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := extractText(t, result)
+	if text != "\"postgresql\"" {
+		t.Errorf("expected \"postgresql\", got %s", text)
+	}
+}
+
+func TestHandleConfigGet_MissingKey(t *testing.T) {
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "config_get"
+	req.Params.Arguments = map[string]any{
+		"scope": "user",
+	}
+
+	result, err := handleConfigGet(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Error("expected error for missing key")
+	}
+}
+
 func extractText(t *testing.T, result *mcplib.CallToolResult) string {
 	t.Helper()
 	for _, c := range result.Content {

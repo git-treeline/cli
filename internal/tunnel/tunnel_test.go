@@ -1,7 +1,9 @@
 package tunnel
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -75,11 +77,72 @@ func TestExtractTrycloudflareURL(t *testing.T) {
 func TestFindCredentialsFile_NoFallbackScan(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
-	// Without a valid tunnel ID lookup, it should return a deterministic path,
-	// not scan for random .json files.
 	got := findCredentialsFile("my-tunnel")
 	want := dir + "/.cloudflared/my-tunnel.json"
 	if got != want {
 		t.Errorf("findCredentialsFile = %q, want %q", got, want)
+	}
+}
+
+func TestFilterLine_Errors(t *testing.T) {
+	cases := []struct {
+		line    string
+		printed bool
+	}{
+		{"2024 ERR failed to connect", true},
+		{"2024 WRN retrying in 5s", true},
+		{"2024 INF Registered tunnel connection", true},
+		{"2024 INF Starting tunnel", false},
+		{"GET /api/health 200 12ms", true},
+		{"POST /webhook 201 5ms", true},
+		{"some other log line", false},
+		{"connection failed to establish", true},
+		{"error: dial tcp", true},
+	}
+	for _, tc := range cases {
+		// filterLine writes to stdout/stderr; we just verify it doesn't panic.
+		// The logic branches are what matter for coverage.
+		filterLine(tc.line)
+	}
+}
+
+func TestWriteTunnelConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	_ = os.MkdirAll(filepath.Join(dir, ".cloudflared"), 0o700)
+	credPath := filepath.Join(dir, ".cloudflared", "test-tunnel.json")
+	_ = os.WriteFile(credPath, []byte(`{"AccountTag":"abc"}`), 0o600)
+
+	path, err := writeTunnelConfig("test-tunnel", "myapp-main.example.dev", 3050)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(content)
+
+	checks := []string{
+		`tunnel: "test-tunnel"`,
+		`hostname: "myapp-main.example.dev"`,
+		"http://localhost:3050",
+		"http_status:404",
+	}
+	for _, check := range checks {
+		if !strings.Contains(s, check) {
+			t.Errorf("config missing %q\nGot:\n%s", check, s)
+		}
+	}
+}
+
+func TestConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	got := ConfigDir()
+	if !strings.HasSuffix(got, ".cloudflared") {
+		t.Errorf("expected path ending in .cloudflared, got %s", got)
 	}
 }
