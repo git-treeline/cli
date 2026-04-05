@@ -120,7 +120,7 @@ Otherwise a new branch is created from --base (or the current branch).`,
 				fmt.Printf("==> Router: https://%s.localhost:%d\n", routeKey, port)
 			}
 		}
-		if domain := uc.TunnelDomain(); domain != "" {
+		if domain := uc.TunnelDomain(""); domain != "" {
 			routeKey := proxy.RouteKey(projectName, alloc.Branch)
 			fmt.Printf("==> Tunnel: gtl tunnel → https://%s.%s\n", routeKey, domain)
 		}

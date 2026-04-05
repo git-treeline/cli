@@ -1,3 +1,9 @@
+## [0.27.0]
+
+- **`gtl share`** — private branch sharing via token-gated URLs. Creates a Cloudflare tunnel fronted by an auth proxy: the recipient opens the link, gets a session cookie, and sees clean URLs from there. Tokens are ephemeral — new token and tunnel hostname on every run, everything destroyed on Ctrl+C. Uses your configured domain when a named tunnel is available; falls back to `*.trycloudflare.com` otherwise.
+- **`gtl share --tailscale`** — alternative Tailscale Serve backend for tailnet-only sharing. No tokens needed — Tailscale handles identity-based auth with WireGuard encryption. Only people on your tailnet can reach the URL. Detects Tailscale from PATH or the macOS app bundle. Mutually exclusive with `--tunnel`.
+- **Multi-tunnel config** — store multiple named tunnel configurations with a default, like rbenv. `gtl tunnel setup` now adds to your tunnel list; `gtl tunnel default <name>` switches the active config. Both `gtl tunnel` and `gtl share` accept `--tunnel <name>` to override the default. Old single-tunnel configs (`tunnel.name`/`tunnel.domain`) are auto-migrated.
+
 ## [0.26.0]
 
 - **`--json` everywhere** — `gtl doctor`, `gtl port`, and `gtl db name` now accept `--json` for structured output. `gtl status --json` auto-probes port listening and supervisor state without requiring `--check`.

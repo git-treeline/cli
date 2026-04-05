@@ -82,7 +82,7 @@ var setupCmd = &cobra.Command{
 				}
 			}
 
-			if domain := uc.TunnelDomain(); domain != "" {
+			if domain := uc.TunnelDomain(""); domain != "" {
 				fmt.Printf("==> Tunnel: gtl tunnel → https://%s.%s\n", routeKey, domain)
 			}
 		}

@@ -45,7 +45,7 @@ func RunQuick(port int) error {
 		for scanner.Scan() {
 			line := scanner.Text()
 			if !urlPrinted {
-				if u := extractTrycloudflareURL(line); u != "" {
+				if u := ExtractTrycloudflareURL(line); u != "" {
 					fmt.Printf("Tunnel: %s → http://localhost:%d\n", u, port)
 					fmt.Println("Press Ctrl+C to stop")
 					fmt.Println()
@@ -53,16 +53,18 @@ func RunQuick(port int) error {
 					continue
 				}
 			}
-			filterLine(line)
+			FilterLine(line)
 		}
 	}()
 
-	return waitForSignalOrExit(cmd)
+	return WaitForSignalOrExit(cmd)
 }
 
 var trycloudflareRe = regexp.MustCompile(`https://[a-z0-9-]+\.trycloudflare\.com`)
 
-func extractTrycloudflareURL(line string) string {
+// ExtractTrycloudflareURL returns the first *.trycloudflare.com URL found in
+// the line, or "" if none is present.
+func ExtractTrycloudflareURL(line string) string {
 	return trycloudflareRe.FindString(line)
 }
 
@@ -97,25 +99,27 @@ func RunNamed(tunnelName, domain, routeKey string, port int) error {
 		return fmt.Errorf("failed to start cloudflared: %w", err)
 	}
 
-	go filterCloudflaredLogs(stderrPipe)
+	go FilterCloudflaredLogs(stderrPipe)
 
-	return waitForSignalOrExit(cmd)
+	return WaitForSignalOrExit(cmd)
 }
 
 // --- Shared cloudflared process management ---
 
-// filterCloudflaredLogs reads cloudflared stderr and only passes through
+// FilterCloudflaredLogs reads cloudflared stderr and only passes through
 // errors and warnings, suppressing the verbose startup noise.
-func filterCloudflaredLogs(r io.Reader) {
+func FilterCloudflaredLogs(r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
-		filterLine(scanner.Text())
+		FilterLine(scanner.Text())
 	}
 }
 
 var requestMethodRe = regexp.MustCompile(`\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b`)
 
-func filterLine(line string) {
+// FilterLine writes a single cloudflared log line to stdout/stderr if it
+// looks like an error, warning, or HTTP request.
+func FilterLine(line string) {
 	switch {
 	case strings.Contains(line, "ERR"),
 		strings.Contains(line, "WRN"),
@@ -130,7 +134,9 @@ func filterLine(line string) {
 	}
 }
 
-func waitForSignalOrExit(cmd *exec.Cmd) error {
+// WaitForSignalOrExit blocks until SIGINT/SIGTERM or the command exits.
+// On signal, it sends SIGTERM to the process group.
+func WaitForSignalOrExit(cmd *exec.Cmd) error {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
@@ -329,4 +335,35 @@ func lookupTunnelID(tunnelName string) string {
 func GenerateConfig(tunnelName, hostname string, port int, credPath string) string {
 	return fmt.Sprintf("tunnel: %q\ncredentials-file: %q\n\ningress:\n  - hostname: %q\n    service: http://localhost:%d\n  - service: http_status:404\n",
 		tunnelName, credPath, hostname, port)
+}
+
+// WriteShareConfig writes a temporary cloudflared config for a share session.
+// The config file is named distinctly (gtl-share-<name>.yml) so it never
+// conflicts with the main tunnel config. Returns the path; caller is
+// responsible for cleanup.
+func WriteShareConfig(tunnelName, hostname string, port int) (string, error) {
+	credPath := findCredentialsFile(tunnelName)
+
+	config := fmt.Sprintf("tunnel: %q\ncredentials-file: %q\n\ningress:\n  - hostname: %q\n    service: http://localhost:%d\n  - service: http_status:404\n",
+		tunnelName, credPath, hostname, port)
+
+	dir := ConfigDir()
+	configPath := filepath.Join(dir, fmt.Sprintf("gtl-share-%s.yml", tunnelName))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		return "", err
+	}
+	return configPath, nil
+}
+
+// IsTunnelRunning checks if a cloudflared process is already running for the
+// given tunnel name by scanning for matching processes.
+func IsTunnelRunning(tunnelName string) bool {
+	out, err := exec.Command("pgrep", "-f", "cloudflared.*tunnel.*run.*"+tunnelName).Output()
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(out))) > 0
 }
