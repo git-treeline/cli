@@ -384,6 +384,76 @@ func TestMergedBranches_WithOverride(t *testing.T) {
 	}
 }
 
+func TestFindWorktreeForBranch(t *testing.T) {
+	repo := initTestRepo(t)
+	run(t, repo, "git", "branch", "wt-find-test")
+
+	wtDir := t.TempDir()
+	wtDir, _ = filepath.EvalSymlinks(wtDir)
+	wtPath := filepath.Join(wtDir, "wt-find-test")
+
+	run(t, repo, "git", "worktree", "add", wtPath, "wt-find-test")
+	defer func() {
+		cmd := exec.Command("git", "worktree", "remove", "--force", wtPath)
+		cmd.Dir = repo
+		_ = cmd.Run()
+	}()
+
+	orig, _ := os.Getwd()
+	_ = os.Chdir(repo)
+	defer func() { _ = os.Chdir(orig) }()
+
+	found := FindWorktreeForBranch("wt-find-test")
+	if found != wtPath {
+		t.Errorf("expected %s, got %s", wtPath, found)
+	}
+
+	missing := FindWorktreeForBranch("nonexistent-branch")
+	if missing != "" {
+		t.Errorf("expected empty for missing branch, got %s", missing)
+	}
+}
+
+func TestWorktreeBranches(t *testing.T) {
+	repo := initTestRepo(t)
+	run(t, repo, "git", "branch", "branch-a")
+	run(t, repo, "git", "branch", "branch-b")
+
+	wtDirA := t.TempDir()
+	wtDirA, _ = filepath.EvalSymlinks(wtDirA)
+	wtPathA := filepath.Join(wtDirA, "branch-a")
+
+	wtDirB := t.TempDir()
+	wtDirB, _ = filepath.EvalSymlinks(wtDirB)
+	wtPathB := filepath.Join(wtDirB, "branch-b")
+
+	run(t, repo, "git", "worktree", "add", wtPathA, "branch-a")
+	run(t, repo, "git", "worktree", "add", wtPathB, "branch-b")
+	defer func() {
+		cmd := exec.Command("git", "worktree", "remove", "--force", wtPathA)
+		cmd.Dir = repo
+		_ = cmd.Run()
+		cmd = exec.Command("git", "worktree", "remove", "--force", wtPathB)
+		cmd.Dir = repo
+		_ = cmd.Run()
+	}()
+
+	branches := WorktreeBranches(repo)
+	if branches == nil {
+		t.Fatal("expected non-nil branches map")
+	}
+
+	if branches[wtPathA] != "branch-a" {
+		t.Errorf("expected branch-a at %s, got %s", wtPathA, branches[wtPathA])
+	}
+	if branches[wtPathB] != "branch-b" {
+		t.Errorf("expected branch-b at %s, got %s", wtPathB, branches[wtPathB])
+	}
+	if branches[repo] != "main" {
+		t.Errorf("expected main at %s, got %s", repo, branches[repo])
+	}
+}
+
 func TestMergedBranches_NoMerged(t *testing.T) {
 	repo := initTestRepo(t)
 

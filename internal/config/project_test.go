@@ -403,6 +403,63 @@ func TestProjectConfig_EditorAccessors_Empty(t *testing.T) {
 	}
 }
 
+func TestProjectConfig_DatabasePattern_Default(t *testing.T) {
+	dir := t.TempDir()
+	pc := LoadProjectConfig(dir)
+	if pc.DatabasePattern() != "{template}_{worktree}" {
+		t.Errorf("expected default pattern, got %s", pc.DatabasePattern())
+	}
+}
+
+func TestProjectConfig_DatabasePattern_Custom(t *testing.T) {
+	dir := t.TempDir()
+	yml := "project: myapp\ndatabase:\n  adapter: postgresql\n  pattern: \"{template}--{worktree}\"\n"
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+
+	pc := LoadProjectConfig(dir)
+	if pc.DatabasePattern() != "{template}--{worktree}" {
+		t.Errorf("expected custom pattern, got %s", pc.DatabasePattern())
+	}
+}
+
+func TestProjectConfig_HasEnvFileConfig_Present(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: myapp\nenv_file: .env\n"), 0o644)
+
+	pc := LoadProjectConfig(dir)
+	if !pc.HasEnvFileConfig() {
+		t.Error("expected HasEnvFileConfig true when env_file key present")
+	}
+}
+
+func TestProjectConfig_HasEnvFileConfig_DefaultPresent(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: myapp\n"), 0o644)
+
+	pc := LoadProjectConfig(dir)
+	if !pc.HasEnvFileConfig() {
+		t.Error("expected HasEnvFileConfig true (default env_file is merged)")
+	}
+}
+
+func TestProjectConfig_Exists_True(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: myapp\n"), 0o644)
+
+	pc := LoadProjectConfig(dir)
+	if !pc.Exists() {
+		t.Error("expected Exists true when .treeline.yml present")
+	}
+}
+
+func TestProjectConfig_Exists_False(t *testing.T) {
+	dir := t.TempDir()
+	pc := LoadProjectConfig(dir)
+	if pc.Exists() {
+		t.Error("expected Exists false when .treeline.yml absent")
+	}
+}
+
 func TestRewriteEnvFileBlock_Simple(t *testing.T) {
 	input := "project: myapp\nenv_file:\n  target: .env.local\n  source: .env.local\nenv:\n  PORT: \"{port}\"\n"
 	got := rewriteEnvFileToSimple(input, ".env.local")

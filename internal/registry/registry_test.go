@@ -224,6 +224,76 @@ func TestRegistry_UpdateField_NoMatch(t *testing.T) {
 	}
 }
 
+func TestRegistry_FindByProject_Match(t *testing.T) {
+	reg := newTestRegistry(t)
+	_ = reg.Allocate(Allocation{"worktree": "/wt/a", "project": "myapp"})
+	_ = reg.Allocate(Allocation{"worktree": "/wt/b", "project": "other"})
+	_ = reg.Allocate(Allocation{"worktree": "/wt/c", "project": "myapp"})
+
+	found := reg.FindByProject("myapp")
+	if len(found) != 2 {
+		t.Fatalf("expected 2 matches, got %d", len(found))
+	}
+}
+
+func TestRegistry_FindByProject_NoMatch(t *testing.T) {
+	reg := newTestRegistry(t)
+	_ = reg.Allocate(Allocation{"worktree": "/wt/a", "project": "other"})
+
+	found := reg.FindByProject("myapp")
+	if len(found) != 0 {
+		t.Errorf("expected 0 matches, got %d", len(found))
+	}
+}
+
+func TestRegistry_FindByProject_Empty(t *testing.T) {
+	reg := newTestRegistry(t)
+	found := reg.FindByProject("anything")
+	if len(found) != 0 {
+		t.Errorf("expected 0 matches for empty registry, got %d", len(found))
+	}
+}
+
+func TestRegistry_UsedRedisDbs(t *testing.T) {
+	reg := newTestRegistry(t)
+	_ = reg.Allocate(Allocation{"worktree": "/wt/a", "redis_db": float64(1)})
+	_ = reg.Allocate(Allocation{"worktree": "/wt/b", "redis_db": float64(3)})
+	_ = reg.Allocate(Allocation{"worktree": "/wt/c"})
+
+	dbs := reg.UsedRedisDbs()
+	if len(dbs) != 2 {
+		t.Fatalf("expected 2 redis dbs, got %d: %v", len(dbs), dbs)
+	}
+	found := map[int]bool{}
+	for _, d := range dbs {
+		found[d] = true
+	}
+	if !found[1] || !found[3] {
+		t.Errorf("expected dbs 1 and 3, got %v", dbs)
+	}
+}
+
+func TestRegistry_UsedRedisDbs_Empty(t *testing.T) {
+	reg := newTestRegistry(t)
+	_ = reg.Allocate(Allocation{"worktree": "/wt/a"})
+
+	dbs := reg.UsedRedisDbs()
+	if len(dbs) != 0 {
+		t.Errorf("expected 0 redis dbs, got %v", dbs)
+	}
+}
+
+func TestRegistry_UsedRedisDbs_SkipsNonFloat(t *testing.T) {
+	reg := newTestRegistry(t)
+	_ = reg.Allocate(Allocation{"worktree": "/wt/a", "redis_db": "not-a-number"})
+	_ = reg.Allocate(Allocation{"worktree": "/wt/b", "redis_db": float64(2)})
+
+	dbs := reg.UsedRedisDbs()
+	if len(dbs) != 1 || dbs[0] != 2 {
+		t.Errorf("expected [2], got %v", dbs)
+	}
+}
+
 func TestRegistry_ReleaseMany_Empty(t *testing.T) {
 	reg := newTestRegistry(t)
 	_ = reg.Allocate(Allocation{"worktree": "/wt/a"})

@@ -197,6 +197,121 @@ func TestUserConfig_EditorName_DoesNotClobberOtherEditorSettings(t *testing.T) {
 	}
 }
 
+func TestUserConfig_PortReservations_Empty(t *testing.T) {
+	uc := LoadUserConfig("/nonexistent/config.json")
+	if r := uc.PortReservations(); r != nil {
+		t.Errorf("expected nil, got %v", r)
+	}
+}
+
+func TestUserConfig_PortReservations_Valid(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"port":{"base":3000,"increment":10,"reservations":{"myapp":4000,"other":5000}}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	r := uc.PortReservations()
+	if r == nil {
+		t.Fatal("expected non-nil reservations")
+	}
+	if r["myapp"] != 4000 {
+		t.Errorf("expected myapp=4000, got %d", r["myapp"])
+	}
+	if r["other"] != 5000 {
+		t.Errorf("expected other=5000, got %d", r["other"])
+	}
+}
+
+func TestUserConfig_PortReservations_SkipsNonFloat(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"port":{"reservations":{"a":4000,"b":"not-a-number"}}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	r := uc.PortReservations()
+	if len(r) != 1 {
+		t.Errorf("expected 1 entry (skipping string), got %d: %v", len(r), r)
+	}
+}
+
+func TestUserConfig_ReservedPorts_Empty(t *testing.T) {
+	uc := LoadUserConfig("/nonexistent/config.json")
+	if r := uc.ReservedPorts(); r != nil {
+		t.Errorf("expected nil, got %v", r)
+	}
+}
+
+func TestUserConfig_ReservedPorts_CoversFullRange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"port":{"increment":3,"reservations":{"a":5000}}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	r := uc.ReservedPorts()
+	for i := range 3 {
+		if !r[5000+i] {
+			t.Errorf("expected port %d to be reserved", 5000+i)
+		}
+	}
+	if r[5003] {
+		t.Error("port 5003 should not be reserved")
+	}
+}
+
+func TestUserConfig_RouterPort_Default(t *testing.T) {
+	uc := LoadUserConfig("/nonexistent/config.json")
+	if uc.RouterPort() != 3001 {
+		t.Errorf("expected 3001, got %d", uc.RouterPort())
+	}
+}
+
+func TestUserConfig_RouterPort_Custom(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"router":{"port":8443}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	if uc.RouterPort() != 8443 {
+		t.Errorf("expected 8443, got %d", uc.RouterPort())
+	}
+}
+
+func TestUserConfig_TunnelDomain_Empty(t *testing.T) {
+	uc := LoadUserConfig("/nonexistent/config.json")
+	if uc.TunnelDomain() != "" {
+		t.Errorf("expected empty, got %s", uc.TunnelDomain())
+	}
+}
+
+func TestUserConfig_TunnelDomain_Set(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"tunnel":{"domain":"myteam.dev"}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	if uc.TunnelDomain() != "myteam.dev" {
+		t.Errorf("expected myteam.dev, got %s", uc.TunnelDomain())
+	}
+}
+
+func TestUserConfig_TunnelName_Empty(t *testing.T) {
+	uc := LoadUserConfig("/nonexistent/config.json")
+	if uc.TunnelName() != "" {
+		t.Errorf("expected empty, got %s", uc.TunnelName())
+	}
+}
+
+func TestUserConfig_TunnelName_Set(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"tunnel":{"name":"gtl"}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	if uc.TunnelName() != "gtl" {
+		t.Errorf("expected gtl, got %s", uc.TunnelName())
+	}
+}
+
 func TestUserConfig_Save_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

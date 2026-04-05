@@ -20,8 +20,14 @@ import (
 	"github.com/git-treeline/git-treeline/internal/platform"
 )
 
-func certsDir() string {
+var certsDirFunc = defaultCertsDir
+
+func defaultCertsDir() string {
 	return filepath.Join(platform.ConfigDir(), "certs")
+}
+
+func certsDir() string {
+	return certsDirFunc()
 }
 
 // resolveCert returns a TLS certificate for localhost. It tries mkcert first
