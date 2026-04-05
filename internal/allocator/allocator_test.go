@@ -25,7 +25,7 @@ func testAllocator(t *testing.T, portsNeeded int, yamlExtra string) (*Allocator,
 	_ = os.MkdirAll(projDir, 0o755)
 	yml := "project: test\n"
 	if portsNeeded > 0 {
-		yml += "ports_needed: " + itoa(portsNeeded) + "\n"
+		yml += "port_count: " + itoa(portsNeeded) + "\n"
 	}
 	yml += "database:\n  adapter: postgresql\n  template: test_dev\n  pattern: \"{template}_{worktree}\"\n"
 	yml += yamlExtra
@@ -156,13 +156,13 @@ func TestAllocate_PortsNeededExceedsIncrement(t *testing.T) {
 
 	projDir := filepath.Join(dir, "project")
 	_ = os.MkdirAll(projDir, 0o755)
-	_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"), []byte("project: test\nports_needed: 5\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"), []byte("project: test\nport_count: 5\n"), 0o644)
 	pc := config.LoadProjectConfig(projDir)
 
 	al := New(uc, pc, reg)
 	_, err := al.Allocate("/wt/x", "x", false)
 	if err == nil {
-		t.Fatal("expected error when ports_needed > increment")
+		t.Fatal("expected error when port_count > increment")
 	}
 }
 
@@ -306,7 +306,7 @@ func TestReuseExisting_PortCountMismatch(t *testing.T) {
 	}
 	_ = reg.Allocate(alloc.ToRegistryEntry())
 
-	// Now create a new allocator with ports_needed: 1 (config changed)
+	// Now create a new allocator with port_count: 1 (config changed)
 	al2, _ := testAllocator(t, 1, "")
 	// Point it at the same registry
 	al2.Registry = reg
@@ -434,7 +434,7 @@ func TestReservation_WithMultiplePorts(t *testing.T) {
 
 	projDir := filepath.Join(dir, "project")
 	_ = os.MkdirAll(projDir, 0o755)
-	_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"), []byte("project: myapp\nports_needed: 2\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"), []byte("project: myapp\nport_count: 2\n"), 0o644)
 	pc := config.LoadProjectConfig(projDir)
 
 	al := New(uc, pc, reg)

@@ -13,9 +13,9 @@
 - **`gtl port`** — prints the allocated port for the current worktree. Designed for agents and scripts that need the port without parsing status output.
 - **`AGENTS.md` integration** — `gtl init` now writes a treeline section to `AGENTS.md` (works with Cursor, Claude Code, and Codex) instead of `.cursor/rules/treeline.mdc`. Appends to existing `AGENTS.md` or `CLAUDE.md`, or creates `AGENTS.md` if neither exists. Includes `gtl port` as the primary port discovery instruction.
 - **Reservation-aware reuse** — `gtl setup` now detects when an existing allocation's port doesn't match a reservation (or conflicts with another project's reservation) and automatically re-allocates instead of reusing stale ports.
-- **Fix: stale port reuse** — re-running `gtl setup` after changing `ports_needed` in config now correctly re-allocates instead of reusing the old port count.
+- **Fix: stale port reuse** — re-running `gtl setup` after changing `port_count` in config now correctly re-allocates instead of reusing the old port count.
 - **Fix: `ProjectDefaults` env_file** — defaults now use the string shorthand form, matching the canonical config shape.
-- **Self-documenting templates** — `gtl init` generates `.treeline.yml` with commented-out optional config (ports_needed, Redis, editor, etc.) so available features are discoverable without reading docs. `ports_needed: 2` is never auto-emitted as active config.
+- **Self-documenting templates** — `gtl init` generates `.treeline.yml` with commented-out optional config (port_count, Redis, editor, etc.) so available features are discoverable without reading docs. `port_count: 2` is never auto-emitted as active config.
 
 ## [0.19.0]
 

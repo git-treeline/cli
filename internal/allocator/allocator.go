@@ -179,7 +179,7 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string, mainWorktr
 func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*Allocation, error) {
 	count := al.ProjectConfig.PortsNeeded()
 	if count > al.UserConfig.PortIncrement() {
-		return nil, fmt.Errorf("ports_needed (%d) exceeds port.increment (%d); increase port.increment in your config.json to at least %d",
+		return nil, fmt.Errorf("port_count (%d) exceeds port.increment (%d); increase port.increment in your config.json to at least %d",
 			count, al.UserConfig.PortIncrement(), count)
 	}
 
@@ -208,7 +208,7 @@ func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*A
 func (al *Allocator) allocateNew(worktreePath, worktreeName, branch string) (*Allocation, error) {
 	count := al.ProjectConfig.PortsNeeded()
 	if count > al.UserConfig.PortIncrement() {
-		return nil, fmt.Errorf("ports_needed (%d) exceeds port.increment (%d); increase port.increment in your config.json to at least %d",
+		return nil, fmt.Errorf("port_count (%d) exceeds port.increment (%d); increase port.increment in your config.json to at least %d",
 			count, al.UserConfig.PortIncrement(), count)
 	}
 

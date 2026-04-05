@@ -29,7 +29,7 @@ func TestProjectConfig_ParsesYAML(t *testing.T) {
 	dir := t.TempDir()
 	yml := `
 project: salt
-ports_needed: 2
+port_count: 2
 database:
   adapter: postgresql
   template: salt_development
@@ -332,6 +332,41 @@ func TestProjectConfig_MigrateEditor_Idempotent(t *testing.T) {
 	data, _ := os.ReadFile(path)
 	if string(data) != yml {
 		t.Errorf("file should be unchanged, got:\n%s", string(data))
+	}
+}
+
+func TestProjectConfig_MigratePortCount(t *testing.T) {
+	dir := t.TempDir()
+	yml := "project: myapp\nports_needed: 3\n"
+	path := filepath.Join(dir, ".treeline.yml")
+	_ = os.WriteFile(path, []byte(yml), 0o644)
+
+	pc := LoadProjectConfig(dir)
+
+	if pc.PortsNeeded() != 3 {
+		t.Errorf("expected 3 after migration, got %d", pc.PortsNeeded())
+	}
+
+	data, _ := os.ReadFile(path)
+	content := string(data)
+	if strings.Contains(content, "ports_needed") {
+		t.Error("expected ports_needed to be replaced in file")
+	}
+	if !strings.Contains(content, "port_count: 3") {
+		t.Errorf("expected port_count: 3 in file, got:\n%s", content)
+	}
+}
+
+func TestProjectConfig_MigratePortCount_NoOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	yml := "project: myapp\nport_count: 2\nports_needed: 5\n"
+	path := filepath.Join(dir, ".treeline.yml")
+	_ = os.WriteFile(path, []byte(yml), 0o644)
+
+	pc := LoadProjectConfig(dir)
+
+	if pc.PortsNeeded() != 2 {
+		t.Errorf("expected port_count to take precedence, got %d", pc.PortsNeeded())
 	}
 }
 

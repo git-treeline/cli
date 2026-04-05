@@ -197,7 +197,7 @@ gtl refresh --dry-run    # preview what would change
 gtl refresh              # apply changes, restart supervised servers
 ```
 
-After adding or changing port reservations (or `ports_needed`), `gtl refresh` walks every allocation and re-resolves ports. Supervised servers (`gtl start`) are restarted automatically. Servers you started manually are flagged so you know which ones to bounce.
+After adding or changing port reservations (or `port_count`), `gtl refresh` walks every allocation and re-resolves ports. Supervised servers (`gtl start`) are restarted automatically. Servers you started manually are flagged so you know which ones to bounce.
 
 ### 11. Prune stale allocations
 
@@ -355,7 +355,7 @@ env_file:
 ```yaml
 project: myapp
 merge_target: develop     # branch that prune --merged checks against (auto-detected if omitted)
-ports_needed: 2
+port_count: 2
 
 env_file: .env.local
 
@@ -469,7 +469,7 @@ See [Framework examples](#framework-examples) for complete examples. Available f
 |---|---|
 | `project` | Project name (defaults to directory name) |
 | `merge_target` | Branch that `prune --merged` checks against (auto-detected if omitted) |
-| `ports_needed` | Number of contiguous ports per worktree (default: 1) |
+| `port_count` | Number of contiguous ports per worktree (default: 1) |
 | `env_file` | Env file path (string shorthand, e.g. `.env.local`) — or map with `path` and `seed_from` when they differ |
 | `database.adapter` | `postgresql` or `sqlite` |
 | `database.template` | Source database to clone from (omit if no DB needed) |

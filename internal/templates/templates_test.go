@@ -64,7 +64,7 @@ func TestForDetection_Rails_PostgreSQL(t *testing.T) {
 	assertContains(t, content, "bundle install")
 	assertContains(t, content, "start: bin/dev")
 	assertContains(t, content, `REDIS_URL: "{redis_url}"`)
-	assertContains(t, content, "ports_needed: 2")
+	assertContains(t, content, "port_count: 2")
 	assertContains(t, content, `ESBUILD_PORT: "{port_2}"`)
 	assertContains(t, content, "yarn install")
 	assertContains(t, content, "config/master.key")
@@ -83,7 +83,7 @@ func TestForDetection_Rails_NoBundler(t *testing.T) {
 	content := ForDetection("myapp", "myapp_dev", det)
 
 	assertValidYAML(t, content)
-	assertNotContains(t, content, "ports_needed")
+	assertNotContains(t, content, "port_count")
 	assertNotContains(t, content, "ESBUILD_PORT")
 	assertNotContains(t, content, "yarn install")
 }

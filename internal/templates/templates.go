@@ -79,7 +79,7 @@ func rails(project, templateDB string, det *detect.Result) string {
 	fmt.Fprintf(&b, "project: %s\n", project)
 	writeMergeTarget(&b, det)
 	if det.HasJSBundler {
-		b.WriteString("# ports_needed: 2                  # uncomment if JS bundler needs its own port\n")
+		b.WriteString("# port_count: 2                    # uncomment if JS bundler needs its own port\n")
 	}
 
 	emit := shouldEmitEnv(det)
@@ -119,7 +119,7 @@ func rails(project, templateDB string, det *detect.Result) string {
 			b.WriteString(`  # REDIS_URL: "{redis_url}"` + "\n")
 		}
 		if det.HasJSBundler {
-			b.WriteString(`  # ESBUILD_PORT: "{port_2}"       # requires ports_needed: 2` + "\n")
+			b.WriteString(`  # ESBUILD_PORT: "{port_2}"       # requires port_count: 2` + "\n")
 		}
 		b.WriteString(`  # APPLICATION_HOST: "localhost:{port}"` + "\n")
 	}

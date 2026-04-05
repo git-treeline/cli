@@ -31,7 +31,7 @@ var refreshCmd = &cobra.Command{
 	Use:   "refresh",
 	Short: "Re-allocate all registered worktrees with current config and reservations",
 	Long: `Walks the allocation registry and re-resolves port assignments based on
-current user config (reservations) and project config (ports_needed).
+current user config (reservations) and project config (port_count).
 
 Supervised servers (started via gtl start) are restarted automatically.
 Servers started manually are listed as needing a manual restart.`,
@@ -241,7 +241,7 @@ func detectPortChange(project, branch string, currentPorts []int, isMain bool, r
 	mainRepo := worktree.DetectMainRepo(wtPath)
 	pc := config.LoadProjectConfig(mainRepo)
 	if pc != nil && len(currentPorts) != pc.PortsNeeded() {
-		return true, fmt.Sprintf("ports_needed changed (%d → %d)", len(currentPorts), pc.PortsNeeded())
+		return true, fmt.Sprintf("port_count changed (%d → %d)", len(currentPorts), pc.PortsNeeded())
 	}
 
 	return false, ""

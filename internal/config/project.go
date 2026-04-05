@@ -12,7 +12,7 @@ import (
 const ProjectConfigFile = ".treeline.yml"
 
 var ProjectDefaults = map[string]any{
-	"ports_needed": 1,
+	"port_count": 1,
 	"env_file": ".env.local",
 	"database": map[string]any{
 		"adapter":  "postgresql",
@@ -38,6 +38,7 @@ func LoadProjectConfig(projectRoot string) *ProjectConfig {
 	pc.migrateCommands()
 	pc.migrateEnvFile()
 	pc.migrateEditor()
+	pc.migratePortCount()
 	return pc
 }
 
@@ -49,7 +50,7 @@ func (pc *ProjectConfig) Project() string {
 }
 
 func (pc *ProjectConfig) PortsNeeded() int {
-	v := pc.Data["ports_needed"]
+	v := pc.Data["port_count"]
 	switch n := v.(type) {
 	case int:
 		return n
@@ -410,6 +411,32 @@ func (pc *ProjectConfig) migrateEditor() {
 		return
 	}
 	content := strings.Replace(string(raw), "vscode_title:", "title:", 1)
+	_ = os.WriteFile(path, []byte(content), 0o644)
+}
+
+func (pc *ProjectConfig) migratePortCount() {
+	_, hasOld := pc.Data["ports_needed"]
+	if !hasOld {
+		return
+	}
+
+	path := pc.configPath()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	content := string(raw)
+
+	if strings.Contains(content, "port_count:") {
+		delete(pc.Data, "ports_needed")
+		return
+	}
+
+	pc.Data["port_count"] = pc.Data["ports_needed"]
+	delete(pc.Data, "ports_needed")
+
+	_, _ = fmt.Fprintf(os.Stderr, "Warning: ports_needed is deprecated, renamed to port_count in %s\n", path)
+	content = strings.Replace(content, "ports_needed:", "port_count:", 1)
 	_ = os.WriteFile(path, []byte(content), 0o644)
 }
 
