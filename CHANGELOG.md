@@ -1,3 +1,8 @@
+## [0.25.0]
+
+- **AI agent integration** — git-treeline now speaks MCP (Model Context Protocol). Add it to your editor's MCP config and agents can query allocations, check health, read config, get database names, and control the dev server — all via structured JSON. Exposes 9 tools and 2 resources.
+- **Config rename** — `ports_needed` renamed to `port_count`. Existing configs are auto-migrated on load with a deprecation warning.
+
 ## [0.21.0]
 
 - **Editor auto-detection** — `gtl init` detects which editor is running (Cursor, VS Code, Zed, JetBrains products) via terminal env vars or PATH probing, and stores `editor.name` in user config. Used by the menulet for "Open in Editor" labels. Falls back gracefully — if detection fails, no name is stored and the menulet hides the link.

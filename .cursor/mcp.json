@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "gtl": {
+      "command": "gtl",
+      "args": ["mcp"]
+    }
+  }
+}

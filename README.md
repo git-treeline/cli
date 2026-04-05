@@ -232,6 +232,24 @@ gtl config path                      # print the config file location
 gtl config edit                      # open in $EDITOR
 ```
 
+### 14. AI agent integration (MCP)
+
+git-treeline speaks [MCP](https://modelcontextprotocol.io/) natively. Add this to your editor config and agents automatically get access to your worktree allocations, ports, databases, and dev server controls.
+
+**Cursor** (`.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "gtl": { "command": "gtl", "args": ["mcp"] }
+  }
+}
+```
+
+**Claude Code**: `claude mcp add gtl -- gtl mcp`
+
+Once configured, agents can query allocations (`status`, `port`, `list`), check project health (`doctor`), read config values (`config_get`), get database names (`db_name`), and control the supervised dev server (`start`, `stop`, `restart`) — all as structured JSON without parsing CLI output.
+
 ## Port-dependent data
 
 If your app stores URLs that include the port (e.g., OAuth redirect URIs, webhook endpoints), the cloned database will have stale values pointing to the wrong port. Use `commands.setup` to patch them — setup commands run after the env file is written, so `PORT` is available:
@@ -594,6 +612,7 @@ This returns the full registry as JSON — allocated ports, databases, Redis nam
 | `gtl tunnel status` | | Show tunnel configuration and readiness |
 | `gtl config` | | Show or initialize user-level config |
 | `gtl db` | `name` `reset` `restore` `drop` | Manage worktree databases |
+| `gtl mcp` | | MCP server for AI agents (started automatically by your editor) |
 | `gtl version` | | Print version |
 
 ## License
