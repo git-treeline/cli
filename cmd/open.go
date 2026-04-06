@@ -50,22 +50,22 @@ var openCmd = &cobra.Command{
 		project := pc.Project()
 		branch := format.GetStr(fa, "branch")
 
-		url := fmt.Sprintf("http://localhost:%d", ports[0])
-
-		if branch != "" && service.IsRunning() {
-			domain := uc.RouterDomain()
-			routeKey := proxy.RouteKey(project, branch)
-			if service.IsPortForwardConfigured() {
-				url = fmt.Sprintf("https://%s.%s", routeKey, domain)
-			} else {
-				routerPort := uc.RouterPort()
-				url = fmt.Sprintf("https://%s.%s:%d", routeKey, domain, routerPort)
-			}
-		}
+		url := buildOpenURL(ports[0], project, branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
 
 		fmt.Printf("Opening %s\n", url)
 		return openBrowser(url)
 	},
+}
+
+func buildOpenURL(port int, project, branch, domain string, routerPort int, svcRunning, pfConfigured bool) string {
+	if branch != "" && svcRunning {
+		routeKey := proxy.RouteKey(project, branch)
+		if pfConfigured {
+			return fmt.Sprintf("https://%s.%s", routeKey, domain)
+		}
+		return fmt.Sprintf("https://%s.%s:%d", routeKey, domain, routerPort)
+	}
+	return fmt.Sprintf("http://localhost:%d", port)
 }
 
 func openBrowser(url string) error {
