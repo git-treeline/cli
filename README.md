@@ -716,6 +716,7 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl share [port]` | `--tunnel` `--tailscale` | Private share URL (Cloudflare token-gated or Tailscale tailnet) |
 | `gtl config` | | Show or initialize user-level config |
 | `gtl db` | `name` `reset` `restore` `drop` — `name --json` | Manage worktree databases |
+| `gtl dashboard` | aliases: `dash`, `ui` | Interactive TUI for monitoring and managing all worktrees |
 | `gtl mcp` | | MCP server for AI agents (started automatically by your editor) |
 | `gtl version` | | Print version |
 

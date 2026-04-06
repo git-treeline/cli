@@ -4,6 +4,7 @@ import (
 	"sort"
 
 	"github.com/git-treeline/git-treeline/internal/allocator"
+	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/format"
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/git-treeline/git-treeline/internal/service"
@@ -20,6 +21,7 @@ type WorktreeStatus struct {
 	Database     string
 	RedisPrefix  string
 	RedisDB      int
+	EnvFile      string
 	Links        map[string]string
 	Supervisor   string // "running", "stopped", or "not running"
 	Listening    bool
@@ -64,6 +66,14 @@ func Poll() Snapshot {
 
 		links := extractLinks(a)
 
+		envFile := ""
+		if wt != "" {
+			pc := config.LoadProjectConfig(wt)
+			if pc.HasEnvFileConfig() {
+				envFile = pc.EnvFileTarget()
+			}
+		}
+
 		var redisDB int
 		if v, ok := a["redis_db"].(float64); ok {
 			redisDB = int(v)
@@ -78,6 +88,7 @@ func Poll() Snapshot {
 			Database:     format.GetStr(fa, "database"),
 			RedisPrefix:  format.GetStr(fa, "redis_prefix"),
 			RedisDB:      redisDB,
+			EnvFile:      envFile,
 			Links:        links,
 			Supervisor:   sv,
 			Listening:    listening,

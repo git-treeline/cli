@@ -321,7 +321,7 @@ func (m *Model) releaseWorktree() tea.Cmd {
 	}
 	wtPath := wt.WorktreePath
 	return func() tea.Msg {
-		cmd := exec.Command("git-treeline", "release", wtPath)
+		cmd := exec.Command("git-treeline", "release", "--force", wtPath)
 		_ = cmd.Run()
 		return supervisorResultMsg{}
 	}

@@ -160,7 +160,7 @@ func (m *Model) renderDetailPanel(width, height int) string {
 	}
 
 	rows = append(rows,
-		struct{ label, value string }{"Env file", ".env.local"},
+		struct{ label, value string }{"Env file", valueOrDash(wt.EnvFile)},
 		struct{ label, value string }{"Worktree", truncate(wt.WorktreePath, width-16)},
 	)
 

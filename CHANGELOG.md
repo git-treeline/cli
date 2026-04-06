@@ -1,3 +1,7 @@
+## [0.29.0]
+
+- **`gtl dashboard`** — interactive TUI for monitoring and managing all worktrees in real time. Two-panel layout with project-grouped worktree list and live detail view. Keyboard-driven: start/stop/restart supervisors, open in browser, release worktrees with confirmation, filter search, and help overlay. Mouse support included. Accessible via `gtl dashboard`, `gtl dash`, or `gtl ui`. Built on Bubble Tea v2.
+
 ## [0.28.1]
 
 - **`gtl tunnel remove <name>`** — remove a named tunnel from local config. If the removed tunnel was the default and other tunnels remain, another is promoted automatically. If it was the last tunnel, gtl falls back to quick tunnels (random URLs). Does not delete the Cloudflare tunnel itself.
