@@ -9,3 +9,4 @@ gtl
 # Local
 .envrc
 temp/
+tmp/
