@@ -268,6 +268,14 @@ Prints the current worktree's env file contents. Keys that Treeline manages (def
 ### 12. Release when done
 
 ```bash
+gtl release ../myapp-feature-auth --drop-db --remove-worktree
+```
+
+`--remove-worktree` runs `git worktree remove` after freeing the allocation. If the worktree has uncommitted changes, removal is skipped unless `--force` is also set.
+
+Without the flag, releasing and removing the directory are separate steps:
+
+```bash
 gtl release ../myapp-feature-auth --drop-db
 git worktree remove ../myapp-feature-auth
 ```
@@ -732,16 +740,16 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | Command | Flags | Description |
 |---|---|---|
 | `gtl init` | `--project` `--template-db` `--skip-agent-config` | Generate `.treeline.yml` (auto-detects framework, writes `AGENTS.md` section) |
-| `gtl new <branch>` | `--base` `--path` `--start` `--dry-run` | Create worktree + allocate + setup in one step |
-| `gtl review <PR#>` | `--path` `--start` | Check out a GitHub PR into a worktree with full setup (requires `gh`) |
-| `gtl switch <branch-or-PR#>` | `--setup` | Switch worktree to a different branch or PR — fetches, checks out, refreshes env |
+| `gtl new <branch>` | `--base` `--path` `--start` `--open` `--dry-run` | Create worktree + allocate + setup in one step |
+| `gtl review <PR#>` | `--path` `--start` `--open` | Check out a GitHub PR into a worktree with full setup (requires `gh`) |
+| `gtl switch <branch-or-PR#>` | `--setup` `--restart` | Switch worktree to a different branch or PR — fetches, checks out, refreshes env |
 | `gtl setup [PATH]` | `--main-repo` `--dry-run` | Allocate resources and configure a worktree (idempotent) |
-| `gtl release [PATH]` | `--drop-db` `--project` `--all` `--force`/`-f` `--dry-run` | Free allocated resources (confirms before releasing unless `--force`) |
+| `gtl release [PATH]` | `--drop-db` `--remove-worktree` `--project` `--all` `--force`/`-f` `--dry-run` | Free allocated resources (confirms before releasing unless `--force`) |
 | `gtl port` | `--json` | Print the allocated port for the current worktree |
 | `gtl refresh` | `--dry-run` `--force`/`-f` | Re-allocate all worktrees with current reservations; restarts supervised servers |
 | `gtl doctor` | `--json` | Check config, allocation, runtime, and diagnostics |
 | `gtl status` | `--project` `--json` `--check` `--watch` `--interval` | Show allocations across projects |
-| `gtl prune` | `--stale` `--merged` `--drop-db` `--force` | Remove orphaned allocations |
+| `gtl prune` | `--stale` `--merged` `--drop-db` `--remove-worktree` `--force` | Remove orphaned allocations |
 | `gtl start` | `--await` `--await-timeout` | Run `commands.start` under supervisor (or resume). `--await` blocks until TCP-ready. |
 | `gtl stop` | | Stop the server process (supervisor stays alive) |
 | `gtl restart` | | Restart the server process in the original terminal |

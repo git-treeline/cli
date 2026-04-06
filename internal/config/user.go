@@ -11,8 +11,8 @@ import (
 
 var UserDefaults = map[string]any{
 	"port": map[string]any{
-		"base":      float64(3000),
-		"increment": float64(10),
+		"base":      float64(3002),
+		"increment": float64(2),
 	},
 	"redis": map[string]any{
 		"strategy": "prefixed",
@@ -44,7 +44,7 @@ func (uc *UserConfig) PortBase() int {
 	if f, ok := v.(float64); ok {
 		return int(f)
 	}
-	return 3000
+	return 3002
 }
 
 func (uc *UserConfig) PortIncrement() int {
@@ -52,7 +52,7 @@ func (uc *UserConfig) PortIncrement() int {
 	if f, ok := v.(float64); ok {
 		return int(f)
 	}
-	return 10
+	return 2
 }
 
 func (uc *UserConfig) PortReservations() map[string]int {
@@ -292,14 +292,14 @@ func (uc *UserConfig) Set(dottedKey string, value any) {
 }
 
 func (uc *UserConfig) Save() error {
-	if err := os.MkdirAll(filepath.Dir(uc.Path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(uc.Path), platform.DirMode); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(uc.Data, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(uc.Path, append(data, '\n'), 0o644)
+	return os.WriteFile(uc.Path, append(data, '\n'), platform.PrivateFileMode)
 }
 
 func (uc *UserConfig) Exists() bool {
@@ -308,14 +308,14 @@ func (uc *UserConfig) Exists() bool {
 }
 
 func (uc *UserConfig) Init() error {
-	if err := os.MkdirAll(filepath.Dir(uc.Path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(uc.Path), platform.DirMode); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(UserDefaults, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(uc.Path, append(data, '\n'), 0o644)
+	return os.WriteFile(uc.Path, append(data, '\n'), platform.PrivateFileMode)
 }
 
 var userKnownKeys = map[string]bool{

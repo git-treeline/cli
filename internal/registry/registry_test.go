@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/git-treeline/git-treeline/internal/platform"
 )
 
 func newTestRegistry(t *testing.T) *Registry {
@@ -453,5 +455,44 @@ func TestRegistry_ReleaseMany_Empty(t *testing.T) {
 	}
 	if len(reg.Allocations()) != 1 {
 		t.Error("expected allocation to remain")
+	}
+}
+
+func TestRegistry_FilePermissions(t *testing.T) {
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "sub", "registry.json")
+	reg := New(regPath)
+
+	entry := Allocation{
+		"project":  "test",
+		"worktree": "/tmp/wt/perms",
+		"port":     float64(3000),
+	}
+	if err := reg.Allocate(entry); err != nil {
+		t.Fatalf("Allocate: %v", err)
+	}
+
+	dirInfo, err := os.Stat(filepath.Join(dir, "sub"))
+	if err != nil {
+		t.Fatalf("stat dir: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != platform.DirMode {
+		t.Errorf("data dir mode = %o, want %o", got, platform.DirMode)
+	}
+
+	fileInfo, err := os.Stat(regPath)
+	if err != nil {
+		t.Fatalf("stat registry: %v", err)
+	}
+	if got := fileInfo.Mode().Perm(); got != platform.PrivateFileMode {
+		t.Errorf("registry file mode = %o, want %o", got, platform.PrivateFileMode)
+	}
+
+	lockInfo, err := os.Stat(regPath + ".lock")
+	if err != nil {
+		t.Fatalf("stat lock: %v", err)
+	}
+	if got := lockInfo.Mode().Perm(); got != platform.PrivateFileMode {
+		t.Errorf("lock file mode = %o, want %o", got, platform.PrivateFileMode)
 	}
 }

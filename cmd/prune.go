@@ -14,16 +14,18 @@ import (
 )
 
 var (
-	pruneStale  bool
-	pruneMerged bool
-	pruneDropDB bool
-	pruneForce  bool
+	pruneStale           bool
+	pruneMerged          bool
+	pruneDropDB          bool
+	pruneForce           bool
+	pruneRemoveWorktree  bool
 )
 
 func init() {
 	pruneCmd.Flags().BoolVar(&pruneStale, "stale", false, "Also remove allocations for directories not listed in git worktree list")
 	pruneCmd.Flags().BoolVar(&pruneMerged, "merged", false, "Remove allocations for worktrees on branches merged to main")
 	pruneCmd.Flags().BoolVar(&pruneDropDB, "drop-db", false, "Also drop databases for pruned allocations")
+	pruneCmd.Flags().BoolVar(&pruneRemoveWorktree, "remove-worktree", false, "Also remove the git worktree directories")
 	pruneCmd.Flags().BoolVar(&pruneForce, "force", false, "Skip confirmation prompt")
 	rootCmd.AddCommand(pruneCmd)
 }
@@ -98,7 +100,11 @@ func runPruneMerged() error {
 
 		if wt := format.GetStr(fa, "worktree"); wt != "" {
 			if _, err := os.Stat(wt); err == nil {
-				fmt.Printf("    (worktree dir still exists at %s — remove with: git worktree remove %s)\n", wt, filepath.Base(wt))
+				if pruneRemoveWorktree {
+					fmt.Printf("    (will remove worktree at %s)\n", wt)
+				} else {
+					fmt.Printf("    (worktree dir still exists at %s — remove with: git worktree remove %s)\n", wt, filepath.Base(wt))
+				}
 			}
 		}
 	}
@@ -124,6 +130,12 @@ func runPruneMerged() error {
 	count, err := reg.ReleaseMany(paths)
 	if err != nil {
 		return err
+	}
+
+	if pruneRemoveWorktree {
+		for _, p := range paths {
+			removeWorktreeDir(p, pruneForce)
+		}
 	}
 
 	fmt.Printf("Released %d allocation(s).\n", count)

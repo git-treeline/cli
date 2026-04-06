@@ -15,6 +15,27 @@ import (
 
 const appName = "git-treeline"
 
+const (
+	// DirMode is the permission for the git-treeline data directory.
+	// Owner-only: the directory contains credentials (redis URLs) and
+	// the registry that drives proxy routing.
+	DirMode os.FileMode = 0o700
+
+	// PrivateFileMode is the permission for files that may contain
+	// credentials or routing state (config.json, registry.json).
+	PrivateFileMode os.FileMode = 0o600
+)
+
+// EnsureConfigDir creates the config directory with DirMode if it doesn't
+// exist, and tightens permissions on an existing directory if it's too open.
+func EnsureConfigDir() error {
+	dir := ConfigDir()
+	if err := os.MkdirAll(dir, DirMode); err != nil {
+		return err
+	}
+	return os.Chmod(dir, DirMode)
+}
+
 // IsDevMode returns true when GTL_HOME is set, indicating this instance
 // should use an isolated state directory.
 func IsDevMode() bool {

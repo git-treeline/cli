@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/git-treeline/git-treeline/internal/allocator"
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/confirm"
 	"github.com/git-treeline/git-treeline/internal/detect"
@@ -128,6 +129,22 @@ var initCmd = &cobra.Command{
 			for _, line := range splitLines(d.Message) {
 				fmt.Printf("  %s\n", line)
 			}
+		}
+
+		base := uc.PortBase()
+		routerPort := uc.RouterPort()
+		if base == routerPort {
+			fmt.Println()
+			fmt.Println(style.Warnf("port.base (%d) conflicts with router.port (%d).", base, routerPort))
+			fmt.Println(style.Dimf("  The router needs its own port. Fix: gtl config set port.base %d", routerPort+1))
+		} else if allocator.IsCommonDevPort(base) {
+			fmt.Println()
+			fmt.Println(style.Warnf("port.base is %d — a common framework default.", base))
+			fmt.Println(style.Dimf("  Port 3000 should stay free for the proxy so third-party services"))
+			fmt.Println(style.Dimf("  (OAuth, Mapbox, Stripe) work across branches without reconfiguration."))
+			fmt.Println(style.Dimf("  Port %d is the router. Default base is 3002.", routerPort))
+			fmt.Println(style.Dimf("  Fix: gtl config set port.base 3002"))
+			fmt.Println(style.Dimf("  See: https://git-treeline.dev/docs/port-preservation"))
 		}
 
 		fmt.Println()

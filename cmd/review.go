@@ -10,6 +10,7 @@ import (
 	"github.com/git-treeline/git-treeline/internal/format"
 	"github.com/git-treeline/git-treeline/internal/github"
 	"github.com/git-treeline/git-treeline/internal/registry"
+	"github.com/git-treeline/git-treeline/internal/service"
 	"github.com/git-treeline/git-treeline/internal/setup"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
@@ -17,10 +18,12 @@ import (
 
 var reviewPath string
 var reviewStart bool
+var reviewOpen bool
 
 func init() {
 	reviewCmd.Flags().StringVar(&reviewPath, "path", "", "Custom worktree path (default: ../<project>-pr-<number>)")
 	reviewCmd.Flags().BoolVar(&reviewStart, "start", false, "Run commands.start after setup")
+	reviewCmd.Flags().BoolVar(&reviewOpen, "open", false, "Open the worktree in the browser after setup")
 	reviewCmd.ValidArgsFunction = completePRs
 	rootCmd.AddCommand(reviewCmd)
 }
@@ -78,15 +81,48 @@ resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 			return err
 		}
 
-		// Check if this branch is already checked out in a worktree
+		// If the branch is already in a worktree, ensure it has an allocation
+		// and treat the command as resumable rather than a dead end.
 		if existing := worktree.FindWorktreeForBranch(branch); existing != "" {
 			fmt.Printf("==> Branch '%s' already checked out at %s\n", branch, existing)
 			reg := registry.New("")
-			if alloc := reg.Find(existing); alloc != nil {
-				printExistingAllocation(prNumber, branch, existing, alloc)
-			} else {
-				fmt.Printf("\nPR #%d worktree exists at %s (no allocation found)\n", prNumber, existing)
+			alloc := reg.Find(existing)
+
+			if alloc == nil {
+				fmt.Println("==> No allocation found — running setup...")
+				s := setup.New(existing, mainRepo, uc)
+				if _, err := s.Run(); err != nil {
+					return errSetupFailed(err)
+				}
+				reg = registry.New("")
+				alloc = reg.Find(existing)
 			}
+
+			if alloc != nil {
+				printExistingAllocation(prNumber, branch, existing, alloc)
+				printRouterAndTunnel(uc, projectName, branch)
+
+				if reviewOpen {
+					ports := format.GetPorts(format.Allocation(alloc))
+					if len(ports) > 0 {
+						url := buildOpenURL(ports[0], projectName, branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
+						fmt.Printf("Opening %s\n", url)
+						_ = openBrowser(url)
+					}
+				}
+			}
+
+			if reviewStart {
+				startCmd := pc.StartCommand()
+				if startCmd == "" {
+					fmt.Println("Warning: --start passed but no commands.start configured in .treeline.yml")
+					return nil
+				}
+				fmt.Printf("==> Starting: %s\n", startCmd)
+				return execInWorktree(existing, startCmd)
+			}
+
+			fmt.Printf("\n  cd %s\n", existing)
 			return nil
 		}
 
@@ -117,6 +153,12 @@ resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 		fmt.Printf("  Path:     %s\n", wtPath)
 		if alloc != nil {
 			fmt.Printf("  URL:      http://localhost:%d\n", alloc.Port)
+		}
+
+		if reviewOpen && alloc != nil && alloc.Port > 0 {
+			url := buildOpenURL(alloc.Port, projectName, alloc.Branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
+			fmt.Printf("Opening %s\n", url)
+			_ = openBrowser(url)
 		}
 
 		if reviewStart {

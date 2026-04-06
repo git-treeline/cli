@@ -253,6 +253,29 @@ func ListBranches(prefix string) []string {
 	return result
 }
 
+// Remove runs `git worktree remove` on the given path. If force is true,
+// it passes --force to remove even with uncommitted changes.
+// Returns nil if the path is the main worktree (cannot be removed).
+func Remove(worktreePath string, force bool) error {
+	mainRepo := DetectMainRepo(worktreePath)
+	if mainRepo == worktreePath {
+		return fmt.Errorf("cannot remove the main worktree")
+	}
+
+	args := []string{"worktree", "remove", worktreePath}
+	if force {
+		args = []string{"worktree", "remove", "--force", worktreePath}
+	}
+	_, err := gitRun(mainRepo, args...)
+	return err
+}
+
+// HasUncommittedChanges returns true if the worktree has staged or unstaged changes.
+func HasUncommittedChanges(worktreePath string) bool {
+	return !gitCheck(worktreePath, "diff", "--quiet") ||
+		!gitCheck(worktreePath, "diff", "--cached", "--quiet")
+}
+
 // DetectMainRepo returns the root worktree path (the main repo) by parsing
 // `git worktree list --porcelain`. Falls back to the given path.
 func DetectMainRepo(worktreePath string) string {

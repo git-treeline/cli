@@ -98,6 +98,10 @@ func New(uc *config.UserConfig, pc *config.ProjectConfig, reg *registry.Registry
 // (port_base, template DB, no redis prefix) are returned directly.
 // Branch is optional — when provided, enables branch-specific port reservations.
 func (al *Allocator) Allocate(worktreePath, worktreeName string, mainWorktree bool, branch ...string) (*Allocation, error) {
+	if err := al.validatePortConfig(); err != nil {
+		return nil, err
+	}
+
 	var b string
 	if len(branch) > 0 {
 		b = branch[0]
@@ -109,6 +113,20 @@ func (al *Allocator) Allocate(worktreePath, worktreeName string, mainWorktree bo
 		return al.allocateMain(worktreePath, worktreeName, b)
 	}
 	return al.allocateNew(worktreePath, worktreeName, b)
+}
+
+func (al *Allocator) validatePortConfig() error {
+	base := al.UserConfig.PortBase()
+	routerPort := al.UserConfig.RouterPort()
+
+	if base == routerPort {
+		return fmt.Errorf(
+			"port.base (%d) conflicts with router.port (%d)\n\n"+
+				"  The router needs its own port to proxy traffic. Set a different base:\n"+
+				"    gtl config set port.base %d",
+			base, routerPort, routerPort+1)
+	}
+	return nil
 }
 
 func (al *Allocator) reuseExisting(worktreePath, worktreeName string, mainWorktree bool, branch string) *Allocation {
@@ -288,6 +306,28 @@ func (al *Allocator) BuildRedisURL(alloc *Allocation) string {
 	return interpolation.BuildRedisURL(al.UserConfig.RedisURL(), m)
 }
 
+// CommonDevPorts are well-known framework default ports that should be kept
+// free for the proxy to claim. Third-party services (OAuth, Mapbox, Stripe
+// webhooks) are typically whitelisted for these origins — if treeline allocates
+// one, the proxy can't sit on it and the origin-preservation story breaks.
+var CommonDevPorts = map[int]bool{
+	3000: true, // Rails, Node/Express, Create React App, Vite fallback
+	4000: true, // Ember, some Express setups
+	4200: true, // Angular CLI
+	5000: true, // Flask, .NET
+	5173: true, // Vite default
+	5174: true, // Vite secondary
+	8000: true, // Django, PHP built-in server
+	8080: true, // Tomcat, generic HTTP alternative
+	8888: true, // Jupyter
+}
+
+// IsCommonDevPort reports whether the port is a well-known framework default
+// that should be kept free for the proxy.
+func IsCommonDevPort(port int) bool {
+	return CommonDevPorts[port]
+}
+
 // browserBlockedPorts is the WHATWG fetch spec "bad port" set. Browsers
 // silently refuse connections to these ports with no useful error message.
 var browserBlockedPorts = map[int]bool{
@@ -323,7 +363,7 @@ func (al *Allocator) nextAvailablePortsFrom(start, count int) []int {
 		for i := range count {
 			port := candidate + i
 			block[i] = port
-			if usedSet[port] || reserved[port] || port == routerPort || browserBlockedPorts[port] || !IsPortFree(port) {
+			if usedSet[port] || reserved[port] || port == routerPort || browserBlockedPorts[port] || CommonDevPorts[port] || !IsPortFree(port) {
 				conflict = true
 			}
 		}

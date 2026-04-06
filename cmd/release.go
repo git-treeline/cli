@@ -15,15 +15,17 @@ import (
 )
 
 var (
-	releaseDropDB  bool
-	releaseProject string
-	releaseAll     bool
-	releaseForce   bool
-	releaseDryRun  bool
+	releaseDropDB        bool
+	releaseProject       string
+	releaseAll           bool
+	releaseForce         bool
+	releaseDryRun        bool
+	releaseRemoveWorktree bool
 )
 
 func init() {
 	releaseCmd.Flags().BoolVar(&releaseDropDB, "drop-db", false, "Also drop the database")
+	releaseCmd.Flags().BoolVar(&releaseRemoveWorktree, "remove-worktree", false, "Also remove the git worktree directory")
 	releaseCmd.Flags().StringVar(&releaseProject, "project", "", "Release all allocations for a project")
 	releaseCmd.Flags().BoolVar(&releaseAll, "all", false, "Release all allocations across all projects")
 	releaseCmd.Flags().BoolVarP(&releaseForce, "force", "f", false, "Skip confirmation prompt")
@@ -125,6 +127,10 @@ func runReleaseSingle(args []string) error {
 	}
 	if db != "" {
 		fmt.Printf("  Database: %s\n", db)
+	}
+
+	if releaseRemoveWorktree {
+		removeWorktreeDir(absPath, releaseForce)
 	}
 
 	if cmds, ok := hooks["post_release"]; ok && len(cmds) > 0 {
@@ -232,6 +238,27 @@ func runReleaseBatch(project string, all bool) error {
 		return err
 	}
 
+	if releaseRemoveWorktree {
+		for _, p := range paths {
+			removeWorktreeDir(p, releaseForce)
+		}
+	}
+
 	fmt.Printf("Released %d allocation(s).\n", count)
 	return nil
+}
+
+func removeWorktreeDir(absPath string, force bool) {
+	if _, err := os.Stat(absPath); err != nil {
+		return
+	}
+	if !force && worktree.HasUncommittedChanges(absPath) {
+		fmt.Fprintf(os.Stderr, "Warning: %s has uncommitted changes, skipping removal (use --force to override)\n", filepath.Base(absPath))
+		return
+	}
+	if err := worktree.Remove(absPath, force); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to remove worktree: %s\n", err)
+		return
+	}
+	fmt.Printf("  Removed worktree %s\n", filepath.Base(absPath))
 }

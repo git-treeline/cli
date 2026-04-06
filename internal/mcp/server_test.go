@@ -212,6 +212,8 @@ func TestHandleStatus(t *testing.T) {
 }
 
 func TestHandleConfigGet_User(t *testing.T) {
+	t.Setenv("GTL_HOME", t.TempDir())
+
 	req := mcplib.CallToolRequest{}
 	req.Params.Name = "config_get"
 	req.Params.Arguments = map[string]any{
@@ -224,8 +226,8 @@ func TestHandleConfigGet_User(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := extractText(t, result)
-	if text != "3000" {
-		t.Errorf("expected 3000, got %s", text)
+	if text != "3002" {
+		t.Errorf("expected 3002, got %s", text)
 	}
 }
 
