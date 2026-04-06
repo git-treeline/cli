@@ -268,6 +268,14 @@ Prints the current worktree's env file contents. Keys that Treeline manages (def
 ### 12. Release when done
 
 ```bash
+gtl release ../myapp-feature-auth --drop-db --remove-worktree
+```
+
+`--remove-worktree` runs `git worktree remove` after freeing the allocation. If the worktree has uncommitted changes, removal is skipped unless `--force` is also set.
+
+Without the flag, releasing and removing the directory are separate steps:
+
+```bash
 gtl release ../myapp-feature-auth --drop-db
 git worktree remove ../myapp-feature-auth
 ```
@@ -736,7 +744,7 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl review <PR#>` | `--path` `--start` | Check out a GitHub PR into a worktree with full setup (requires `gh`) |
 | `gtl switch <branch-or-PR#>` | `--setup` | Switch worktree to a different branch or PR — fetches, checks out, refreshes env |
 | `gtl setup [PATH]` | `--main-repo` `--dry-run` | Allocate resources and configure a worktree (idempotent) |
-| `gtl release [PATH]` | `--drop-db` `--project` `--all` `--force`/`-f` `--dry-run` | Free allocated resources (confirms before releasing unless `--force`) |
+| `gtl release [PATH]` | `--drop-db` `--remove-worktree` `--project` `--all` `--force`/`-f` `--dry-run` | Free allocated resources (confirms before releasing unless `--force`) |
 | `gtl port` | `--json` | Print the allocated port for the current worktree |
 | `gtl refresh` | `--dry-run` `--force`/`-f` | Re-allocate all worktrees with current reservations; restarts supervised servers |
 | `gtl doctor` | `--json` | Check config, allocation, runtime, and diagnostics |
