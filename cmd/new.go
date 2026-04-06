@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/git-treeline/internal/service"
 	"github.com/git-treeline/git-treeline/internal/setup"
 	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/git-treeline/git-treeline/internal/worktree"
@@ -17,12 +18,14 @@ import (
 var newBase string
 var newPath string
 var newStart bool
+var newOpen bool
 var newDryRun bool
 
 func init() {
 	newCmd.Flags().StringVar(&newBase, "base", "", "Base branch for the new worktree (default: current branch)")
 	newCmd.Flags().StringVar(&newPath, "path", "", "Custom worktree path (default: ../<project>-<branch>)")
 	newCmd.Flags().BoolVar(&newStart, "start", false, "Run commands.start after setup")
+	newCmd.Flags().BoolVar(&newOpen, "open", false, "Open the worktree in the browser after setup")
 	newCmd.Flags().BoolVar(&newDryRun, "dry-run", false, "Print what would happen without making changes")
 	newCmd.ValidArgsFunction = completeBranches
 	rootCmd.AddCommand(newCmd)
@@ -125,6 +128,12 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		}
 
 		printRouterAndTunnel(uc, projectName, alloc.Branch)
+
+		if newOpen && alloc.Port > 0 {
+			url := buildOpenURL(alloc.Port, projectName, alloc.Branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
+			fmt.Printf("Opening %s\n", url)
+			_ = openBrowser(url)
+		}
 
 		if newStart {
 			startCmd := pc.StartCommand()

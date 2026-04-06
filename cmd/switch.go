@@ -11,14 +11,17 @@ import (
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/git-treeline/git-treeline/internal/setup"
 	"github.com/git-treeline/git-treeline/internal/style"
+	"github.com/git-treeline/git-treeline/internal/supervisor"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
 )
 
 var switchRunSetup bool
+var switchRestart bool
 
 func init() {
 	switchCmd.Flags().BoolVar(&switchRunSetup, "setup", false, "Re-run commands.setup after switching (for when deps changed)")
+	switchCmd.Flags().BoolVar(&switchRestart, "restart", false, "Restart the supervised server after switching")
 	switchCmd.ValidArgsFunction = completeBranchesAndPRs
 	rootCmd.AddCommand(switchCmd)
 }
@@ -87,6 +90,15 @@ Must be run from inside a worktree (not the main repo).`,
 		fmt.Printf("  Path: %s\n", absPath)
 		if alloc != nil && alloc.Port > 0 {
 			fmt.Printf("  URL:  http://localhost:%d\n", alloc.Port)
+		}
+
+		if switchRestart {
+			sockPath := supervisor.SocketPath(absPath)
+			if resp, err := supervisor.Send(sockPath, "restart"); err == nil && resp == "ok" {
+				fmt.Println("Server restarted.")
+			} else {
+				fmt.Fprintln(os.Stderr, style.Warnf("could not restart server (is it running?)"))
+			}
 		}
 
 		return nil

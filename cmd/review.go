@@ -10,6 +10,7 @@ import (
 	"github.com/git-treeline/git-treeline/internal/format"
 	"github.com/git-treeline/git-treeline/internal/github"
 	"github.com/git-treeline/git-treeline/internal/registry"
+	"github.com/git-treeline/git-treeline/internal/service"
 	"github.com/git-treeline/git-treeline/internal/setup"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
@@ -17,10 +18,12 @@ import (
 
 var reviewPath string
 var reviewStart bool
+var reviewOpen bool
 
 func init() {
 	reviewCmd.Flags().StringVar(&reviewPath, "path", "", "Custom worktree path (default: ../<project>-pr-<number>)")
 	reviewCmd.Flags().BoolVar(&reviewStart, "start", false, "Run commands.start after setup")
+	reviewCmd.Flags().BoolVar(&reviewOpen, "open", false, "Open the worktree in the browser after setup")
 	reviewCmd.ValidArgsFunction = completePRs
 	rootCmd.AddCommand(reviewCmd)
 }
@@ -117,6 +120,12 @@ resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 		fmt.Printf("  Path:     %s\n", wtPath)
 		if alloc != nil {
 			fmt.Printf("  URL:      http://localhost:%d\n", alloc.Port)
+		}
+
+		if reviewOpen && alloc != nil && alloc.Port > 0 {
+			url := buildOpenURL(alloc.Port, projectName, alloc.Branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
+			fmt.Printf("Opening %s\n", url)
+			_ = openBrowser(url)
 		}
 
 		if reviewStart {
