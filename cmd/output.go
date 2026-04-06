@@ -19,7 +19,7 @@ import (
 var errServeNotInstalled error = &CliError{
 	Message: "HTTPS router not installed.",
 	Hint:    "Run 'gtl serve install' first (one-time setup).",
-	DocsURL: "https://gittreeline.com/docs/#getting-started",
+	DocsURL: "https://git-treeline.dev/docs/#getting-started",
 }
 
 // requireServeInstalled returns errServeNotInstalled when the HTTPS CA is

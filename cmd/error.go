@@ -75,13 +75,6 @@ func errNotInWorktree() error {
 	}
 }
 
-func errInsideWorktree(wtName string) error {
-	return &CliError{
-		Message: fmt.Sprintf("You're inside worktree '%s', not the main repo.", wtName),
-		Hint:    "'gtl new' must be run from the main repo checkout, not from a worktree.",
-	}
-}
-
 func errNoStartCommand() error {
 	return &CliError{
 		Message: "No commands.start configured in .treeline.yml",

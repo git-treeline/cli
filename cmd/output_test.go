@@ -19,7 +19,7 @@ func TestErrServeNotInstalled_ContainsGuidance(t *testing.T) {
 	if !strings.Contains(ce.Hint, "gtl serve install") {
 		t.Errorf("expected 'gtl serve install' in hint, got: %s", ce.Hint)
 	}
-	if !strings.Contains(ce.DocsURL, "gittreeline.com") {
+	if !strings.Contains(ce.DocsURL, "git-treeline.dev") {
 		t.Errorf("expected docs URL, got: %s", ce.DocsURL)
 	}
 }

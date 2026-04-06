@@ -303,12 +303,12 @@ func (r *Router) serveNotFound(w http.ResponseWriter, subdomain string) {
 	w.WriteHeader(http.StatusNotFound)
 
 	var body strings.Builder
-	body.WriteString(fmt.Sprintf("<p>No route matches <code>%s</code>.</p>", subdomain))
+	fmt.Fprintf(&body, "<p>No route matches <code>%s</code>.</p>", subdomain)
 	if len(routes) > 0 {
 		body.WriteString("<p>Available routes:</p><table><tr><th>Route</th><th>Port</th></tr>")
 		for _, k := range sortedKeys(routes) {
 			href := fmt.Sprintf("%s://%s.%s", r.scheme(), k, r.baseDomain)
-			body.WriteString(fmt.Sprintf("<tr><td><a href=%q>%s</a></td><td>%d</td></tr>", href, k, routes[k]))
+			fmt.Fprintf(&body, "<tr><td><a href=%q>%s</a></td><td>%d</td></tr>", href, k, routes[k])
 		}
 		body.WriteString("</table>")
 	} else {
