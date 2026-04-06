@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/confirm"
 	"github.com/git-treeline/git-treeline/internal/format"
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/git-treeline/git-treeline/internal/setup"
+	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
 )
@@ -252,6 +254,26 @@ func removeWorktreeDir(absPath string, force bool) {
 	if _, err := os.Stat(absPath); err != nil {
 		return
 	}
+
+	// Check if we're inside the worktree being removed
+	cwd, _ := os.Getwd()
+	cwdAbs, _ := filepath.Abs(cwd)
+	insideWorktree := cwdAbs == absPath || strings.HasPrefix(cwdAbs+string(os.PathSeparator), absPath+string(os.PathSeparator))
+
+	if insideWorktree {
+		mainRepo := worktree.DetectMainRepo(absPath)
+		fmt.Println()
+		fmt.Println(style.Warnf("You're inside the worktree being removed."))
+		fmt.Println(style.Dimf("  After removal, this directory will no longer exist."))
+		fmt.Println(style.Dimf("  Your terminal will need: cd %s", mainRepo))
+		fmt.Println(style.Dimf("  If in an IDE, close this window or switch workspaces."))
+		fmt.Println()
+		if !force && !confirm.Prompt("Continue with removal?", false, nil) {
+			fmt.Println("Skipped worktree removal.")
+			return
+		}
+	}
+
 	if !force && worktree.HasUncommittedChanges(absPath) {
 		fmt.Fprintf(os.Stderr, "Warning: %s has uncommitted changes, skipping removal (use --force to override)\n", filepath.Base(absPath))
 		return
@@ -261,4 +283,10 @@ func removeWorktreeDir(absPath string, force bool) {
 		return
 	}
 	fmt.Printf("  Removed worktree %s\n", filepath.Base(absPath))
+
+	if insideWorktree {
+		mainRepo := worktree.DetectMainRepo(absPath)
+		fmt.Println()
+		fmt.Printf("  Run: cd %s\n", mainRepo)
+	}
 }

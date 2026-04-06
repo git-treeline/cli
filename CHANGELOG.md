@@ -1,6 +1,7 @@
 ## [0.32.0]
 
-- **Multi-domain tunnel support** — `gtl tunnel setup` now supports multiple Cloudflare domains. When the requested domain differs from your current credentials, gtl prompts to authenticate with the correct zone and stores per-domain certificates (`cert-{domain}.pem`). DNS routing uses `--origincert` to target the correct zone. After routing, gtl verifies the DNS record was created in the intended zone; if not, it provides clear manual CNAME instructions with the tunnel UUID.
+- **Multi-domain tunnel support**— `gtl tunnel setup` now supports multiple Cloudflare domains. When the requested domain differs from your current credentials, gtl prompts to authenticate with the correct zone and stores per-domain certificates (`cert-{domain}.pem`). DNS routing uses `--origincert` to target the correct zone. After routing, gtl verifies the DNS record was created in the intended zone; if not, it provides clear manual CNAME instructions with the tunnel UUID.
+- **Worktree removal safety** — `gtl release --remove-worktree` and `gtl prune --remove-worktree` now detect if you're inside the worktree being removed. Warns about directory invalidation, prompts for confirmation, and prints `cd` instructions for your terminal. IDE users are advised to close/switch workspaces. — `gtl tunnel setup` now supports multiple Cloudflare domains. When the requested domain differs from your current credentials, gtl prompts to authenticate with the correct zone and stores per-domain certificates (`cert-{domain}.pem`). DNS routing uses `--origincert` to target the correct zone. After routing, gtl verifies the DNS record was created in the intended zone; if not, it provides clear manual CNAME instructions with the tunnel UUID.
 
 ## [0.31.0]
 
