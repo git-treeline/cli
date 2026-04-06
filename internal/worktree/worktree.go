@@ -113,6 +113,22 @@ func MergedBranches(repoPath, defaultBranchOverride string) ([]string, error) {
 	return branches, nil
 }
 
+// CurrentBranch returns the currently checked-out branch in dir.
+// Returns "" if dir is not a git repo or HEAD is detached.
+func CurrentBranch(dir string) string {
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "HEAD" {
+		return ""
+	}
+	return branch
+}
+
 // DetectDefaultBranch resolves the default branch for the repo at repoPath.
 // It tries (in order): local symbolic-ref, `git remote show origin` (network),
 // then common local branch names. Returns branch name and true if found,

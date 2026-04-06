@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -20,12 +21,9 @@ func hostsBegin() string  { return "# BEGIN " + hostsMarker() }
 func hostsEnd() string    { return "# END " + hostsMarker() }
 
 // SyncHosts updates /etc/hosts with entries for the given hostnames.
-// macOS Safari does not resolve *.localhost subdomains without explicit
-// /etc/hosts entries. Requires sudo.
+// On macOS this fixes Safari's failure to resolve *.localhost. For custom
+// TLDs (non-.localhost), this is required on all platforms. Requires sudo.
 func SyncHosts(hostnames []string) error {
-	if runtime.GOOS != "darwin" {
-		return nil
-	}
 	if len(hostnames) == 0 {
 		return CleanHosts()
 	}
@@ -37,41 +35,51 @@ func SyncHosts(hostnames []string) error {
 		return fmt.Errorf("could not read %s: %w", hostsPath, err)
 	}
 
-	content := replaceHostsBlock(string(data), block)
+	content, err := replaceHostsBlock(string(data), block)
+	if err != nil {
+		return err
+	}
 	return writeHosts(content, "update /etc/hosts for Safari support")
 }
 
 // CleanHosts removes all git-treeline entries from /etc/hosts.
 func CleanHosts() error {
-	if runtime.GOOS != "darwin" {
-		return nil
-	}
 	data, err := os.ReadFile(hostsPath)
 	if err != nil {
-		return nil
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("could not read %s: %w", hostsPath, err)
 	}
 	content := string(data)
 	if !strings.Contains(content, hostsBegin()) {
 		return nil
 	}
-	cleaned := replaceHostsBlock(content, "")
+	cleaned, err := replaceHostsBlock(content, "")
+	if err != nil {
+		return err
+	}
 	return writeHosts(cleaned, "remove git-treeline entries from /etc/hosts")
 }
 
 // ManagedHosts returns the hostnames currently in the managed block.
-func ManagedHosts() []string {
+func ManagedHosts() ([]string, error) {
 	data, err := os.ReadFile(hostsPath)
 	if err != nil {
-		return nil
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("could not read %s: %w", hostsPath, err)
 	}
-	return parseManagedHosts(string(data))
+	return parseManagedHosts(string(data)), nil
 }
 
-// StaleHosts returns hostnames in the managed block that are not in the
-// expected set. Useful for warning users after adding new routes.
-func StaleHosts(expected []string) []string {
-	managed := ManagedHosts()
-	if len(managed) == 0 {
+// MissingHosts returns hostnames from expected that are not yet present in the
+// managed /etc/hosts block. If the hosts file cannot be read, all expected
+// hostnames are returned (conservative: assume sync is needed).
+func MissingHosts(expected []string) []string {
+	managed, err := ManagedHosts()
+	if err != nil || len(managed) == 0 {
 		if len(expected) > 0 {
 			return expected
 		}
@@ -81,13 +89,13 @@ func StaleHosts(expected []string) []string {
 	for _, h := range managed {
 		have[h] = true
 	}
-	var stale []string
+	var missing []string
 	for _, h := range expected {
 		if !have[h] {
-			stale = append(stale, h)
+			missing = append(missing, h)
 		}
 	}
-	return stale
+	return missing
 }
 
 // NeedsHostsSync reports whether macOS hosts file needs updating for the
@@ -96,7 +104,7 @@ func NeedsHostsSync(expected []string) bool {
 	if runtime.GOOS != "darwin" {
 		return false
 	}
-	return len(StaleHosts(expected)) > 0
+	return len(MissingHosts(expected)) > 0
 }
 
 func buildHostsBlock(hostnames []string) string {
@@ -109,27 +117,24 @@ func buildHostsBlock(hostnames []string) string {
 	return b.String()
 }
 
-func replaceHostsBlock(content, block string) string {
+func replaceHostsBlock(content, block string) (string, error) {
 	begin := hostsBegin()
 	end := hostsEnd()
 
 	startIdx := strings.Index(content, begin)
 	if startIdx == -1 {
 		if block == "" {
-			return content
+			return content, nil
 		}
 		if !strings.HasSuffix(content, "\n") {
 			content += "\n"
 		}
-		return content + block + "\n"
+		return content + block + "\n", nil
 	}
 
 	endIdx := strings.Index(content[startIdx:], end)
 	if endIdx == -1 {
-		if block == "" {
-			return content[:startIdx]
-		}
-		return content[:startIdx] + block + "\n"
+		return "", fmt.Errorf("malformed %s: found %q without matching %q — refusing to modify", hostsPath, begin, end)
 	}
 	endIdx = startIdx + endIdx + len(end)
 	if endIdx < len(content) && content[endIdx] == '\n' {
@@ -137,9 +142,9 @@ func replaceHostsBlock(content, block string) string {
 	}
 
 	if block == "" {
-		return content[:startIdx] + content[endIdx:]
+		return content[:startIdx] + content[endIdx:], nil
 	}
-	return content[:startIdx] + block + "\n" + content[endIdx:]
+	return content[:startIdx] + block + "\n" + content[endIdx:], nil
 }
 
 func parseManagedHosts(content string) []string {
@@ -179,7 +184,9 @@ func writeHosts(content, prompt string) error {
 	if _, err := fmt.Fprint(tmp, content); err != nil {
 		return err
 	}
-	_ = tmp.Close()
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("flushing temp hosts file: %w", err)
+	}
 
 	script := fmt.Sprintf("cp '%s' '%s'", tmp.Name(), hostsPath)
 	cmd := exec.Command("sudo", "-p",

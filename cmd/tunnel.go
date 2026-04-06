@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -375,18 +374,8 @@ func resolveProjectAndBranch(entry format.Allocation) (string, string) {
 		return "", ""
 	}
 
-	branch := currentGitBranch(absPath)
+	branch := worktree.CurrentBranch(absPath)
 	return project, branch
-}
-
-func currentGitBranch(dir string) string {
-	cmd := exec.Command("git", "symbolic-ref", "--short", "HEAD")
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
 }
 
 func findAllocationForCwd() format.Allocation {

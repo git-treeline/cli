@@ -42,7 +42,7 @@ func Run(opts Options) error {
 		},
 	}
 
-	addr := fmt.Sprintf(":%d", opts.ListenPort)
+	addr := fmt.Sprintf("127.0.0.1:%d", opts.ListenPort)
 	server := &http.Server{
 		Addr:              addr,
 		Handler:           proxy,

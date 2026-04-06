@@ -34,8 +34,7 @@ var openCmd = &cobra.Command{
 		reg := registry.New("")
 		entry := reg.Find(absPath)
 		if entry == nil {
-			fmt.Fprintf(os.Stderr, "No allocation found for %s\nRun `gtl setup` first.\n", absPath)
-			os.Exit(1)
+			return fmt.Errorf("no allocation found for %s — run `gtl setup` first", absPath)
 		}
 
 		fa := format.Allocation(entry)

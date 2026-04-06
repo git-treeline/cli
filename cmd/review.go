@@ -36,6 +36,10 @@ resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 			return err
 		}
 
+		if err := requireServeInstalled(); err != nil {
+			return err
+		}
+
 		prNumber, err := strconv.Atoi(args[0])
 		if err != nil {
 			return fmt.Errorf("invalid PR number: %s", args[0])
@@ -91,6 +95,10 @@ resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 		alloc, err := s.Run()
 		if err != nil {
 			return fmt.Errorf("setup failed: %w", err)
+		}
+
+		if alloc != nil {
+			printRouterAndTunnel(uc, projectName, alloc.Branch)
 		}
 
 		fmt.Println()

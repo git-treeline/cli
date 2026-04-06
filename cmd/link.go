@@ -120,7 +120,10 @@ func listLinks(reg *registry.Registry, absPath string) error {
 	}
 
 	if linkJSON {
-		data, _ := json.MarshalIndent(links, "", "  ")
+		data, err := json.MarshalIndent(links, "", "  ")
+		if err != nil {
+			return fmt.Errorf("encoding links: %w", err)
+		}
 		fmt.Println(string(data))
 		return nil
 	}

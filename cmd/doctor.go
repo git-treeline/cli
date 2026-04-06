@@ -140,7 +140,10 @@ func doctorJSONOutput(pc *config.ProjectConfig, det *detect.Result, absPath stri
 		result["diagnostics"] = diagList
 	}
 
-	data, _ := json.MarshalIndent(result, "", "  ")
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding doctor output: %w", err)
+	}
 	fmt.Println(string(data))
 	return nil
 }

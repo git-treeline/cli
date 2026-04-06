@@ -11,6 +11,7 @@ import (
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/git-treeline/git-treeline/internal/resolve"
 	"github.com/git-treeline/git-treeline/internal/service"
+	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
 )
 
@@ -49,7 +50,7 @@ Examples:
 		absPath, _ := filepath.Abs(cwd)
 
 		reg := registry.New("")
-		branch := detectCurrentBranch(absPath)
+		branch := worktree.CurrentBranch(absPath)
 
 		r := resolve.New(reg, absPath, branch)
 
@@ -82,7 +83,10 @@ Examples:
 		}
 
 		if resolveJSON {
-			data, _ := json.MarshalIndent(map[string]string{"url": url}, "", "  ")
+			data, err := json.MarshalIndent(map[string]string{"url": url}, "", "  ")
+			if err != nil {
+				return fmt.Errorf("encoding resolve output: %w", err)
+			}
 			fmt.Println(string(data))
 			return nil
 		}

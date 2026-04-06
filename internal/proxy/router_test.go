@@ -255,6 +255,7 @@ func TestRouterAliasRouting(t *testing.T) {
 	router := NewRouter(0, reg).WithAliases(func() map[string]int {
 		return map[string]int{"redis-ui": targetPort}
 	})
+	router.Refresh()
 
 	ts := httptest.NewServer(router)
 	defer ts.Close()
@@ -280,6 +281,7 @@ func TestRouterRegistryOverridesAlias(t *testing.T) {
 	router := NewRouter(0, reg).WithAliases(func() map[string]int {
 		return map[string]int{"myapp-main": 9999}
 	})
+	router.Refresh()
 
 	routes := router.Routes()
 	if routes["myapp-main"] != 4000 {

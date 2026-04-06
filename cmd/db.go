@@ -40,9 +40,12 @@ var dbNameCmd = &cobra.Command{
 			return err
 		}
 		if dbNameJSON {
-			data, _ := json.MarshalIndent(map[string]string{
+			data, err := json.MarshalIndent(map[string]string{
 				"database": info.target,
 			}, "", "  ")
+			if err != nil {
+				return fmt.Errorf("encoding database name: %w", err)
+			}
 			fmt.Println(string(data))
 			return nil
 		}

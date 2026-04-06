@@ -84,13 +84,25 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 			sv := supervisor.New(startCommand, absPath, sockPath)
 			sv.Env = resolveEnvVars(pc, absPath)
 			sv.Port = port
-			go func() { _ = sv.Run() }()
+			svErr := make(chan error, 1)
+			go func() { svErr <- sv.Run() }()
 
 			for i := 0; i < 50; i++ {
+				select {
+				case err := <-svErr:
+					return fmt.Errorf("supervisor exited before ready: %w", err)
+				default:
+				}
 				time.Sleep(100 * time.Millisecond)
 				if _, err := os.Stat(sockPath); err == nil {
 					break
 				}
+			}
+
+			select {
+			case err := <-svErr:
+				return fmt.Errorf("supervisor exited before ready: %w", err)
+			default:
 			}
 
 			if err := awaitReady(sockPath); err != nil {
@@ -162,7 +174,7 @@ func resolveEnvVars(pc *config.ProjectConfig, absPath string) map[string]string 
 		config.LoadUserConfig("").RedisURL(),
 		interpolation.Allocation(alloc),
 	)
-	branch := detectCurrentBranch(absPath)
+	branch := worktree.CurrentBranch(absPath)
 	r := resolve.New(reg, absPath, branch)
 	result, err := setup.BuildEnvVarsWithResolver(pc, interpolation.Allocation(alloc), redisURL, r.Resolve)
 	if err != nil {

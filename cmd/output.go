@@ -17,6 +17,15 @@ var errServeNotInstalled = fmt.Errorf(
 	"HTTPS router not installed.\n\n  Run 'gtl serve install' first (one-time setup).\n  Docs: https://gittreeline.com/docs/#getting-started",
 )
 
+// requireServeInstalled returns errServeNotInstalled when the HTTPS CA is
+// absent and GTL_HEADLESS is not set. Call from commands that need the router.
+func requireServeInstalled() error {
+	if !proxy.IsCAInstalled() && os.Getenv("GTL_HEADLESS") == "" {
+		return errServeNotInstalled
+	}
+	return nil
+}
+
 // printRouterAndTunnel prints the Router URL and Tunnel hint after setup.
 // Called from setup, new, and clone to avoid duplication.
 func printRouterAndTunnel(uc *config.UserConfig, project, branch string) {

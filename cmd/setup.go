@@ -8,7 +8,6 @@ import (
 
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/detect"
-	"github.com/git-treeline/git-treeline/internal/proxy"
 	"github.com/git-treeline/git-treeline/internal/setup"
 	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/git-treeline/git-treeline/internal/templates"
@@ -54,8 +53,8 @@ var setupCmd = &cobra.Command{
 	Short: "Allocate resources and set up a worktree environment",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if !proxy.IsCAInstalled() && os.Getenv("GTL_HEADLESS") == "" {
-			return errServeNotInstalled
+		if err := requireServeInstalled(); err != nil {
+			return err
 		}
 
 		path := "."

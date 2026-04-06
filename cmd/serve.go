@@ -5,6 +5,7 @@ import (
 	"os"
 	"runtime"
 	"sort"
+	"strconv"
 
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/proxy"
@@ -200,6 +201,7 @@ var serveStatusCmd = &cobra.Command{
 			WithBaseDomain(domain).
 			WithAliases(func() map[string]int { return uc.RouterAliases() }).
 			WithAliases(projectAliases(reg))
+		router.Refresh()
 		if caInstalled {
 			router.WithTLS()
 		}
@@ -299,6 +301,9 @@ Aliases let you route non-gtl services through the router:
 		uc := config.LoadUserConfig("")
 
 		if len(args) == 0 {
+			if serveAliasRemove {
+				return fmt.Errorf("usage: gtl serve alias --remove <name>")
+			}
 			aliases := uc.RouterAliases()
 			if len(aliases) == 0 {
 				fmt.Println("No aliases configured.")
@@ -313,7 +318,14 @@ Aliases let you route non-gtl services through the router:
 
 		name := args[0]
 		if serveAliasRemove {
-			uc.Set("router.aliases."+name, nil)
+			aliases, _ := config.Dig(uc.Data, "router", "aliases").(map[string]any)
+			if aliases == nil {
+				return fmt.Errorf("alias %q not found", name)
+			}
+			if _, exists := aliases[name]; !exists {
+				return fmt.Errorf("alias %q not found", name)
+			}
+			delete(aliases, name)
 			if err := uc.Save(); err != nil {
 				return fmt.Errorf("failed to save config: %w", err)
 			}
@@ -325,8 +337,8 @@ Aliases let you route non-gtl services through the router:
 			return fmt.Errorf("usage: gtl serve alias <name> <port>")
 		}
 
-		var port int
-		if _, err := fmt.Sscanf(args[1], "%d", &port); err != nil || port < 1 || port > 65535 {
+		port, err := strconv.Atoi(args[1])
+		if err != nil || port < 1 || port > 65535 {
 			return fmt.Errorf("invalid port: %s", args[1])
 		}
 

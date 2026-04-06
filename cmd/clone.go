@@ -13,7 +13,6 @@ import (
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/detect"
 	"github.com/git-treeline/git-treeline/internal/platform"
-	"github.com/git-treeline/git-treeline/internal/proxy"
 	"github.com/git-treeline/git-treeline/internal/setup"
 	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/git-treeline/git-treeline/internal/templates"
@@ -45,8 +44,8 @@ The server is NOT auto-started. Review the project, then run 'gtl start'.`,
 			}
 		}
 
-		if !proxy.IsCAInstalled() && os.Getenv("GTL_HEADLESS") == "" {
-			return errServeNotInstalled
+		if err := requireServeInstalled(); err != nil {
+			return err
 		}
 
 		if len(args) == 0 {

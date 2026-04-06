@@ -291,7 +291,9 @@ func updateOrAppend(file, key, value string) error {
 	}
 
 	content := string(data)
-	line := fmt.Sprintf(`%s="%s"`, key, value)
+	escaped := strings.ReplaceAll(value, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	line := fmt.Sprintf(`%s="%s"`, key, escaped)
 	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `=.*$`)
 
 	if re.MatchString(content) {
@@ -468,13 +470,7 @@ func ConfigureEditor(worktreePath string, pc *config.ProjectConfig, uc *config.U
 }
 
 func (s *Setup) detectBranch() string {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = s.WorktreePath
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
+	return worktree.CurrentBranch(s.WorktreePath)
 }
 
 func (s *Setup) log(format string, args ...any) {

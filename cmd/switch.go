@@ -74,7 +74,9 @@ Must be run from inside a worktree (not the main repo).`,
 		}
 
 		reg := registry.New("")
-		_ = reg.UpdateField(absPath, "branch", branch)
+		if err := reg.UpdateField(absPath, "branch", branch); err != nil {
+			fmt.Fprintln(os.Stderr, style.Warnf("could not update branch in registry: %v", err))
+		}
 
 		uc := config.LoadUserConfig("")
 		s := setup.New(absPath, mainRepo, uc)

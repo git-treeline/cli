@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/git-treeline/git-treeline/internal/config"
-	"github.com/git-treeline/git-treeline/internal/proxy"
 	"github.com/git-treeline/git-treeline/internal/setup"
 	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/git-treeline/git-treeline/internal/worktree"
@@ -43,8 +42,8 @@ Otherwise a new branch is created from --base (or the current branch).`,
 			return err
 		}
 
-		if !proxy.IsCAInstalled() && os.Getenv("GTL_HEADLESS") == "" {
-			return errServeNotInstalled
+		if err := requireServeInstalled(); err != nil {
+			return err
 		}
 
 		branch := args[0]
@@ -96,7 +95,10 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		} else {
 			base := newBase
 			if base == "" {
-				base = currentBranch()
+				base = worktree.CurrentBranch(".")
+				if base == "" {
+					base = "main"
+				}
 			}
 			fmt.Println(style.Actionf("Creating branch '%s' from '%s'", branch, base))
 			if err := worktree.Create(wtPath, branch, true, base); err != nil {
@@ -131,14 +133,6 @@ Otherwise a new branch is created from --base (or the current branch).`,
 	},
 }
 
-func currentBranch() string {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	out, err := cmd.Output()
-	if err != nil {
-		return "main"
-	}
-	return strings.TrimSpace(string(out))
-}
 
 // worktreeGuard returns an error if the cwd is inside a worktree rather than
 // the main repo. Prevents gtl new / gtl review from creating sibling worktrees.
