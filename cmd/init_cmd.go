@@ -173,3 +173,33 @@ func openInEditor(path string) {
 	}
 	_ = exec.Command(editor, path).Run()
 }
+
+// runInitForNew is called from gtl new when no .treeline.yml exists.
+// It creates a minimal config without the full interactive flow.
+func runInitForNew(mainRepo string, det *detect.Result) error {
+	path := filepath.Join(mainRepo, config.ProjectConfigFile)
+
+	// Double-check file doesn't exist (race protection)
+	if _, err := os.Stat(path); err == nil {
+		fmt.Println(style.Actionf("Found existing %s", config.ProjectConfigFile))
+		return nil
+	}
+
+	project := filepath.Base(mainRepo)
+	templateDB := project + "_development"
+
+	det.MergeTarget = worktree.DetectDefaultBranch(mainRepo)
+
+	content := templates.ForDetection(project, templateDB, det)
+
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return err
+	}
+
+	msg := fmt.Sprintf("Created %s for project '%s'", config.ProjectConfigFile, project)
+	if det.Framework != "unknown" {
+		msg += fmt.Sprintf(" (detected: %s)", det.Framework)
+	}
+	fmt.Println(style.Actionf("%s", msg))
+	return nil
+}

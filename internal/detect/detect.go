@@ -258,3 +258,16 @@ func dirExists(root, rel string) bool {
 	info, err := os.Stat(filepath.Join(root, rel))
 	return err == nil && info.IsDir()
 }
+
+// IsServerFramework returns true if the detected framework typically runs a
+// development server (Rails, Node, Django, etc.) as opposed to a CLI or library.
+func (r *Result) IsServerFramework() bool {
+	switch r.Framework {
+	case "rails", "nextjs", "vite", "node", "django", "python":
+		return true
+	case "go", "rust", "unknown":
+		return false
+	default:
+		return false
+	}
+}

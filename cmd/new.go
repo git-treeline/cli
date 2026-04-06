@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/git-treeline/internal/confirm"
+	"github.com/git-treeline/git-treeline/internal/detect"
 	"github.com/git-treeline/git-treeline/internal/format"
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/git-treeline/git-treeline/internal/service"
@@ -47,10 +49,6 @@ Otherwise a new branch is created from --base (or the current branch).`,
 			return err
 		}
 
-		if err := requireServeInstalled(); err != nil {
-			return err
-		}
-
 		branch := args[0]
 
 		cwd, err := os.Getwd()
@@ -60,6 +58,36 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		mainRepo := worktree.DetectMainRepo(cwd)
 		pc := config.LoadProjectConfig(mainRepo)
 		uc := config.LoadUserConfig("")
+
+		// Zero-config: if no .treeline.yml, check if this is a server project
+		if !pc.Exists() {
+			det := detect.Detect(mainRepo)
+			if det.IsServerFramework() {
+				fmt.Printf("Detected: %s application\n", det.Framework)
+				fmt.Println()
+				fmt.Println("This project doesn't have a .treeline.yml yet.")
+				if confirm.Prompt("Set up port allocation and server management?", true, nil) {
+					fmt.Println()
+					// Run init to create config, then continue with normal flow
+					if err := runInitInteractive(mainRepo, det); err != nil {
+						return err
+					}
+					// Reload config after init
+					pc = config.LoadProjectConfig(mainRepo)
+				} else {
+					// User declined — create worktree only, no allocation
+					return createWorktreeOnly(mainRepo, branch, uc, pc)
+				}
+			} else {
+				// Not a server project — create worktree only, no allocation
+				return createWorktreeOnly(mainRepo, branch, uc, pc)
+			}
+		}
+
+		if err := requireServeInstalled(); err != nil {
+			return err
+		}
+
 		projectName := pc.Project()
 
 		wtPath := newPath
@@ -231,4 +259,78 @@ func completeBranches(cmd *cobra.Command, args []string, toComplete string) ([]s
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 	return worktree.ListBranches(toComplete), cobra.ShellCompDirectiveNoFileComp
+}
+
+// createWorktreeOnly creates a worktree without any port/database allocation.
+// Used for non-server projects or when user declines full setup.
+func createWorktreeOnly(mainRepo, branch string, uc *config.UserConfig, pc *config.ProjectConfig) error {
+	projectName := pc.Project()
+	wtPath := newPath
+	if wtPath == "" {
+		wtPath = uc.ResolveWorktreePath(mainRepo, projectName, branch)
+	}
+	if wtPath == "" {
+		wtPath = filepath.Join(filepath.Dir(mainRepo), fmt.Sprintf("%s-%s", projectName, branch))
+	}
+
+	// Check if branch is already in a worktree
+	if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
+		fmt.Println(style.Actionf("Branch '%s' already checked out at %s", branch, existingWT))
+		fmt.Println()
+		fmt.Printf("  cd %s\n", existingWT)
+		return nil
+	}
+
+	if err := ensureGitignored(mainRepo, wtPath); err != nil {
+		return err
+	}
+
+	existing := worktree.BranchExists(branch)
+
+	if newDryRun {
+		if existing {
+			fmt.Printf("[dry-run] Would check out existing branch '%s'\n", branch)
+		} else {
+			base := newBase
+			if base == "" {
+				base = "(current branch)"
+			}
+			fmt.Printf("[dry-run] Would create new branch '%s' from %s\n", branch, base)
+		}
+		fmt.Printf("[dry-run] Worktree path: %s\n", wtPath)
+		fmt.Println("[dry-run] No allocation (non-server project)")
+		return nil
+	}
+
+	if existing {
+		_ = worktree.Fetch("origin", branch)
+		fmt.Println(style.Actionf("Checking out existing branch '%s'", branch))
+		if err := worktree.Create(wtPath, branch, false, ""); err != nil {
+			return err
+		}
+	} else {
+		base := newBase
+		if base == "" {
+			base = worktree.CurrentBranch(".")
+			if base == "" {
+				base = "main"
+			}
+		}
+		fmt.Println(style.Actionf("Creating branch '%s' from '%s'", branch, base))
+		if err := worktree.Create(wtPath, branch, true, base); err != nil {
+			return err
+		}
+	}
+
+	fmt.Println(style.Actionf("Worktree created at %s", wtPath))
+	fmt.Println()
+	fmt.Printf("  cd %s\n", wtPath)
+	return nil
+}
+
+// runInitInteractive runs the init flow to create .treeline.yml.
+// This is a simplified version that just creates the config file.
+func runInitInteractive(mainRepo string, det *detect.Result) error {
+	// Delegate to the init command's logic
+	return runInitForNew(mainRepo, det)
 }

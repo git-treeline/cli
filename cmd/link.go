@@ -7,7 +7,10 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/registry"
+	"github.com/git-treeline/git-treeline/internal/setup"
+	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/git-treeline/git-treeline/internal/supervisor"
 	"github.com/spf13/cobra"
 )
@@ -17,7 +20,8 @@ var linkRestart bool
 
 func init() {
 	linkCmd.Flags().BoolVar(&linkJSON, "json", false, "Output as JSON")
-	linkCmd.Flags().BoolVar(&linkRestart, "restart", false, "Restart the supervised server after linking")
+	linkCmd.Flags().BoolVar(&linkRestart, "restart", false, "Deprecated: server is now always restarted if running")
+	_ = linkCmd.Flags().MarkDeprecated("restart", "server is now always restarted if running")
 	rootCmd.AddCommand(linkCmd)
 	rootCmd.AddCommand(unlinkCmd)
 }
@@ -28,12 +32,12 @@ var linkCmd = &cobra.Command{
 	Long: `Override which branch a {resolve:project} token points at for this worktree.
 
 With no arguments, lists active links.
-With a project and branch, sets the link and rewrites the env file.
+With a project and branch, sets the link, rewrites the env file, and restarts
+the supervised server if running.
 
 Examples:
   gtl link                          # list active links
-  gtl link api feature-payments     # override api -> feature-payments
-  gtl link api develop --restart    # override and bounce server`,
+  gtl link api feature-payments     # override api -> feature-payments`,
 	Args: cobra.MaximumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cwd, err := os.Getwd()
@@ -75,13 +79,20 @@ Examples:
 
 		fmt.Printf("Linked %s -> %s\n", project, branch)
 
-		if linkRestart {
-			sockPath := supervisor.SocketPath(absPath)
-			if resp, err := supervisor.Send(sockPath, "restart"); err == nil && resp == "ok" {
-				fmt.Println("Server restarted.")
-			} else {
-				fmt.Fprintln(os.Stderr, "Warning: could not restart server (is it running?)")
-			}
+		// Regenerate env file immediately so the link takes effect
+		uc := config.LoadUserConfig("")
+		if err := setup.RegenerateEnvFile(absPath, uc); err != nil {
+			fmt.Fprintln(os.Stderr, style.Warnf("Could not update env file: %s", err))
+		} else {
+			fmt.Println("Environment file updated.")
+		}
+
+		// Restart the server (or warn if we can't)
+		sockPath := supervisor.SocketPath(absPath)
+		if resp, err := supervisor.Send(sockPath, "restart"); err == nil && resp == "ok" {
+			fmt.Println("Server restarted.")
+		} else {
+			fmt.Println(style.Warnf("Server not running — restart manually to pick up the new link."))
 		}
 
 		return nil
@@ -113,6 +124,23 @@ var unlinkCmd = &cobra.Command{
 		}
 
 		fmt.Printf("Unlinked %s (will resolve to same-branch default)\n", project)
+
+		// Regenerate env file immediately so the unlink takes effect
+		uc := config.LoadUserConfig("")
+		if err := setup.RegenerateEnvFile(absPath, uc); err != nil {
+			fmt.Fprintln(os.Stderr, style.Warnf("Could not update env file: %s", err))
+		} else {
+			fmt.Println("Environment file updated.")
+		}
+
+		// Restart the server (or warn if we can't)
+		sockPath := supervisor.SocketPath(absPath)
+		if resp, err := supervisor.Send(sockPath, "restart"); err == nil && resp == "ok" {
+			fmt.Println("Server restarted.")
+		} else {
+			fmt.Println(style.Warnf("Server not running — restart manually to pick up the change."))
+		}
+
 		return nil
 	},
 }

@@ -92,6 +92,16 @@ func runReleaseSingle(args []string) error {
 	}
 	fmt.Println(line)
 
+	// Warn about unpushed commits
+	unpushed := worktree.UnpushedCommitCount(absPath)
+	if unpushed > 0 {
+		branch := worktree.CurrentBranch(absPath)
+		fmt.Println()
+		fmt.Println(style.Warnf("Branch %q has %d unpushed commit(s).", branch, unpushed))
+		fmt.Println(style.Dimf("  These commits may be lost if you remove the worktree."))
+		fmt.Println()
+	}
+
 	if releaseDryRun {
 		fmt.Println("Would release. (dry-run)")
 		return nil

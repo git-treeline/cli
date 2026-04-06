@@ -749,6 +749,8 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl refresh` | `--dry-run` `--force`/`-f` | Re-allocate all worktrees with current reservations; restarts supervised servers |
 | `gtl doctor` | `--json` | Check config, allocation, runtime, and diagnostics |
 | `gtl status` | `--project` `--json` `--check` `--watch` `--interval` | Show allocations across projects |
+| `gtl worktrees` | aliases: `wt` | Interactive TUI picker for worktrees (grouped by project) |
+| `gtl where <branch>` | | Print path to a worktree by branch name (use `project/branch` to disambiguate) |
 | `gtl prune` | `--stale` `--merged` `--drop-db` `--remove-worktree` `--force` | Remove orphaned allocations |
 | `gtl start` | `--await` `--await-timeout` | Run `commands.start` under supervisor (or resume). `--await` blocks until TCP-ready. |
 | `gtl stop` | | Stop the server process (supervisor stays alive) |

@@ -1,7 +1,15 @@
+## [Unreleased]
+
+- **`gtl worktrees`** — interactive TUI picker for worktrees, grouped by project. Arrow keys to navigate, Enter to print path. Alias: `gtl wt`.
+- **`gtl where <branch>`** — print the path to a worktree by branch name. Searches across all projects in the registry. Use `project/branch` to disambiguate when multiple projects have the same branch.
+- **Zero-config worktrees** — `gtl new` now works without a `.treeline.yml`. Detects the framework; if it's a server framework (Rails, Node, etc.), prompts to run init. For non-server projects (Go CLI, Rust library), creates a plain worktree with no allocation.
+- **Branch protection** — `gtl release` warns if the worktree has unpushed commits before releasing, reducing accidental data loss.
+- **Dynamic resolve links** — `gtl link` and `gtl unlink` now immediately regenerate the env file and restart the supervised server. Previously, links only updated the registry — the env file stayed stale until a manual `gtl refresh` or restart. The `--restart` flag is deprecated (restart is now automatic).
+
 ## [0.32.0]
 
 - **Multi-domain tunnel support**— `gtl tunnel setup` now supports multiple Cloudflare domains. When the requested domain differs from your current credentials, gtl prompts to authenticate with the correct zone and stores per-domain certificates (`cert-{domain}.pem`). DNS routing uses `--origincert` to target the correct zone. After routing, gtl verifies the DNS record was created in the intended zone; if not, it provides clear manual CNAME instructions with the tunnel UUID.
-- **Worktree removal safety** — `gtl release --remove-worktree` and `gtl prune --remove-worktree` now detect if you're inside the worktree being removed. Warns about directory invalidation, prompts for confirmation, and prints `cd` instructions for your terminal. IDE users are advised to close/switch workspaces. — `gtl tunnel setup` now supports multiple Cloudflare domains. When the requested domain differs from your current credentials, gtl prompts to authenticate with the correct zone and stores per-domain certificates (`cert-{domain}.pem`). DNS routing uses `--origincert` to target the correct zone. After routing, gtl verifies the DNS record was created in the intended zone; if not, it provides clear manual CNAME instructions with the tunnel UUID.
+- **Worktree removal safety** — `gtl release --remove-worktree` and `gtl prune --remove-worktree` now detect if you're inside the worktree being removed. Warns about directory invalidation, prompts for confirmation, and prints `cd` instructions for your terminal. IDE users are advised to close/switch workspaces.
 
 ## [0.31.0]
 

@@ -276,6 +276,42 @@ func HasUncommittedChanges(worktreePath string) bool {
 		!gitCheck(worktreePath, "diff", "--cached", "--quiet")
 }
 
+// UnpushedCommitCount returns the number of commits on the current branch that
+// haven't been pushed to the remote. Returns 0 if the remote branch doesn't exist
+// or if the check fails (e.g., offline).
+func UnpushedCommitCount(worktreePath string) int {
+	branch := CurrentBranch(worktreePath)
+	if branch == "" || branch == "HEAD" {
+		return 0
+	}
+
+	// Check if remote tracking branch exists
+	remote := gitOutput(worktreePath, "rev-parse", "--verify", "--quiet", "origin/"+branch)
+	if remote == "" {
+		// No remote branch — all local commits are "unpushed"
+		out := gitOutput(worktreePath, "rev-list", "--count", branch)
+		if out == "" {
+			return 0
+		}
+		var count int
+		if _, err := fmt.Sscanf(out, "%d", &count); err != nil {
+			return 0
+		}
+		return count
+	}
+
+	// Count commits ahead of remote
+	out := gitOutput(worktreePath, "rev-list", "--count", "origin/"+branch+"..HEAD")
+	if out == "" {
+		return 0
+	}
+	var count int
+	if _, err := fmt.Sscanf(out, "%d", &count); err != nil {
+		return 0
+	}
+	return count
+}
+
 // DetectMainRepo returns the root worktree path (the main repo) by parsing
 // `git worktree list --porcelain`. Falls back to the given path.
 func DetectMainRepo(worktreePath string) string {

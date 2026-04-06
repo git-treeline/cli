@@ -258,6 +258,47 @@ func BuildEnvVarsWithResolver(pc *config.ProjectConfig, alloc interpolation.Allo
 	return result, nil
 }
 
+// RegenerateEnvFile re-resolves env vars (including {resolve:...} tokens) and
+// rewrites the env file for an existing allocation. Used by gtl link/unlink to
+// immediately apply link changes without running full setup.
+func RegenerateEnvFile(worktreePath string, uc *config.UserConfig) error {
+	absPath, _ := filepath.Abs(worktreePath)
+	mainRepo := worktree.DetectMainRepo(absPath)
+	pc := config.LoadProjectConfig(mainRepo)
+	reg := registry.New("")
+
+	allocMap := reg.Find(absPath)
+	if allocMap == nil {
+		return fmt.Errorf("no allocation found for %s", absPath)
+	}
+
+	// Convert registry map to interpolation.Allocation for env var building
+	interpAlloc := interpolation.Allocation(allocMap)
+
+	// Get branch for resolver
+	branch, _ := allocMap["branch"].(string)
+
+	redisURL := interpolation.BuildRedisURL(uc.RedisURL(), interpAlloc)
+
+	resolverPkg := resolve.New(reg, absPath, branch)
+
+	envVars, err := BuildEnvVarsWithResolver(pc, interpAlloc, redisURL, resolverPkg.Resolve)
+	if err != nil {
+		return fmt.Errorf("resolving env vars: %w", err)
+	}
+
+	target := pc.EnvFileTarget()
+	envPath := filepath.Join(absPath, target)
+
+	for key, value := range envVars {
+		if err := updateOrAppend(envPath, key, value); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (s *Setup) writeEnvFile(vars map[string]string) error {
 	target := s.ProjectConfig.EnvFileTarget()
 	envPath := filepath.Join(s.WorktreePath, target)
@@ -293,6 +334,8 @@ func updateOrAppend(file, key, value string) error {
 	content := string(data)
 	escaped := strings.ReplaceAll(value, `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	escaped = strings.ReplaceAll(escaped, "\n", `\n`)
+	escaped = strings.ReplaceAll(escaped, "\r", `\r`)
 	line := fmt.Sprintf(`%s="%s"`, key, escaped)
 	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `=.*$`)
 

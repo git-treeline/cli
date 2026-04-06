@@ -465,3 +465,26 @@ func TestMergedBranches_NoMerged(t *testing.T) {
 		t.Errorf("expected no merged branches, got %v", branches)
 	}
 }
+
+func TestUnpushedCommitCount_NoRemote(t *testing.T) {
+	repo := initTestRepo(t)
+
+	// Local repo with no remote — all commits are "unpushed"
+	count := UnpushedCommitCount(repo)
+	if count != 1 {
+		t.Errorf("expected 1 unpushed commit (initial), got %d", count)
+	}
+
+	// Add another commit
+	file := filepath.Join(repo, "file2.txt")
+	if err := os.WriteFile(file, []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, repo, "git", "add", ".")
+	run(t, repo, "git", "commit", "-m", "second commit")
+
+	count = UnpushedCommitCount(repo)
+	if count != 2 {
+		t.Errorf("expected 2 unpushed commits, got %d", count)
+	}
+}
