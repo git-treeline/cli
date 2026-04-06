@@ -120,6 +120,15 @@ func (uc *UserConfig) RouterDomain() string {
 	return "localhost"
 }
 
+// SafariWarningsEnabled returns whether to show Safari/hosts sync warnings.
+// Default: true. Set warnings.safari: false to disable.
+func (uc *UserConfig) SafariWarningsEnabled() bool {
+	if v, ok := Dig(uc.Data, "warnings", "safari").(bool); ok {
+		return v
+	}
+	return true
+}
+
 // RouterAliases returns static alias routes from the user config (e.g.
 // {"grafana": 3100}). These are per-machine routes for personal services.
 func (uc *UserConfig) RouterAliases() map[string]int {
@@ -320,7 +329,7 @@ func (uc *UserConfig) Init() error {
 
 var userKnownKeys = map[string]bool{
 	"port": true, "redis": true, "router": true, "tunnel": true,
-	"worktree": true, "editor": true,
+	"worktree": true, "editor": true, "warnings": true,
 }
 
 func (uc *UserConfig) load() map[string]any {

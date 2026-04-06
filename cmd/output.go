@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/git-treeline/git-treeline/internal/config"
@@ -48,13 +47,6 @@ func printRouterAndTunnel(uc *config.UserConfig, project, branch string) {
 
 	if tunnelDomain := uc.TunnelDomain(""); tunnelDomain != "" {
 		fmt.Println(style.Actionf("Tunnel: run %s → %s", style.Cmd("gtl tunnel"), style.Link("https://"+routeKey+"."+tunnelDomain)))
-	}
-
-	if runtime.GOOS == "darwin" {
-		hostname := routeKey + "." + domain
-		if service.NeedsHostsSync([]string{hostname}) {
-			fmt.Fprintln(os.Stderr, style.Dimf("  Safari: run %s to resolve this route", style.Cmd("gtl serve hosts sync")))
-		}
 	}
 }
 

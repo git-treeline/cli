@@ -5,6 +5,8 @@
 - **Zero-config worktrees** — `gtl new` now works without a `.treeline.yml`. Detects the framework; if it's a server framework (Rails, Node, etc.), prompts to run init. For non-server projects (Go CLI, Rust library), creates a plain worktree with no allocation.
 - **Branch protection** — `gtl release` warns if the worktree has unpushed commits before releasing, reducing accidental data loss.
 - **Dynamic resolve links** — `gtl link` and `gtl unlink` now immediately regenerate the env file and restart the supervised server. Previously, links only updated the registry — the env file stayed stale until a manual `gtl refresh` or restart. The `--restart` flag is deprecated (restart is now automatic).
+- **Safari warnings configurable** — removed Safari/hosts sync warnings from `gtl new`/`gtl setup` output (noise for non-Safari users). Warnings still appear in `gtl serve status`. Disable entirely with `gtl config set warnings.safari false`.
+- **Editor title URL tokens** — `editor.title` template now supports `{url}` (e.g., `http://localhost:3010`) and `{router_url}` (e.g., `https://salt-feature.localhost`).
 
 ## [0.32.0]
 

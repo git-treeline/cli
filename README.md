@@ -638,7 +638,7 @@ See [Framework examples](#framework-examples) for complete examples. Available f
 | `env` | Key-value pairs written to the env file, with token interpolation |
 | `commands.setup` | Shell commands run in the worktree after setup |
 | `commands.start` | Whatever you'd type to boot the app — `bin/dev`, `npm run dev`, `foreman start`, etc. (used by `gtl start` and `--start` on `new`/`review`) |
-| `editor.title` | Window title template — `{project}`, `{port}`, `{branch}` tokens (VS Code, Cursor) |
+| `editor.title` | Window title template — `{project}`, `{port}`, `{branch}`, `{url}`, `{router_url}` tokens (VS Code, Cursor) |
 | `editor.color` | Title/status bar color — `"auto"` (deterministic from branch), or hex like `"#1a5276"` |
 | `editor.theme` | Full IDE theme override (e.g. `"Monokai"`, `"GitHub Dark"`) |
 | `hooks.pre_setup` | Commands run before `commands.setup` — abort setup on failure |

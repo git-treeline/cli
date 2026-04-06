@@ -229,12 +229,13 @@ var serveStatusCmd = &cobra.Command{
 			}
 		}
 
-		if runtime.GOOS == "darwin" {
+		if runtime.GOOS == "darwin" && uc.SafariWarningsEnabled() {
 			hostnames := routeHostnames(domain)
 			if service.NeedsHostsSync(hostnames) {
 				fmt.Println()
 				fmt.Fprintln(os.Stderr, style.Warnf("Safari may not resolve some routes (hosts file out of date)."))
 				fmt.Fprintln(os.Stderr, style.Dimf("  Run: gtl serve hosts sync"))
+				fmt.Fprintln(os.Stderr, style.Dimf("  Or disable: gtl config set warnings.safari false"))
 			}
 		}
 

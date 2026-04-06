@@ -18,6 +18,7 @@ import (
 	"github.com/git-treeline/git-treeline/internal/editor"
 	"github.com/git-treeline/git-treeline/internal/format"
 	"github.com/git-treeline/git-treeline/internal/interpolation"
+	"github.com/git-treeline/git-treeline/internal/proxy"
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/git-treeline/git-treeline/internal/resolve"
 	"github.com/git-treeline/git-treeline/internal/style"
@@ -462,10 +463,15 @@ func ConfigureEditor(worktreePath string, pc *config.ProjectConfig, uc *config.U
 	}
 
 	project := pc.Project()
+	routerDomain := uc.RouterDomain()
+	routeKey := proxy.RouteKey(project, branch)
+
 	replacer := strings.NewReplacer(
 		"{project}", project,
 		"{port}", fmt.Sprintf("%d", port),
 		"{branch}", branch,
+		"{url}", fmt.Sprintf("http://localhost:%d", port),
+		"{router_url}", fmt.Sprintf("https://%s.%s", routeKey, routerDomain),
 	)
 
 	title := ""
