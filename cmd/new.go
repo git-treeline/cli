@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/git-treeline/internal/format"
+	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/git-treeline/git-treeline/internal/service"
 	"github.com/git-treeline/git-treeline/internal/setup"
 	"github.com/git-treeline/git-treeline/internal/style"
@@ -72,9 +74,51 @@ Otherwise a new branch is created from --base (or the current branch).`,
 			return err
 		}
 
-		// Check if this branch is already checked out in another worktree
+		// If the branch is already in a worktree, ensure it has an allocation
+		// and treat the command as resumable.
 		if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
-			return errBranchAlreadyCheckedOut(branch, existingWT)
+			fmt.Println(style.Actionf("Branch '%s' already checked out at %s", branch, existingWT))
+			reg := registry.New("")
+			alloc := reg.Find(existingWT)
+
+			if alloc == nil {
+				fmt.Println(style.Actionf("No allocation found — running setup..."))
+				s := setup.New(existingWT, mainRepo, uc)
+				if _, err := s.Run(); err != nil {
+					return errSetupFailed(err)
+				}
+				reg = registry.New("")
+				alloc = reg.Find(existingWT)
+			}
+
+			if alloc != nil {
+				ports := format.GetPorts(format.Allocation(alloc))
+				fmt.Printf("  Path:     %s\n", existingWT)
+				if len(ports) > 0 {
+					fmt.Printf("  Port:     %s\n", format.JoinInts(ports, ", "))
+					fmt.Printf("  URL:      http://localhost:%d\n", ports[0])
+				}
+				printRouterAndTunnel(uc, projectName, branch)
+
+				if newOpen && len(ports) > 0 {
+					url := buildOpenURL(ports[0], projectName, branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
+					fmt.Printf("Opening %s\n", url)
+					_ = openBrowser(url)
+				}
+			}
+
+			if newStart {
+				startCmd := pc.StartCommand()
+				if startCmd == "" {
+					fmt.Println(style.Warnf("--start passed but no commands.start configured in .treeline.yml"))
+					return nil
+				}
+				fmt.Println(style.Actionf("Starting: %s", startCmd))
+				return execInWorktree(existingWT, startCmd)
+			}
+
+			fmt.Printf("\n  cd %s\n", existingWT)
+			return nil
 		}
 
 		existing := worktree.BranchExists(branch)

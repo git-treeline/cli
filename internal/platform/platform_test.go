@@ -1,6 +1,8 @@
 package platform
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -56,5 +58,44 @@ func TestRegistryFile_EndsWithJSON(t *testing.T) {
 	f := RegistryFile()
 	if !strings.HasSuffix(f, "registry.json") {
 		t.Errorf("expected registry.json, got %s", f)
+	}
+}
+
+func TestEnsureConfigDir_CreatesWithRestrictedMode(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GTL_HOME", filepath.Join(dir, "gtl-data"))
+
+	if err := EnsureConfigDir(); err != nil {
+		t.Fatalf("EnsureConfigDir: %v", err)
+	}
+
+	info, err := os.Stat(ConfigDir())
+	if err != nil {
+		t.Fatalf("stat config dir: %v", err)
+	}
+	got := info.Mode().Perm()
+	if got != DirMode {
+		t.Errorf("config dir mode = %o, want %o", got, DirMode)
+	}
+}
+
+func TestEnsureConfigDir_TightensExistingPermissions(t *testing.T) {
+	dir := t.TempDir()
+	gtlDir := filepath.Join(dir, "gtl-data")
+	t.Setenv("GTL_HOME", gtlDir)
+
+	_ = os.MkdirAll(gtlDir, 0o755)
+
+	if err := EnsureConfigDir(); err != nil {
+		t.Fatalf("EnsureConfigDir: %v", err)
+	}
+
+	info, err := os.Stat(gtlDir)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	got := info.Mode().Perm()
+	if got != DirMode {
+		t.Errorf("dir mode after tighten = %o, want %o", got, DirMode)
 	}
 }

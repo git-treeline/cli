@@ -54,13 +54,6 @@ func errNoAllocationNoPorts(path string) error {
 	}
 }
 
-func errBranchAlreadyCheckedOut(branch, existingWT string) error {
-	return &CliError{
-		Message: fmt.Sprintf("Branch '%s' is already checked out at %s", branch, existingWT),
-		Hint:    fmt.Sprintf("Run 'gtl setup %s' to re-run setup on it.", existingWT),
-	}
-}
-
 func errBranchNotFound(branch string) error {
 	return &CliError{
 		Message: fmt.Sprintf("Branch '%s' not found on remote.", branch),

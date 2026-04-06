@@ -1,3 +1,12 @@
+## [0.31.0]
+
+- **Port preservation** — default `port.base` changed from 3000 to 3002; default `port.increment` changed from 10 to 2. Common framework ports (3000, 4000, 5000, 8000, 8080, etc.) are now skipped by the allocator, keeping them free for the proxy to claim for origin-preserving routing. Third-party services (OAuth, Mapbox, Stripe) whitelisted for `localhost:3000` now work transparently across branches.
+- **Router port conflict detection** — the allocator hard-fails if `port.base` equals `router.port`, preventing silent conflicts where worktree allocations block the proxy listener.
+- **Port config warnings** — `gtl doctor` and `gtl init` warn when `port.base` is a common framework default or conflicts with the router port, with fix commands and a link to docs.
+- **File permission hardening** — the config directory is created with mode `0700` (owner-only) and tightened on every CLI invocation. `config.json` and `registry.json` are written with mode `0600`. Lock files changed from `0644` to `0600`. Prevents other users on shared machines from reading credentials or manipulating the registry that drives proxy routing.
+- **`gtl start` port wiring warning** — warns at start time (not just doctor/setup) when the start command is missing `{port}` for frameworks that ignore the `PORT` env var (Vite, Next.js, Django).
+- **Resumable `gtl review` / `gtl new`** — when the branch already has a worktree, both commands now run setup if no allocation exists, print allocation info, and respect `--open`/`--start` flags instead of printing a dead-end message.
+
 ## [0.30.0]
 
 - **Configurable worktree path** — set `worktree.path` in user config to control where `gtl new` and `gtl review` create worktrees. Template supports `{project}` and `{branch}` interpolation. Example: `"worktree": {"path": ".worktrees/{branch}"}` creates worktrees inside the repo instead of as siblings. Relative paths resolve from the repo root; absolute paths are used as-is. Default behavior (sibling directories) is unchanged.

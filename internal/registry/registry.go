@@ -328,12 +328,12 @@ func listGitWorktrees() map[string]bool {
 }
 
 func (r *Registry) withLock(fn func(data *RegistryData)) error {
-	if err := os.MkdirAll(filepath.Dir(r.Path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(r.Path), platform.DirMode); err != nil {
 		return err
 	}
 
 	lockPath := r.Path + ".lock"
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, platform.PrivateFileMode)
 	if err != nil {
 		return fmt.Errorf("opening lock file: %w", err)
 	}
@@ -386,7 +386,7 @@ func (r *Registry) load() (RegistryData, error) {
 
 func (r *Registry) save(data RegistryData) error {
 	dir := filepath.Dir(r.Path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, platform.DirMode); err != nil {
 		return err
 	}
 	raw, err := json.MarshalIndent(data, "", "  ")
@@ -399,6 +399,7 @@ func (r *Registry) save(data RegistryData) error {
 		return fmt.Errorf("creating temp registry file: %w", err)
 	}
 	tmpPath := tmp.Name()
+	_ = tmp.Chmod(platform.PrivateFileMode)
 
 	if _, err := tmp.Write(append(raw, '\n')); err != nil {
 		_ = tmp.Close()

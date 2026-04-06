@@ -4,15 +4,17 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/git-treeline/git-treeline/internal/platform"
 )
 
 func TestUserConfig_Defaults(t *testing.T) {
 	uc := LoadUserConfig("/nonexistent/config.json")
-	if uc.PortBase() != 3000 {
-		t.Errorf("expected 3000, got %d", uc.PortBase())
+	if uc.PortBase() != 3002 {
+		t.Errorf("expected 3002, got %d", uc.PortBase())
 	}
-	if uc.PortIncrement() != 10 {
-		t.Errorf("expected 10, got %d", uc.PortIncrement())
+	if uc.PortIncrement() != 2 {
+		t.Errorf("expected 2, got %d", uc.PortIncrement())
 	}
 	if uc.RedisStrategy() != "prefixed" {
 		t.Errorf("expected prefixed, got %s", uc.RedisStrategy())
@@ -62,16 +64,16 @@ func TestUserConfig_Get_TopLevel(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected map, got %T", val)
 	}
-	if m["base"] != float64(3000) {
-		t.Errorf("expected 3000, got %v", m["base"])
+	if m["base"] != float64(3002) {
+		t.Errorf("expected 3002, got %v", m["base"])
 	}
 }
 
 func TestUserConfig_Get_Nested(t *testing.T) {
 	uc := LoadUserConfig("/nonexistent/config.json")
 	val := uc.Get("port.base")
-	if val != float64(3000) {
-		t.Errorf("expected 3000, got %v", val)
+	if val != float64(3002) {
+		t.Errorf("expected 3002, got %v", val)
 	}
 }
 
@@ -621,7 +623,53 @@ func TestUserConfig_Save_RoundTrip(t *testing.T) {
 	if reloaded.PortBase() != 4000 {
 		t.Errorf("expected 4000 after reload, got %d", reloaded.PortBase())
 	}
-	if reloaded.PortIncrement() != 10 {
-		t.Errorf("expected default increment 10 preserved, got %d", reloaded.PortIncrement())
+	if reloaded.PortIncrement() != 2 {
+		t.Errorf("expected default increment 2 preserved, got %d", reloaded.PortIncrement())
+	}
+}
+
+func TestUserConfig_SaveFilePermissions(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "gtl-data")
+	path := filepath.Join(sub, "config.json")
+
+	uc := LoadUserConfig(path)
+	if err := uc.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	dirInfo, err := os.Stat(sub)
+	if err != nil {
+		t.Fatalf("stat dir: %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != platform.DirMode {
+		t.Errorf("config dir mode = %o, want %o", got, platform.DirMode)
+	}
+
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat file: %v", err)
+	}
+	if got := fileInfo.Mode().Perm(); got != platform.PrivateFileMode {
+		t.Errorf("config file mode = %o, want %o", got, platform.PrivateFileMode)
+	}
+}
+
+func TestUserConfig_InitFilePermissions(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "gtl-data")
+	path := filepath.Join(sub, "config.json")
+
+	uc := &UserConfig{Path: path, Data: UserDefaults}
+	if err := uc.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat file: %v", err)
+	}
+	if got := fileInfo.Mode().Perm(); got != platform.PrivateFileMode {
+		t.Errorf("config file mode = %o, want %o", got, platform.PrivateFileMode)
 	}
 }

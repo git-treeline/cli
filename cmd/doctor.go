@@ -46,6 +46,7 @@ var doctorCmd = &cobra.Command{
 		}
 
 		doctorConfig(pc, det, absPath)
+		doctorPortConfig()
 		doctorAllocation(absPath)
 		doctorRuntime(absPath)
 		doctorServe()
@@ -189,6 +190,35 @@ func doctorConfig(pc *config.ProjectConfig, det *detect.Result, absPath string) 
 				doctorLine("port wiring", "⚠ Django needs the port in the command — use {port}")
 			}
 		}
+	}
+}
+
+func doctorPortConfig() {
+	uc := config.LoadUserConfig("")
+	base := uc.PortBase()
+	routerPort := uc.RouterPort()
+
+	if base == routerPort {
+		fmt.Println("\nPort config")
+		doctorLine("port.base", fmt.Sprintf("✗ %d conflicts with router.port", base))
+		fmt.Println("  The router listens on this port to proxy traffic to your worktrees.")
+		fmt.Println("  Allocating worktrees here will prevent the router from starting.")
+		fmt.Printf("  Fix: gtl config set port.base %d\n", routerPort+1)
+	} else if allocator.IsCommonDevPort(base) {
+		fmt.Println("\nPort config")
+		doctorLine("port.base", fmt.Sprintf("⚠ %d is a common framework default", base))
+		fmt.Println()
+		fmt.Println("  Port 3000 should stay free for the proxy. Third-party services")
+		fmt.Println("  (OAuth, Mapbox, Stripe) whitelist localhost:3000 as their origin.")
+		fmt.Println("  The proxy can sit on 3000 and forward to any branch transparently —")
+		fmt.Println("  but only if no worktree has claimed the port.")
+		fmt.Println()
+		fmt.Printf("  Port %d is reserved for the router (proxy listener).\n", routerPort)
+		fmt.Println()
+		fmt.Println("  The default base is 3002 — the first port after the reserved range.")
+		fmt.Println("  Fix: gtl config set port.base 3002")
+		fmt.Println()
+		fmt.Println("  See: https://git-treeline.dev/docs/port-preservation")
 	}
 }
 

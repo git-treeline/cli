@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/git-treeline/git-treeline/internal/config"
@@ -801,9 +802,147 @@ func TestBrowserBlockedPorts_NotAllocated(t *testing.T) {
 		}
 	}
 
-	for _, port := range []int{3000, 4000, 8080, 9000} {
+	for _, port := range []int{4100, 9000} {
 		if browserBlockedPorts[port] {
 			t.Errorf("port %d should not be in blocked set", port)
 		}
+	}
+}
+
+func TestIsCommonDevPort(t *testing.T) {
+	for _, port := range []int{3000, 4000, 5000, 5173, 8000, 8080} {
+		if !IsCommonDevPort(port) {
+			t.Errorf("expected %d to be a common dev port", port)
+		}
+	}
+	for _, port := range []int{4100, 4200, 9000, 3010, 3020} {
+		if IsCommonDevPort(port) && port != 4200 {
+			t.Errorf("expected %d to NOT be a common dev port", port)
+		}
+	}
+}
+
+func TestAllocator_SkipsCommonDevPorts(t *testing.T) {
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "registry.json")
+	reg := registry.New(regPath)
+
+	confPath := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(confPath, []byte(`{"port":{"base":3000,"increment":10}}`), 0o644)
+	uc := config.LoadUserConfig(confPath)
+
+	projDir := filepath.Join(dir, "project")
+	_ = os.MkdirAll(projDir, 0o755)
+	_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"), []byte("project: test\n"), 0o644)
+	pc := config.LoadProjectConfig(projDir)
+
+	al := New(uc, pc, reg)
+
+	alloc, err := al.Allocate("/repo/main", "main", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if IsCommonDevPort(alloc.Port) {
+		t.Errorf("main worktree allocated common dev port %d — should have skipped it", alloc.Port)
+	}
+}
+
+func TestAllocator_SkipsCommonDevPorts_Worktree(t *testing.T) {
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "registry.json")
+	reg := registry.New(regPath)
+
+	confPath := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(confPath, []byte(`{"port":{"base":4990,"increment":10}}`), 0o644)
+	uc := config.LoadUserConfig(confPath)
+
+	projDir := filepath.Join(dir, "project")
+	_ = os.MkdirAll(projDir, 0o755)
+	_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"), []byte("project: test\n"), 0o644)
+	pc := config.LoadProjectConfig(projDir)
+
+	al := New(uc, pc, reg)
+
+	alloc, err := al.Allocate("/repo/wt/feat", "feat", false, "feat")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if IsCommonDevPort(alloc.Port) {
+		t.Errorf("worktree allocated common dev port %d — should have skipped it", alloc.Port)
+	}
+}
+
+func TestAllocator_SafeBaseDoesNotSkip(t *testing.T) {
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "registry.json")
+	reg := registry.New(regPath)
+
+	confPath := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(confPath, []byte(`{"port":{"base":4100,"increment":10}}`), 0o644)
+	uc := config.LoadUserConfig(confPath)
+
+	projDir := filepath.Join(dir, "project")
+	_ = os.MkdirAll(projDir, 0o755)
+	_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"), []byte("project: test\n"), 0o644)
+	pc := config.LoadProjectConfig(projDir)
+
+	al := New(uc, pc, reg)
+
+	alloc, err := al.Allocate("/repo/main", "main", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if alloc.Port != 4100 {
+		t.Errorf("expected port 4100 with safe base, got %d", alloc.Port)
+	}
+}
+
+func TestAllocator_FailsWhenBaseEqualsRouterPort(t *testing.T) {
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "registry.json")
+	reg := registry.New(regPath)
+
+	confPath := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(confPath, []byte(`{"port":{"base":3001},"router":{"port":3001}}`), 0o644)
+	uc := config.LoadUserConfig(confPath)
+
+	projDir := filepath.Join(dir, "project")
+	_ = os.MkdirAll(projDir, 0o755)
+	_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"), []byte("project: test\n"), 0o644)
+	pc := config.LoadProjectConfig(projDir)
+
+	al := New(uc, pc, reg)
+
+	_, err := al.Allocate("/repo/main", "main", true)
+	if err == nil {
+		t.Fatal("expected error when port.base == router.port")
+	}
+	if !strings.Contains(err.Error(), "conflicts with router.port") {
+		t.Errorf("expected conflict error, got: %v", err)
+	}
+}
+
+func TestAllocator_DefaultRouterPortConflict(t *testing.T) {
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "registry.json")
+	reg := registry.New(regPath)
+
+	confPath := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(confPath, []byte(`{"port":{"base":3001}}`), 0o644)
+	uc := config.LoadUserConfig(confPath)
+
+	projDir := filepath.Join(dir, "project")
+	_ = os.MkdirAll(projDir, 0o755)
+	_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"), []byte("project: test\n"), 0o644)
+	pc := config.LoadProjectConfig(projDir)
+
+	al := New(uc, pc, reg)
+
+	_, err := al.Allocate("/repo/main", "main", true)
+	if err == nil {
+		t.Fatal("expected error when port.base equals default router port (3001)")
 	}
 }

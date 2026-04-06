@@ -8,12 +8,15 @@ import (
 	"time"
 
 	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/git-treeline/internal/detect"
 	"github.com/git-treeline/git-treeline/internal/format"
 	"github.com/git-treeline/git-treeline/internal/interpolation"
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/git-treeline/git-treeline/internal/resolve"
 	"github.com/git-treeline/git-treeline/internal/setup"
+	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/git-treeline/git-treeline/internal/supervisor"
+	"github.com/git-treeline/git-treeline/internal/templates"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
 )
@@ -52,6 +55,8 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 		if startCommand == "" {
 			return errNoStartCommand()
 		}
+
+		warnPortWiring(startCommand, absPath)
 
 		sockPath := supervisor.SocketPath(absPath)
 		port := resolvePort(absPath)
@@ -241,6 +246,23 @@ func interpolateCommand(cmd string, port int) string {
 		inc++
 	}
 	return cmd
+}
+
+// warnPortWiring checks whether the start command is missing {port} for a
+// framework that ignores the PORT env var. This is the same check that
+// doctor and setup run, surfaced at start time when the user will actually
+// see the wrong-port behavior.
+func warnPortWiring(startCommand, worktreePath string) {
+	if strings.Contains(startCommand, "{port") {
+		return
+	}
+	det := detect.Detect(worktreePath)
+	if hint := templates.PortHint(det); hint != "" {
+		fmt.Fprintln(os.Stderr, style.Warnf("Port wiring: your start command doesn't include {port}."))
+		fmt.Fprintln(os.Stderr, style.Dimf("  %s", strings.Split(hint, "\n")[0]))
+		fmt.Fprintln(os.Stderr, style.Dimf("  The server may start on the wrong port. See 'gtl doctor' for details."))
+		fmt.Fprintln(os.Stderr)
+	}
 }
 
 func awaitReady(sockPath string) error {
