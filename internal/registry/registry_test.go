@@ -152,7 +152,7 @@ func TestRegistry_FindMergedAllocations(t *testing.T) {
 
 	paths := map[string]bool{}
 	for _, a := range merged {
-		paths[getString(a, "worktree")] = true
+		paths[GetString(a, "worktree")] = true
 	}
 	if !paths["/wt/a"] || !paths["/wt/c"] {
 		t.Errorf("expected /wt/a and /wt/c, got %v", paths)
@@ -188,7 +188,7 @@ func TestRegistry_ReleaseMany(t *testing.T) {
 	if len(allocs) != 1 {
 		t.Fatalf("expected 1 remaining, got %d", len(allocs))
 	}
-	if getString(allocs[0], "worktree_name") != "b" {
+	if GetString(allocs[0], "worktree_name") != "b" {
 		t.Errorf("expected 'b' remaining, got %v", allocs[0]["worktree_name"])
 	}
 }
@@ -205,7 +205,7 @@ func TestRegistry_UpdateField(t *testing.T) {
 	if found == nil {
 		t.Fatal("expected allocation")
 	}
-	if getString(found, "branch") != "new-branch" {
+	if GetString(found, "branch") != "new-branch" {
 		t.Errorf("expected new-branch, got %v", found["branch"])
 	}
 }
@@ -219,7 +219,7 @@ func TestRegistry_UpdateField_NoMatch(t *testing.T) {
 	}
 
 	found := reg.Find("/wt/a")
-	if getString(found, "branch") != "main" {
+	if GetString(found, "branch") != "main" {
 		t.Errorf("expected main unchanged, got %v", found["branch"])
 	}
 }
@@ -270,8 +270,8 @@ func TestFindProjectBranch(t *testing.T) {
 	if found == nil {
 		t.Fatal("expected to find api/feature-x")
 	}
-	if getString(found, "worktree") != "/tmp/api-feat" {
-		t.Errorf("wrong worktree: %s", getString(found, "worktree"))
+	if GetString(found, "worktree") != "/tmp/api-feat" {
+		t.Errorf("wrong worktree: %s", GetString(found, "worktree"))
 	}
 
 	notFound := reg.FindProjectBranch("api", "no-such-branch")
@@ -354,6 +354,89 @@ func TestRegistry_UsedRedisDbs_SkipsNonFloat(t *testing.T) {
 	dbs := reg.UsedRedisDbs()
 	if len(dbs) != 1 || dbs[0] != 2 {
 		t.Errorf("expected [2], got %v", dbs)
+	}
+}
+
+func TestRegistry_Prune_AllStale(t *testing.T) {
+	reg := newTestRegistry(t)
+	_ = reg.Allocate(Allocation{"worktree": "/no/such/dir/a", "project": "p"})
+	_ = reg.Allocate(Allocation{"worktree": "/no/such/dir/b", "project": "p"})
+	_ = reg.Allocate(Allocation{"worktree": "/no/such/dir/c", "project": "p"})
+
+	count, err := reg.Prune()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Errorf("expected 3 pruned, got %d", count)
+	}
+	if len(reg.Allocations()) != 0 {
+		t.Errorf("expected 0 remaining, got %d", len(reg.Allocations()))
+	}
+}
+
+func TestRegistry_Prune_NoneStale(t *testing.T) {
+	dir := t.TempDir()
+	wt1 := filepath.Join(dir, "a")
+	wt2 := filepath.Join(dir, "b")
+	_ = os.MkdirAll(wt1, 0o755)
+	_ = os.MkdirAll(wt2, 0o755)
+
+	reg := newTestRegistry(t)
+	_ = reg.Allocate(Allocation{"worktree": wt1})
+	_ = reg.Allocate(Allocation{"worktree": wt2})
+
+	count, err := reg.Prune()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 pruned, got %d", count)
+	}
+	if len(reg.Allocations()) != 2 {
+		t.Errorf("expected 2 remaining, got %d", len(reg.Allocations()))
+	}
+}
+
+func TestRegistry_Prune_MixedWithMetadata(t *testing.T) {
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "live-wt")
+	_ = os.MkdirAll(existing, 0o755)
+
+	reg := newTestRegistry(t)
+	_ = reg.Allocate(Allocation{"worktree": existing, "project": "myapp", "port": float64(3000), "database": "myapp_dev"})
+	_ = reg.Allocate(Allocation{"worktree": "/gone/stale", "project": "myapp", "port": float64(3010), "database": "myapp_dev_stale"})
+
+	count, _ := reg.Prune()
+	if count != 1 {
+		t.Errorf("expected 1 pruned, got %d", count)
+	}
+
+	remaining := reg.Allocations()
+	if len(remaining) != 1 {
+		t.Fatalf("expected 1 remaining, got %d", len(remaining))
+	}
+	if GetString(remaining[0], "database") != "myapp_dev" {
+		t.Errorf("wrong allocation survived: %v", remaining[0])
+	}
+}
+
+func TestRegistry_CorruptJSON_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "registry.json")
+	if err := os.WriteFile(regPath, []byte(`{corrupt`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := New(regPath)
+
+	err := reg.Allocate(Allocation{"worktree": "/wt/a"})
+	if err == nil {
+		t.Fatal("expected error for corrupt registry, got nil")
+	}
+
+	raw, _ := os.ReadFile(regPath)
+	if string(raw) != `{corrupt` {
+		t.Errorf("corrupt file was overwritten: %s", raw)
 	}
 }
 

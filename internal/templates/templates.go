@@ -157,7 +157,7 @@ func vite(project string, det *detect.Result) string {
 	b.WriteString("\ncommands:\n")
 	b.WriteString("  setup:\n")
 	fmt.Fprintf(&b, "    - %s\n", installCmd(det))
-	b.WriteString("  start: npx vite\n")
+	b.WriteString("  start: npx vite --port {port} --host\n")
 
 	writeHooksComment(&b)
 	writeEditorComment(&b)
@@ -282,7 +282,7 @@ func startCommandFor(det *detect.Result) string {
 	case "node":
 		return runCmd(det) + " dev"
 	case "django", "python":
-		return "python manage.py runserver 0.0.0.0:${PORT:-8000}"
+		return "python manage.py runserver 0.0.0.0:{port}"
 	default:
 		return ""
 	}
@@ -310,38 +310,27 @@ func writeMergeTarget(b *strings.Builder, det *detect.Result) {
 func PortHint(det *detect.Result) string {
 	switch det.Framework {
 	case "nextjs":
-		envFile := envTarget(det)
-		return fmt.Sprintf(`Next.js does not read PORT from %s for the dev server.
-Update your package.json dev script:
+		return `Next.js reads PORT from the environment but not from .env files for the dev server.
+Use {port} in your start command:
 
-  "dev": "next dev --port ${PORT:-3000}"
-
-Or use dotenv-cli to load %s before starting:
-
-  npm install -D dotenv-cli
-  "dev": "dotenv -e %s -- next dev --port $PORT"`, envFile, envFile, envFile)
+  commands:
+    start: npm run dev -- --port {port}`
 	case "vite":
-		return `Vite loads .env.local for import.meta.env but does NOT use PORT for the dev server.
-Add this to your vite.config.js:
+		return `Vite ignores the PORT env var for the dev server.
+Use {port} in your start command (gtl init does this automatically):
 
-  import { defineConfig, loadEnv } from 'vite'
-  export default defineConfig(({ mode }) => {
-    const env = loadEnv(mode, process.cwd(), '')
-    return {
-      server: { port: parseInt(env.PORT || '5173') }
-    }
-  })`
+  commands:
+    start: npx vite --port {port} --host`
 	case "node":
 		return `Ensure your server reads the allocated port from the environment:
 
   const port = process.env.PORT || 3000;
   app.listen(port);`
 	case "django", "python":
-		return `Pass the allocated port to your dev server:
+		return `Use {port} in your start command for the allocated port:
 
-  python manage.py runserver 0.0.0.0:${PORT:-8000}
-
-Or in your WSGI/ASGI config, read os.environ["PORT"].`
+  commands:
+    start: python manage.py runserver 0.0.0.0:{port}`
 	default:
 		return ""
 	}

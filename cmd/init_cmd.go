@@ -12,6 +12,8 @@ import (
 	"github.com/git-treeline/git-treeline/internal/detect"
 	"github.com/git-treeline/git-treeline/internal/editor"
 	"github.com/git-treeline/git-treeline/internal/platform"
+	"github.com/git-treeline/git-treeline/internal/proxy"
+	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/git-treeline/git-treeline/internal/templates"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
@@ -34,8 +36,10 @@ var initCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		path := filepath.Join(".", config.ProjectConfigFile)
 		if _, err := os.Stat(path); err == nil {
-			fmt.Fprintln(os.Stderr, ".treeline.yml already exists")
-			os.Exit(1)
+			return &CliError{
+				Message: ".treeline.yml already exists.",
+				Hint:    "Edit the existing file, or delete it and re-run 'gtl init'.",
+			}
 		}
 
 		uc := config.LoadUserConfig("")
@@ -43,7 +47,7 @@ var initCmd = &cobra.Command{
 			if err := uc.Init(); err != nil {
 				return err
 			}
-			fmt.Printf("==> Created user config at %s\n", platform.ConfigFile())
+			fmt.Println(style.Actionf("Created user config at %s", platform.ConfigFile()))
 		}
 
 		project := initProject
@@ -63,12 +67,12 @@ var initCmd = &cobra.Command{
 
 		if len(detection.EnvFiles) > 1 {
 			idx := confirm.Select(
-				"==> Found multiple env files:",
+				"Found multiple env files:",
 				detection.EnvFiles, 0, nil,
 			)
 			detection.EnvFile = detection.EnvFiles[idx]
 		} else if len(detection.EnvFiles) == 1 {
-			if confirm.Prompt(fmt.Sprintf("==> Found %s — use as env file source?", detection.EnvFiles[0]), false, nil) {
+			if confirm.Prompt(fmt.Sprintf("Found %s — use as env file source?", detection.EnvFiles[0]), false, nil) {
 				detection.EnvFile = detection.EnvFiles[0]
 			} else {
 				detection.HasEnvFile = false
@@ -82,32 +86,18 @@ var initCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Printf("==> Created %s for project '%s'", config.ProjectConfigFile, project)
+		msg := fmt.Sprintf("Created %s for project '%s'", config.ProjectConfigFile, project)
 		if detection.Framework != "unknown" {
-			fmt.Printf(" (detected: %s)", detection.Framework)
+			msg += fmt.Sprintf(" (detected: %s)", detection.Framework)
 		}
-		fmt.Println()
-		fmt.Println()
-		fmt.Printf("Allocation policy (ports, Redis) is managed in your user config:\n")
-		fmt.Printf("  %s\n", platform.ConfigFile())
-
-		diags := templates.Diagnose(detection)
-		for _, d := range diags {
-			fmt.Println()
-			if d.Level == "warn" {
-				fmt.Println("⚠  Action needed:")
-			}
-			for _, line := range splitLines(d.Message) {
-				fmt.Printf("  %s\n", line)
-			}
-		}
+		fmt.Println(style.Actionf("%s", msg))
 
 		if !initSkipAgentConfig {
 			agentPath, err := templates.WriteAgentContext(cwd, project, detection)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to write agent context: %s\n", err)
+				fmt.Fprintln(os.Stderr, style.Warnf("failed to write agent context: %s", err))
 			} else if agentPath != "" {
-				fmt.Printf("==> Agent context written to %s\n", agentPath)
+				fmt.Println(style.Actionf("Agent context written to %s", agentPath))
 			}
 		}
 
@@ -115,27 +105,37 @@ var initCmd = &cobra.Command{
 			if detected := editor.DetectEditor(); detected != "" {
 				uc.SetEditorName(detected)
 				if err := uc.Save(); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to save editor name: %s\n", err)
+					fmt.Fprintln(os.Stderr, style.Warnf("failed to save editor name: %s", err))
 				} else if info := editor.LookupEditor(detected); info != nil {
-					fmt.Printf("==> Detected editor: %s\n", info.Display)
+					fmt.Println(style.Actionf("Detected editor: %s", info.Display))
 				}
 			}
 		}
 
-		if confirm.Prompt("==> Install Git post-checkout hook for automatic worktree setup?", false, nil) {
-			hookPath, err := templates.InstallPostCheckoutHook(cwd)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to install hook: %s\n", err)
-			} else if hookPath != "" {
-				fmt.Printf("==> Post-checkout hook installed at %s\n", hookPath)
+		hookPath, err := templates.InstallPostCheckoutHook(cwd)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, style.Warnf("failed to install hook: %s", err))
+		} else if hookPath != "" {
+			fmt.Println(style.Actionf("Hook installed at %s", hookPath))
+		}
+
+		diags := templates.Diagnose(detection)
+		for _, d := range diags {
+			fmt.Println()
+			if d.Level == "warn" {
+				fmt.Println(style.Warn.Render("Warning:"))
+			}
+			for _, line := range splitLines(d.Message) {
+				fmt.Printf("  %s\n", line)
 			}
 		}
 
 		fmt.Println()
-		fmt.Println("Next steps:")
-		fmt.Println("  gtl setup             Allocate ports for this worktree")
-		fmt.Println("  gtl serve install     HTTPS subdomain router (https://{branch}.localhost)")
-		fmt.Println("  gtl tunnel setup      Public tunneling via Cloudflare (https://{branch}.yourdomain.dev)")
+		fmt.Println(style.Bold.Render("Next steps:"))
+		if !proxy.IsCAInstalled() {
+			fmt.Printf("  %s   HTTPS router (one-time, requires sudo)\n", style.Cmd("gtl serve install"))
+		}
+		fmt.Printf("  %s           Allocate ports for this worktree\n", style.Cmd("gtl setup"))
 
 		openInEditor(path)
 		return nil

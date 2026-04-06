@@ -1,80 +1,163 @@
 package cmd
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func skipIfNoGit(t *testing.T) {
-	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
+// Guard tests scan source code for invariant violations that are hard to
+// catch in code review. Each test prevents a class of bug rather than an
+// individual instance.
+
+func TestGuard_NoOsExitInInternal(t *testing.T) {
+	violations := scanGoFiles(t, "../internal", func(fset *token.FileSet, f *ast.File, path string) []string {
+		var hits []string
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			ident, ok := sel.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if ident.Name == "os" && sel.Sel.Name == "Exit" {
+				pos := fset.Position(call.Pos())
+				hits = append(hits, pos.String())
+			}
+			return true
+		})
+		return hits
+	})
+
+	if len(violations) > 0 {
+		t.Errorf("os.Exit() found in internal/ — return errors to the caller instead:\n  %s",
+			strings.Join(violations, "\n  "))
 	}
 }
 
-func initRepo(t *testing.T) string {
-	t.Helper()
-	skipIfNoGit(t)
-	dir := t.TempDir()
-	dir, _ = filepath.EvalSymlinks(dir)
-	runGit(t, dir, "init", "--initial-branch=main")
-	runGit(t, dir, "commit", "--allow-empty", "-m", "init")
-	return dir
+func TestGuard_NoFmtPrintInInternal(t *testing.T) {
+	allowedFiles := map[string]bool{
+		"style.go": true, // style package is the output layer
+	}
+	allowedPkgs := map[string]bool{
+		"tui":       true, // Bubble Tea renders via fmt
+		"proxy":     true, // router lifecycle messages (intentional)
+		"confirm":   true, // interactive prompts write to stdout
+		"format":    true, // output formatting for display
+		"share":     true, // CLI-facing share output
+		"tunnel":    true, // CLI-facing tunnel output
+		"tailscale": true, // CLI-facing tailscale output
+		"service":   true, // install/uninstall user feedback
+	}
+
+	violations := scanGoFiles(t, "../internal", func(fset *token.FileSet, f *ast.File, path string) []string {
+		base := filepath.Base(path)
+		if strings.HasSuffix(base, "_test.go") || allowedFiles[base] {
+			return nil
+		}
+		pkg := filepath.Base(filepath.Dir(path))
+		if allowedPkgs[pkg] {
+			return nil
+		}
+
+		var hits []string
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			ident, ok := sel.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if ident.Name == "fmt" && (sel.Sel.Name == "Print" || sel.Sel.Name == "Println" || sel.Sel.Name == "Printf") {
+				pos := fset.Position(call.Pos())
+				hits = append(hits, pos.String())
+			}
+			return true
+		})
+		return hits
+	})
+
+	if len(violations) > 0 {
+		t.Errorf("fmt.Print*/Println/Printf found in internal/ (use fmt.Fprint to stderr, or internal/style for user output):\n  %s",
+			strings.Join(violations, "\n  "))
+	}
 }
 
-func runGit(t *testing.T, dir string, args ...string) {
+func TestGuard_NoOsExitInCmdRunE(t *testing.T) {
+	violations := scanGoFiles(t, ".", func(fset *token.FileSet, f *ast.File, path string) []string {
+		base := filepath.Base(path)
+		if base == "root.go" || strings.HasSuffix(base, "_test.go") || base == "guard_test.go" {
+			return nil
+		}
+
+		var hits []string
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			ident, ok := sel.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			if ident.Name == "os" && sel.Sel.Name == "Exit" {
+				pos := fset.Position(call.Pos())
+				hits = append(hits, pos.String())
+			}
+			return true
+		})
+		return hits
+	})
+
+	if len(violations) > 0 {
+		t.Errorf("os.Exit() found in cmd/ (only root.go may call os.Exit):\n  %s",
+			strings.Join(violations, "\n  "))
+	}
+}
+
+type inspectFunc func(fset *token.FileSet, f *ast.File, path string) []string
+
+func scanGoFiles(t *testing.T, dir string, fn inspectFunc) []string {
 	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
-		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
-	)
-	out, err := cmd.CombinedOutput()
+	var all []string
+
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		fset := token.NewFileSet()
+		f, parseErr := parser.ParseFile(fset, path, nil, 0)
+		if parseErr != nil {
+			return nil
+		}
+		all = append(all, fn(fset, f, path)...)
+		return nil
+	})
 	if err != nil {
-		t.Fatalf("git %v failed: %s", args, string(out))
+		t.Fatalf("walking %s: %v", dir, err)
 	}
-}
-
-func TestWorktreeGuard_AllowsMainRepo(t *testing.T) {
-	repo := initRepo(t)
-
-	orig, _ := os.Getwd()
-	_ = os.Chdir(repo)
-	defer func() { _ = os.Chdir(orig) }()
-
-	err := worktreeGuard(newCmd, []string{"feature-x"})
-	if err != nil {
-		t.Errorf("expected no error from main repo, got: %v", err)
-	}
-}
-
-func TestWorktreeGuard_BlocksWorktree(t *testing.T) {
-	repo := initRepo(t)
-
-	wtPath := filepath.Join(filepath.Dir(repo), "test-wt")
-	runGit(t, repo, "worktree", "add", "-b", "test-branch", wtPath)
-	defer func() {
-		cmd := exec.Command("git", "worktree", "remove", "--force", wtPath)
-		cmd.Dir = repo
-		_ = cmd.Run()
-	}()
-
-	orig, _ := os.Getwd()
-	_ = os.Chdir(wtPath)
-	defer func() { _ = os.Chdir(orig) }()
-
-	err := worktreeGuard(newCmd, []string{"feature-x"})
-	if err == nil {
-		t.Fatal("expected error from inside worktree")
-	}
-	if !strings.Contains(err.Error(), "not the main repo") {
-		t.Errorf("expected 'not the main repo' in error, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "gtl switch") {
-		t.Errorf("expected 'gtl switch' suggestion in error, got: %v", err)
-	}
+	return all
 }

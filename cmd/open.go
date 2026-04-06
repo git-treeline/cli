@@ -34,14 +34,13 @@ var openCmd = &cobra.Command{
 		reg := registry.New("")
 		entry := reg.Find(absPath)
 		if entry == nil {
-			fmt.Fprintf(os.Stderr, "No allocation found for %s\nRun `gtl setup` first.\n", absPath)
-			os.Exit(1)
+			return errNoAllocation(absPath)
 		}
 
 		fa := format.Allocation(entry)
 		ports := format.GetPorts(fa)
 		if len(ports) == 0 {
-			return fmt.Errorf("allocation exists but has no ports")
+			return errNoAllocationNoPorts(absPath)
 		}
 
 		mainRepo := worktree.DetectMainRepo(absPath)
@@ -51,21 +50,22 @@ var openCmd = &cobra.Command{
 		project := pc.Project()
 		branch := format.GetStr(fa, "branch")
 
-		url := fmt.Sprintf("http://localhost:%d", ports[0])
-
-		if branch != "" && service.IsRunning() {
-			routeKey := proxy.RouteKey(project, branch)
-			if service.IsPortForwardConfigured() {
-				url = fmt.Sprintf("https://%s.localhost", routeKey)
-			} else {
-				routerPort := uc.RouterPort()
-				url = fmt.Sprintf("https://%s.localhost:%d", routeKey, routerPort)
-			}
-		}
+		url := buildOpenURL(ports[0], project, branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
 
 		fmt.Printf("Opening %s\n", url)
 		return openBrowser(url)
 	},
+}
+
+func buildOpenURL(port int, project, branch, domain string, routerPort int, svcRunning, pfConfigured bool) string {
+	if branch != "" && svcRunning {
+		routeKey := proxy.RouteKey(project, branch)
+		if pfConfigured {
+			return fmt.Sprintf("https://%s.%s", routeKey, domain)
+		}
+		return fmt.Sprintf("https://%s.%s:%d", routeKey, domain, routerPort)
+	}
+	return fmt.Sprintf("http://localhost:%d", port)
 }
 
 func openBrowser(url string) error {
@@ -75,6 +75,9 @@ func openBrowser(url string) error {
 	case "linux":
 		return exec.Command("xdg-open", url).Start()
 	default:
-		return fmt.Errorf("unsupported platform %s", runtime.GOOS)
+		return &CliError{
+			Message: fmt.Sprintf("Unsupported platform: %s", runtime.GOOS),
+			Hint:    "'gtl open' supports macOS and Linux. Open the URL manually.",
+		}
 	}
 }

@@ -53,6 +53,11 @@ func New(command, dir, socketPath string) *Supervisor {
 }
 
 func (s *Supervisor) Run() error {
+	if _, err := os.Stat(s.SocketPath); err == nil {
+		if resp, dialErr := Send(s.SocketPath, "status"); dialErr == nil {
+			return fmt.Errorf("supervisor already running (status: %s) on %s", resp, s.SocketPath)
+		}
+	}
 	_ = os.Remove(s.SocketPath)
 
 	ln, err := net.Listen("unix", s.SocketPath)

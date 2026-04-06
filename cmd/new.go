@@ -8,9 +8,8 @@ import (
 	"strings"
 
 	"github.com/git-treeline/git-treeline/internal/config"
-	"github.com/git-treeline/git-treeline/internal/proxy"
-	"github.com/git-treeline/git-treeline/internal/service"
 	"github.com/git-treeline/git-treeline/internal/setup"
+	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
 )
@@ -33,13 +32,17 @@ var newCmd = &cobra.Command{
 	Use:   "new <branch>",
 	Short: "Create a worktree, allocate resources, and run setup",
 	Long: `Create a new git worktree for the given branch, allocate ports/databases/Redis,
-and run setup commands. Combines 'git worktree add' with 'git-treeline setup' in one step.
+and run setup commands. Combines 'git worktree add' with 'gtl setup' in one step.
 
 If the branch already exists locally or on origin, it is checked out.
 Otherwise a new branch is created from --base (or the current branch).`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := worktreeGuard(cmd, args); err != nil {
+			return err
+		}
+
+		if err := requireServeInstalled(); err != nil {
 			return err
 		}
 
@@ -51,16 +54,24 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		}
 		mainRepo := worktree.DetectMainRepo(cwd)
 		pc := config.LoadProjectConfig(mainRepo)
+		uc := config.LoadUserConfig("")
 		projectName := pc.Project()
 
 		wtPath := newPath
 		if wtPath == "" {
+			wtPath = uc.ResolveWorktreePath(mainRepo, projectName, branch)
+		}
+		if wtPath == "" {
 			wtPath = filepath.Join(filepath.Dir(mainRepo), fmt.Sprintf("%s-%s", projectName, branch))
+		}
+
+		if err := ensureGitignored(mainRepo, wtPath); err != nil {
+			return err
 		}
 
 		// Check if this branch is already checked out in another worktree
 		if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
-			return fmt.Errorf("branch '%s' is already checked out at %s\nUse 'git-treeline setup %s' to re-run setup on it", branch, existingWT, existingWT)
+			return errBranchAlreadyCheckedOut(branch, existingWT)
 		}
 
 		existing := worktree.BranchExists(branch)
@@ -76,7 +87,7 @@ Otherwise a new branch is created from --base (or the current branch).`,
 				fmt.Printf("[dry-run] Would create new branch '%s' from %s\n", branch, base)
 			}
 			fmt.Printf("[dry-run] Worktree path: %s\n", wtPath)
-			fmt.Println("[dry-run] Would run: git-treeline setup")
+			fmt.Println("[dry-run] Would run: gtl setup")
 			if newStart && pc.StartCommand() != "" {
 				fmt.Printf("[dry-run] Would run: %s\n", pc.StartCommand())
 			}
@@ -85,53 +96,43 @@ Otherwise a new branch is created from --base (or the current branch).`,
 
 		if existing {
 			_ = worktree.Fetch("origin", branch) // non-fatal: branch may only exist locally
-			fmt.Printf("==> Checking out existing branch '%s'\n", branch)
+			fmt.Println(style.Actionf("Checking out existing branch '%s'", branch))
 			if err := worktree.Create(wtPath, branch, false, ""); err != nil {
 				return err
 			}
 		} else {
 			base := newBase
 			if base == "" {
-				base = currentBranch()
+				base = worktree.CurrentBranch(".")
+				if base == "" {
+					base = "main"
+				}
 			}
-			fmt.Printf("==> Creating branch '%s' from '%s'\n", branch, base)
+			fmt.Println(style.Actionf("Creating branch '%s' from '%s'", branch, base))
 			if err := worktree.Create(wtPath, branch, true, base); err != nil {
 				return err
 			}
 		}
 
-		fmt.Printf("==> Worktree created at %s\n", wtPath)
-		fmt.Println("==> Running setup...")
+		fmt.Println(style.Actionf("Worktree created at %s", wtPath))
+		fmt.Println(style.Actionf("Running setup..."))
 
-		uc := config.LoadUserConfig("")
 		s := setup.New(wtPath, mainRepo, uc)
 		s.Options.DryRun = false
 		alloc, err := s.Run()
 		if err != nil {
-			return fmt.Errorf("setup failed: %w", err)
+			return errSetupFailed(err)
 		}
 
-		if service.IsRunning() {
-			routeKey := proxy.RouteKey(projectName, alloc.Branch)
-			if service.IsPortForwardConfigured() {
-				fmt.Printf("==> Router: https://%s.localhost\n", routeKey)
-			} else {
-				port := uc.RouterPort()
-				fmt.Printf("==> Router: https://%s.localhost:%d\n", routeKey, port)
-			}
-		}
-		if domain := uc.TunnelDomain(""); domain != "" {
-			routeKey := proxy.RouteKey(projectName, alloc.Branch)
-			fmt.Printf("==> Tunnel: gtl tunnel → https://%s.%s\n", routeKey, domain)
-		}
+		printRouterAndTunnel(uc, projectName, alloc.Branch)
 
 		if newStart {
 			startCmd := pc.StartCommand()
 			if startCmd == "" {
-				fmt.Println("Warning: --start passed but no commands.start configured in .treeline.yml")
+				fmt.Println(style.Warnf("--start passed but no commands.start configured in .treeline.yml"))
 				return nil
 			}
-			fmt.Printf("==> Starting: %s\n", startCmd)
+			fmt.Println(style.Actionf("Starting: %s", startCmd))
 			return execInWorktree(wtPath, startCmd)
 		}
 
@@ -139,14 +140,6 @@ Otherwise a new branch is created from --base (or the current branch).`,
 	},
 }
 
-func currentBranch() string {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	out, err := cmd.Output()
-	if err != nil {
-		return "main"
-	}
-	return string(out[:len(out)-1]) // trim trailing newline
-}
 
 // worktreeGuard returns an error if the cwd is inside a worktree rather than
 // the main repo. Prevents gtl new / gtl review from creating sibling worktrees.
@@ -161,13 +154,12 @@ func worktreeGuard(cmd *cobra.Command, args []string) error {
 	resolvedAbs, _ := filepath.EvalSymlinks(absPath)
 	resolvedMain, _ := filepath.EvalSymlinks(mainRepo)
 	if resolvedAbs != resolvedMain {
-		return fmt.Errorf("you're inside worktree '%s', not the main repo.\n\n"+
-			"  To switch this worktree to a different branch:\n"+
-			"    gtl switch <branch-or-PR#>\n\n"+
-			"  To create a new worktree, run from the main repo:\n"+
-			"    cd %s\n"+
-			"    gtl %s %s",
-			filepath.Base(absPath), mainRepo, cmd.Name(), strings.Join(args, " "))
+		return &CliError{
+			Message: fmt.Sprintf("You're inside worktree '%s', not the main repo.", filepath.Base(absPath)),
+			Hint: fmt.Sprintf("To switch this worktree: gtl switch <branch-or-PR#>\n"+
+				"  To create from main repo:  cd %s && gtl %s %s",
+				mainRepo, cmd.Name(), strings.Join(args, " ")),
+		}
 	}
 	return nil
 }

@@ -26,20 +26,18 @@ func tunnelHintNamed(det *detect.Result, hostname, domain string) string {
 
 	switch det.Framework {
 	case "rails":
-		return fmt.Sprintf(`Rails blocks requests from unknown hosts in development.
-  Add to config/environments/development.rb:
+		return fmt.Sprintf(`Rails blocks unknown hosts in development. Add to development.rb:
 
     config.hosts << "%s"`, wildcard)
 
 	case "vite":
-		return fmt.Sprintf(`Vite's dev server rejects non-localhost hostnames (403).
-  Add to your vite.config server options:
+		return fmt.Sprintf(`Vite rejects non-localhost hostnames (403). Add to vite.config:
 
     server: { allowedHosts: ["%s"] }`, wildcard)
 
 	case "django", "python":
 		return fmt.Sprintf(`Django rejects requests when the Host header isn't in ALLOWED_HOSTS.
-  Add to settings.py (or your dev settings):
+  Add to settings.py:
 
     ALLOWED_HOSTS += ["%s"]`, hostname)
 
@@ -51,30 +49,25 @@ func tunnelHintNamed(det *detect.Result, hostname, domain string) string {
 func tunnelHintQuick(det *detect.Result) string {
 	switch det.Framework {
 	case "rails":
-		return `Rails blocks requests from unknown hosts in development.
-  Quick tunnels get a random domain each time, so a wildcard is easiest:
+		return `Rails blocks unknown hosts in development. Add to development.rb:
 
-    # config/environments/development.rb
     config.hosts << ".trycloudflare.com"
 
-  For a stable domain, run 'gtl tunnel setup' instead.`
+  For a stable domain: gtl tunnel setup`
 
 	case "vite":
-		return `Vite's dev server rejects non-localhost hostnames (403).
-  Quick tunnels get a random domain each time, so a wildcard is easiest:
+		return `Vite rejects non-localhost hostnames (403). Add to vite.config:
 
-    // vite.config
     server: { allowedHosts: [".trycloudflare.com"] }
 
-  For a stable domain, run 'gtl tunnel setup' instead.`
+  For a stable domain: gtl tunnel setup`
 
 	case "django", "python":
-		return `Django rejects requests when the Host header isn't in ALLOWED_HOSTS.
-  Quick tunnels get a random domain, so for dev you may need:
+		return `Django rejects unknown hosts. Add to settings.py:
 
     ALLOWED_HOSTS += [".trycloudflare.com"]
 
-  For a stable domain, run 'gtl tunnel setup' instead.`
+  For a stable domain: gtl tunnel setup`
 
 	default:
 		return ""

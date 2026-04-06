@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,6 +13,7 @@ import (
 	"github.com/git-treeline/git-treeline/internal/format"
 	"github.com/git-treeline/git-treeline/internal/proxy"
 	"github.com/git-treeline/git-treeline/internal/registry"
+	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/git-treeline/git-treeline/internal/templates"
 	"github.com/git-treeline/git-treeline/internal/tunnel"
 	"github.com/git-treeline/git-treeline/internal/worktree"
@@ -68,7 +68,10 @@ Related commands:
 		if domain != "" {
 			tunnelName := uc.TunnelName(tunnelConfigName)
 			if tunnelName == "" {
-				return fmt.Errorf("tunnel domain is configured but no tunnel name found\nRun 'gtl tunnel setup' to complete configuration")
+				return &CliError{
+				Message: "Tunnel domain is configured but no tunnel name found.",
+				Hint:    "Run 'gtl tunnel setup' to complete configuration.",
+			}
 			}
 			if err := validateTunnelPrereqs(tunnelName); err != nil {
 				return err
@@ -94,122 +97,110 @@ Related commands:
 var tunnelSetupCmd = &cobra.Command{
 	Use:   "setup",
 	Short: "Configure a named Cloudflare tunnel with your domain",
-	Long: `Interactive setup for named tunnels. Walks you through:
-
-  1. Installing cloudflared (if missing)
-  2. Authenticating with Cloudflare (opens browser)
-  3. Creating a named tunnel
-  4. Routing a wildcard DNS record to your domain
-  5. Saving the configuration
+	Long: `Interactive setup for named tunnels. Installs cloudflared if needed,
+authenticates with Cloudflare, creates a tunnel, and routes your domain.
 
 After setup, 'gtl tunnel' will automatically use your domain.
 Subdomains are derived from project and branch names, matching gtl serve routes.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		uc := config.LoadUserConfig("")
 
-		// Step 1: Check cloudflared
-		fmt.Println("  Step 1: Checking cloudflared")
 		if _, err := tunnel.ResolveCloudflared(); err != nil {
+			if !confirm.Prompt("cloudflared not found. Install it?", false, nil) {
+				return &CliError{
+					Message: "cloudflared is required for tunnel setup.",
+					Hint:    "Install it with 'brew install cloudflare/cloudflare/cloudflared' or see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/",
+				}
+			}
 			if !tunnel.OfferInstall() {
-				return fmt.Errorf("cloudflared is required for tunnel setup")
+				return &CliError{
+					Message: "cloudflared still not found after install attempt.",
+					Hint:    "Install manually: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/",
+				}
 			}
 			if _, err := tunnel.ResolveCloudflared(); err != nil {
-				return fmt.Errorf("cloudflared still not found after install attempt")
+				return &CliError{
+					Message: "cloudflared still not found after install attempt.",
+					Hint:    "Install manually: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/",
+				}
 			}
 		}
-		fmt.Println("    cloudflared found.")
 
-		// Step 2: Authenticate
-		fmt.Println()
-		fmt.Println("  Step 2: Cloudflare authentication")
-		if tunnel.IsLoggedIn() {
-			fmt.Println("    Already authenticated.")
-		} else {
-			fmt.Println("    Opening Cloudflare login in your browser...")
-			fmt.Println("    Select the account that owns your domain.")
-			fmt.Println()
+		if !tunnel.IsLoggedIn() {
+			fmt.Println(style.Actionf("Opening Cloudflare login — select the account that owns your domain."))
 			if err := tunnel.Login(); err != nil {
 				return fmt.Errorf("cloudflared login failed: %w", err)
 			}
-			fmt.Println("    Authenticated.")
 		}
 
-		// Step 3: Create tunnel
-		fmt.Println()
-		fmt.Println("  Step 3: Create tunnel")
-		fmt.Println("    Cloudflare needs a named tunnel as the connection endpoint.")
-		fmt.Println("    The name is just an identifier — one tunnel handles all your projects.")
-		fmt.Println("    You'd only change this if you run multiple machines (e.g. gtl-work, gtl-home).")
-		fmt.Println()
 		tunnelName := uc.TunnelDefault()
 		if tunnelName == "" {
 			tunnelName = "gtl"
 		}
-		tunnelName = confirm.Input("    Tunnel name", tunnelName, nil)
+		existingConfigs := uc.TunnelConfigs()
+		if len(existingConfigs) == 0 {
+			fmt.Println("Identifier for this machine (e.g. gtl, gtl-work)")
+		}
+		tunnelName = confirm.Input("Tunnel identifier", tunnelName, nil)
 		tunnelName = strings.TrimSpace(tunnelName)
-		if tunnelName == "" || strings.ContainsAny(tunnelName, " \t\n/\\:") {
-			return fmt.Errorf("invalid tunnel name %q — use only letters, numbers, and hyphens", tunnelName)
+		if tunnelName == "" || strings.ContainsAny(tunnelName, " \t\n/\\:.") {
+			return &CliError{
+				Message: fmt.Sprintf("Invalid tunnel name %q.", tunnelName),
+				Hint:    "Use only letters, numbers, and hyphens (this is an identifier, not your domain).",
+			}
 		}
 
-		if tunnel.TunnelExists(tunnelName) {
-			fmt.Printf("    Tunnel %q already exists.\n", tunnelName)
-		} else {
-			fmt.Printf("    Creating tunnel %q...\n", tunnelName)
+		if !tunnel.TunnelExists(tunnelName) {
+			fmt.Println(style.Actionf("Creating tunnel %q", tunnelName))
 			if err := tunnel.CreateTunnel(tunnelName); err != nil {
 				return fmt.Errorf("failed to create tunnel: %w", err)
 			}
-			fmt.Println("    Tunnel created.")
 		}
-
-		// Step 4: Domain + DNS
-		fmt.Println()
-		fmt.Println("  Step 4: Domain configuration")
-		fmt.Println("    Enter the domain you want to use for tunnel subdomains.")
-		fmt.Println("    This domain must be on the Cloudflare account you just authenticated.")
-		fmt.Println("    A wildcard DNS record (*.domain) will be created automatically.")
-		fmt.Println()
 
 		existingDomain := uc.TunnelDomain("")
-		domain := strings.TrimSpace(confirm.Input("    Domain (e.g. myteam.dev)", existingDomain, nil))
+		domain := strings.TrimSpace(confirm.Input("Domain (e.g. myteam.dev)", existingDomain, nil))
 		if domain == "" {
-			return fmt.Errorf("domain is required for named tunnel setup")
+			return &CliError{
+				Message: "Domain is required for named tunnel setup.",
+				Hint:    "Enter the domain you manage in Cloudflare, e.g. myteam.dev",
+			}
 		}
 		if strings.ContainsAny(domain, " \t\n/:") || !strings.Contains(domain, ".") {
-			return fmt.Errorf("invalid domain %q — expected something like myteam.dev", domain)
+			return &CliError{
+				Message: fmt.Sprintf("Invalid domain %q.", domain),
+				Hint:    "Expected a bare domain like myteam.dev (no protocol, path, or port).",
+			}
 		}
 
 		wildcardHost := "*." + domain
-		fmt.Printf("    Routing %s → tunnel %q...\n", wildcardHost, tunnelName)
+		fmt.Println(style.Actionf("Routing %s → tunnel %q", wildcardHost, tunnelName))
 		if err := tunnel.RouteDNS(tunnelName, wildcardHost); err != nil {
-			fmt.Fprintf(os.Stderr, "\n    DNS routing failed: %v\n", err)
-			fmt.Fprintln(os.Stderr, "    You may need to add a wildcard CNAME manually in Cloudflare DNS.")
-			fmt.Fprintf(os.Stderr, "    CNAME: *.%s → %s.cfargotunnel.com\n", domain, tunnelName)
-		} else {
-			fmt.Println("    DNS configured.")
+			fmt.Fprintln(os.Stderr, style.Warnf("DNS routing failed: %v", err))
+			fmt.Fprintln(os.Stderr, style.Dimf("  Add a wildcard CNAME manually in Cloudflare DNS:"))
+			fmt.Fprintf(os.Stderr, "  CNAME: *.%s → %s.cfargotunnel.com\n", domain, tunnelName)
 		}
 
-		// Step 5: Save config
-		fmt.Println()
-		fmt.Println("  Step 5: Saving configuration")
 		uc.Set("tunnel.tunnels."+tunnelName+".domain", domain)
-		existingConfigs := uc.TunnelConfigs()
-		if uc.TunnelDefault() == "" || len(existingConfigs) <= 1 {
+		currentDefault := uc.TunnelDefault()
+		if currentDefault == "" || len(existingConfigs) <= 1 {
 			uc.Set("tunnel.default", tunnelName)
+		} else if currentDefault != tunnelName {
+			if confirm.Prompt(fmt.Sprintf("Make default? (current: %s)", currentDefault), false, nil) {
+				uc.Set("tunnel.default", tunnelName)
+			}
 		}
 		if err := uc.Save(); err != nil {
 			return fmt.Errorf("failed to save config: %w", err)
 		}
+
 		if uc.TunnelDefault() == tunnelName {
-			fmt.Printf("    Saved tunnel %q (domain: %s, default)\n", tunnelName, domain)
+			fmt.Println(style.Actionf("Saved (default)"))
 		} else {
-			fmt.Printf("    Saved tunnel %q (domain: %s)\n", tunnelName, domain)
-			fmt.Printf("    Default tunnel is %q. Switch with: gtl tunnel default %s\n", uc.TunnelDefault(), tunnelName)
+			fmt.Println(style.Actionf("Saved"))
 		}
 
 		fmt.Println()
-		fmt.Println("Done! You can now run:")
-		fmt.Println("  gtl tunnel              # expose current worktree via your domain")
-		fmt.Printf("  Example: https://salt-staff-reporting.%s\n", domain)
+		fmt.Printf("%s gtl tunnel → %s\n", style.Successf("Done!"), style.Link("https://{branch}."+domain))
 		return nil
 	},
 }
@@ -220,21 +211,18 @@ var tunnelStatusCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		uc := config.LoadUserConfig("")
 
-		// cloudflared
 		if _, err := tunnel.ResolveCloudflared(); err != nil {
 			fmt.Println("cloudflared: not installed")
+			fmt.Println("Authentication: unknown")
 		} else {
 			fmt.Println("cloudflared: installed")
+			if tunnel.IsLoggedIn() {
+				fmt.Println("Authentication: logged in")
+			} else {
+				fmt.Println("Authentication: not logged in (run 'gtl tunnel setup')")
+			}
 		}
 
-		// Auth
-		if tunnel.IsLoggedIn() {
-			fmt.Println("Authentication: logged in")
-		} else {
-			fmt.Println("Authentication: not logged in (run 'gtl tunnel setup')")
-		}
-
-		// Config
 		configs := uc.TunnelConfigs()
 		defaultName := uc.TunnelDefault()
 
@@ -243,21 +231,21 @@ var tunnelStatusCmd = &cobra.Command{
 		} else {
 			fmt.Println("Tunnels:")
 			for name, domain := range configs {
-				marker := "   "
+				marker := "  "
 				suffix := ""
 				if name == defaultName {
-					marker = " * "
+					marker = "* "
 					suffix = " (default)"
 				}
 				exists := tunnel.TunnelExists(name)
-				status := "exists"
+				notFound := ""
 				if !exists {
-					status = "not found"
+					notFound = " (not found)"
 				}
 				if domain != "" {
-					fmt.Printf("%s%s  *.%s  (%s)%s\n", marker, name, domain, status, suffix)
+					fmt.Printf("%s%s  *.%s%s%s\n", marker, name, domain, notFound, suffix)
 				} else {
-					fmt.Printf("%s%s  (%s)%s\n", marker, name, status, suffix)
+					fmt.Printf("%s%s%s%s\n", marker, name, notFound, suffix)
 				}
 			}
 		}
@@ -290,7 +278,10 @@ With an argument, sets the default to the named tunnel config.
 		name := args[0]
 		configs := uc.TunnelConfigs()
 		if _, ok := configs[name]; !ok {
-			return fmt.Errorf("tunnel %q not found in config\nAvailable: %v\nRun 'gtl tunnel setup' to add a new tunnel", name, tunnelConfigNames(configs))
+			return &CliError{
+				Message: fmt.Sprintf("Tunnel %q not found in config.", name),
+				Hint:    fmt.Sprintf("Available tunnels: %v", tunnelConfigNames(configs)),
+			}
 		}
 		uc.Set("tunnel.default", name)
 		if err := uc.Save(); err != nil {
@@ -317,7 +308,10 @@ tunnels (random *.trycloudflare.com URLs).`,
 
 		configs := uc.TunnelConfigs()
 		if _, ok := configs[name]; !ok {
-			return fmt.Errorf("tunnel %q not found in config\nAvailable: %v", name, tunnelConfigNames(configs))
+			return &CliError{
+				Message: fmt.Sprintf("Tunnel %q not found in config.", name),
+				Hint:    fmt.Sprintf("Available tunnels: %v", tunnelConfigNames(configs)),
+			}
 		}
 
 		wasDefault := uc.TunnelDefault() == name
@@ -330,9 +324,9 @@ tunnels (random *.trycloudflare.com URLs).`,
 		if wasDefault && newDefault != "" {
 			fmt.Printf("Default tunnel is now %q.\n", newDefault)
 		} else if wasDefault {
-			fmt.Println("No tunnels remaining — gtl tunnel will use quick tunnels (random URLs).")
+			fmt.Println("No tunnels remaining — gtl tunnel will use quick tunnels.")
 		}
-		fmt.Printf("\nTo also delete the Cloudflare tunnel: cloudflared tunnel delete %s\n", name)
+		fmt.Printf("\nTo delete the Cloudflare tunnel: cloudflared tunnel delete %s\n", name)
 		return nil
 	},
 }
@@ -347,10 +341,16 @@ func tunnelConfigNames(configs map[string]string) []string {
 
 func validateTunnelPrereqs(tunnelName string) error {
 	if !tunnel.IsLoggedIn() {
-		return fmt.Errorf("not authenticated with Cloudflare\n  Run 'gtl tunnel setup' to log in and configure your tunnel")
+		return &CliError{
+			Message: "Not authenticated with Cloudflare.",
+			Hint:    "Run 'gtl tunnel setup' to authenticate.",
+		}
 	}
 	if !tunnel.TunnelExists(tunnelName) {
-		return fmt.Errorf("tunnel %q not found\n  Run 'gtl tunnel setup' to create it", tunnelName)
+		return &CliError{
+			Message: fmt.Sprintf("Tunnel %q not found.", tunnelName),
+			Hint:    "Run 'gtl tunnel setup' to create it.",
+		}
 	}
 	return nil
 }
@@ -359,7 +359,7 @@ func resolveTunnelTarget(args []string) (int, format.Allocation, error) {
 	if len(args) == 1 {
 		p, err := strconv.Atoi(args[0])
 		if err != nil || p < 1 || p > 65535 {
-			return 0, nil, fmt.Errorf("invalid port: %s", args[0])
+			return 0, nil, errInvalidPort(args[0])
 		}
 		entry := findAllocationForCwd()
 		return p, entry, nil
@@ -373,12 +373,15 @@ func resolveTunnelTarget(args []string) (int, format.Allocation, error) {
 	reg := registry.New("")
 	entry := reg.Find(absPath)
 	if entry == nil {
-		return 0, nil, fmt.Errorf("no allocation found for %s\nSpecify a port: gtl tunnel <port>", absPath)
+		return 0, nil, &CliError{
+			Message: fmt.Sprintf("No allocation found for %s", absPath),
+			Hint:    "Run 'gtl setup' first, or specify a port: gtl tunnel <port>",
+		}
 	}
 
 	ports := format.GetPorts(format.Allocation(entry))
 	if len(ports) == 0 {
-		return 0, nil, fmt.Errorf("allocation exists but has no ports")
+		return 0, nil, errNoAllocationNoPorts(absPath)
 	}
 	return ports[0], format.Allocation(entry), nil
 }
@@ -407,18 +410,8 @@ func resolveProjectAndBranch(entry format.Allocation) (string, string) {
 		return "", ""
 	}
 
-	branch := currentGitBranch(absPath)
+	branch := worktree.CurrentBranch(absPath)
 	return project, branch
-}
-
-func currentGitBranch(dir string) string {
-	cmd := exec.Command("git", "symbolic-ref", "--short", "HEAD")
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
 }
 
 func findAllocationForCwd() format.Allocation {

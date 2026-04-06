@@ -104,7 +104,9 @@ func syncBranches(reg *registry.Registry, allocs []registry.Allocation) {
 			old, _ := a["branch"].(string)
 			if branch != old {
 				a["branch"] = branch
-				_ = reg.UpdateField(wt, "branch", branch)
+				if err := reg.UpdateField(wt, "branch", branch); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: could not update branch in registry for %s: %v\n", wt, err)
+				}
 			}
 		}()
 	}
@@ -140,7 +142,10 @@ func renderStatus() error {
 				a["supervisor"] = "not running"
 			}
 		}
-		data, _ := json.MarshalIndent(allocs, "", "  ")
+		data, err := json.MarshalIndent(allocs, "", "  ")
+		if err != nil {
+			return fmt.Errorf("encoding status: %w", err)
+		}
 		fmt.Println(string(data))
 		return nil
 	}
@@ -202,7 +207,7 @@ func renderStatus() error {
 			if links, ok := a["links"].(map[string]any); ok && len(links) > 0 {
 				for proj, branch := range links {
 					if b, ok := branch.(string); ok {
-						fmt.Printf("    → %s linked to %s\n", proj, b)
+						fmt.Printf("  → %s linked to %s\n", proj, b)
 					}
 				}
 			}

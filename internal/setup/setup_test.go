@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -13,6 +14,8 @@ import (
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/registry"
 )
+
+var ansiRE = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 // --- updateOrAppend tests ---
 
@@ -468,5 +471,117 @@ commands:
 	allocs := s.Registry.Allocations()
 	if len(allocs) != 1 {
 		t.Fatalf("expected 1 registry entry, got %d", len(allocs))
+	}
+}
+
+// --- log / detail / warn output tests ---
+
+func logOutput(s *Setup) string {
+	return s.Log.(*bytes.Buffer).String()
+}
+
+func plainOutput(s *Setup) string {
+	return ansiRE.ReplaceAllString(logOutput(s), "")
+}
+
+func TestLog_AddsActionPrefix(t *testing.T) {
+	s, _, _ := testSetup(t, "project: test\n")
+	s.log("Allocating port %d", 3010)
+	plain := plainOutput(s)
+	if !strings.Contains(plain, "==> Allocating port 3010") {
+		t.Errorf("expected '==> Allocating port 3010', got: %q", plain)
+	}
+}
+
+func TestLog_EmptyFormat(t *testing.T) {
+	s, _, _ := testSetup(t, "project: test\n")
+	s.log("")
+	out := logOutput(s)
+	if out != "\n" {
+		t.Errorf("expected single newline, got: %q", out)
+	}
+}
+
+func TestDetail_NoPrefix(t *testing.T) {
+	s, _, _ := testSetup(t, "project: test\n")
+	s.detail("  Port: %d", 3010)
+	plain := plainOutput(s)
+	if strings.Contains(plain, "==>") {
+		t.Errorf("detail should not contain ==>, got: %q", plain)
+	}
+	if !strings.Contains(plain, "  Port: 3010") {
+		t.Errorf("expected '  Port: 3010', got: %q", plain)
+	}
+}
+
+func TestWarn_HasWarningPrefix(t *testing.T) {
+	s, _, _ := testSetup(t, "project: test\n")
+	s.warn("hook failed: %s", "exit 1")
+	plain := plainOutput(s)
+	if !strings.Contains(plain, "Warning: hook failed: exit 1") {
+		t.Errorf("expected 'Warning: hook failed: exit 1', got: %q", plain)
+	}
+	if strings.Contains(plain, "==>") {
+		t.Errorf("warn should not contain ==>, got: %q", plain)
+	}
+}
+
+func TestDryRun_DetailLinesHaveNoActionPrefix(t *testing.T) {
+	s, _, _ := testSetup(t, `
+project: test
+env_file:
+  target: .env.local
+  source: .env.local
+env:
+  PORT: "{port}"
+`)
+	s.Options.DryRun = true
+	_, err := s.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plain := plainOutput(s)
+	for _, line := range strings.Split(plain, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// Action lines (containing "[dry-run]") go through s.log and should have ==>
+		if strings.Contains(trimmed, "[dry-run]") {
+			if !strings.Contains(line, "==>") {
+				t.Errorf("dry-run header should have ==> prefix: %q", line)
+			}
+			continue
+		}
+		// Subordinate detail lines (Port:, Redis:, Dir:, Env vars:, KEY=val) should NOT
+		if strings.Contains(line, "==>") {
+			t.Errorf("subordinate detail line should not have ==> prefix: %q", line)
+		}
+	}
+}
+
+func TestRun_SummaryBlockFormat(t *testing.T) {
+	s, mainRepo, _ := testSetup(t, `
+project: test
+env_file:
+  target: .env.local
+  source: .env.local
+env:
+  PORT: "{port}"
+`)
+	_ = os.WriteFile(filepath.Join(mainRepo, ".env.local"), []byte(""), 0o644)
+
+	_, err := s.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plain := plainOutput(s)
+	if !strings.Contains(plain, "Done!") {
+		t.Error("expected Done! in summary output")
+	}
+	if !strings.Contains(plain, "Port:") || !strings.Contains(plain, "Redis:") {
+		t.Error("expected Port: and Redis: in summary output")
 	}
 }

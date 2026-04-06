@@ -5,6 +5,7 @@ package registry
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -49,14 +50,17 @@ func New(path string) *Registry {
 }
 
 func (r *Registry) Allocations() []Allocation {
-	data := r.load()
+	data, err := r.load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to load registry: %v\n", err)
+	}
 	return data.Allocations
 }
 
 func (r *Registry) Find(worktreePath string) Allocation {
 	resolved := resolvePath(worktreePath)
 	for _, a := range r.Allocations() {
-		if resolvePath(getString(a, "worktree")) == resolved {
+		if resolvePath(GetString(a, "worktree")) == resolved {
 			return a
 		}
 	}
@@ -66,7 +70,7 @@ func (r *Registry) Find(worktreePath string) Allocation {
 func (r *Registry) FindByProject(project string) []Allocation {
 	var result []Allocation
 	for _, a := range r.Allocations() {
-		if getString(a, "project") == project {
+		if GetString(a, "project") == project {
 			result = append(result, a)
 		}
 	}
@@ -77,7 +81,7 @@ func (r *Registry) FindByProject(project string) []Allocation {
 // Returns nil if no match is found.
 func (r *Registry) FindProjectBranch(project, branch string) Allocation {
 	for _, a := range r.Allocations() {
-		if getString(a, "project") == project && getString(a, "branch") == branch {
+		if GetString(a, "project") == project && GetString(a, "branch") == branch {
 			return a
 		}
 	}
@@ -115,13 +119,13 @@ func (r *Registry) Allocate(entry Allocation) error {
 		// Normalize worktree path to canonical form (resolve symlinks)
 		// This ensures consistent matching on systems like macOS where
 		// /var is a symlink to /private/var
-		worktree := getString(entry, "worktree")
+		worktree := GetString(entry, "worktree")
 		resolved := resolvePath(worktree)
 		entry["worktree"] = resolved
 
 		filtered := make([]Allocation, 0, len(data.Allocations))
 		for _, a := range data.Allocations {
-			if getString(a, "worktree") != resolved {
+			if GetString(a, "worktree") != resolved {
 				filtered = append(filtered, a)
 			} else if links, ok := a["links"].(map[string]any); ok && len(links) > 0 {
 				entry["links"] = links
@@ -140,7 +144,7 @@ func (r *Registry) Release(worktreePath string) (bool, error) {
 	err := r.withLock(func(data *RegistryData) {
 		filtered := make([]Allocation, 0, len(data.Allocations))
 		for _, a := range data.Allocations {
-			if resolvePath(getString(a, "worktree")) == resolved {
+			if resolvePath(GetString(a, "worktree")) == resolved {
 				removed = true
 			} else {
 				filtered = append(filtered, a)
@@ -163,7 +167,7 @@ func (r *Registry) FindMergedAllocations(mergedBranches []string, worktreeBranch
 
 	var result []Allocation
 	for _, a := range r.Allocations() {
-		wtPath := resolvePath(getString(a, "worktree"))
+		wtPath := resolvePath(GetString(a, "worktree"))
 		if branch, ok := worktreeBranches[wtPath]; ok && branchSet[branch] {
 			result = append(result, a)
 		}
@@ -183,7 +187,7 @@ func (r *Registry) ReleaseMany(worktreePaths []string) (int, error) {
 	err := r.withLock(func(data *RegistryData) {
 		filtered := make([]Allocation, 0, len(data.Allocations))
 		for _, a := range data.Allocations {
-			if pathSet[resolvePath(getString(a, "worktree"))] {
+			if pathSet[resolvePath(GetString(a, "worktree"))] {
 				count++
 			} else {
 				filtered = append(filtered, a)
@@ -199,7 +203,7 @@ func (r *Registry) UpdateField(worktreePath, key, value string) error {
 	resolved := resolvePath(worktreePath)
 	return r.withLock(func(data *RegistryData) {
 		for _, a := range data.Allocations {
-			if resolvePath(getString(a, "worktree")) == resolved {
+			if resolvePath(GetString(a, "worktree")) == resolved {
 				a[key] = value
 				return
 			}
@@ -214,7 +218,7 @@ func (r *Registry) SetLink(worktreePath, project, branch string) error {
 	resolved := resolvePath(worktreePath)
 	return r.withLock(func(data *RegistryData) {
 		for _, a := range data.Allocations {
-			if resolvePath(getString(a, "worktree")) == resolved {
+			if resolvePath(GetString(a, "worktree")) == resolved {
 				links, _ := a["links"].(map[string]any)
 				if links == nil {
 					links = make(map[string]any)
@@ -233,7 +237,7 @@ func (r *Registry) RemoveLink(worktreePath, project string) error {
 	resolved := resolvePath(worktreePath)
 	return r.withLock(func(data *RegistryData) {
 		for _, a := range data.Allocations {
-			if resolvePath(getString(a, "worktree")) == resolved {
+			if resolvePath(GetString(a, "worktree")) == resolved {
 				links, _ := a["links"].(map[string]any)
 				if links != nil {
 					delete(links, project)
@@ -272,7 +276,7 @@ func (r *Registry) Prune() (int, error) {
 	err := r.withLock(func(data *RegistryData) {
 		filtered := make([]Allocation, 0, len(data.Allocations))
 		for _, a := range data.Allocations {
-			wt := getString(a, "worktree")
+			wt := GetString(a, "worktree")
 			if _, err := os.Stat(wt); err == nil {
 				filtered = append(filtered, a)
 			} else {
@@ -293,7 +297,7 @@ func (r *Registry) PruneStale() (int, error) {
 	err := r.withLock(func(data *RegistryData) {
 		filtered := make([]Allocation, 0, len(data.Allocations))
 		for _, a := range data.Allocations {
-			wt := getString(a, "worktree")
+			wt := GetString(a, "worktree")
 			if _, err := os.Stat(wt); err != nil {
 				count++
 				continue
@@ -335,53 +339,103 @@ func (r *Registry) withLock(fn func(data *RegistryData)) error {
 	}
 	defer func() { _ = lockFile.Close() }()
 
-	deadline := time.Now().Add(lockTimeout)
+	start := time.Now()
+	deadline := start.Add(lockTimeout)
 	for {
 		err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for registry lock (%s); if no other git-treeline process is running, remove the lock file", lockPath)
+			waited := time.Since(start).Round(time.Millisecond)
+			return fmt.Errorf(
+				"timed out after %s waiting for registry lock\n\n"+
+					"  Another gtl process may be holding the lock.\n"+
+					"  If no other process is running: rm %s",
+				waited, lockPath)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	defer func() { _ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) }()
 
-	data := r.load()
+	data, err := r.load()
+	if err != nil {
+		return err
+	}
 	fn(&data)
 	return r.save(data)
 }
 
-func (r *Registry) load() RegistryData {
+func (r *Registry) load() (RegistryData, error) {
 	raw, err := os.ReadFile(r.Path)
 	if err != nil {
-		return RegistryData{Version: 1}
+		if errors.Is(err, os.ErrNotExist) {
+			return RegistryData{Version: 1, Allocations: []Allocation{}}, nil
+		}
+		return RegistryData{}, fmt.Errorf("reading registry: %w", err)
 	}
 	var data RegistryData
 	if err := json.Unmarshal(raw, &data); err != nil {
-		return RegistryData{Version: 1}
+		return RegistryData{}, fmt.Errorf("registry is corrupt (%s): %w — fix or delete the file", r.Path, err)
 	}
 	if data.Allocations == nil {
 		data.Allocations = []Allocation{}
 	}
-	return data
+	return data, nil
 }
 
 func (r *Registry) save(data RegistryData) error {
-	if err := os.MkdirAll(filepath.Dir(r.Path), 0o755); err != nil {
+	dir := filepath.Dir(r.Path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(r.Path, append(raw, '\n'), 0o644)
+
+	tmp, err := os.CreateTemp(dir, ".registry-*.json")
+	if err != nil {
+		return fmt.Errorf("creating temp registry file: %w", err)
+	}
+	tmpPath := tmp.Name()
+
+	if _, err := tmp.Write(append(raw, '\n')); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, r.Path)
 }
 
-func getString(a Allocation, key string) string {
+// GetString extracts a string field from an allocation.
+func GetString(a Allocation, key string) string {
 	if v, ok := a[key].(string); ok {
 		return v
 	}
 	return ""
+}
+
+// ExtractPorts extracts the port list from an allocation, handling both
+// the "ports" array and legacy single "port" field.
+func ExtractPorts(a Allocation) []int {
+	if ps, ok := a["ports"].([]any); ok {
+		result := make([]int, 0, len(ps))
+		for _, p := range ps {
+			if f, ok := p.(float64); ok {
+				result = append(result, int(f))
+			}
+		}
+		if len(result) > 0 {
+			return result
+		}
+	}
+	if p, ok := a["port"].(float64); ok {
+		return []int{int(p)}
+	}
+	return nil
 }

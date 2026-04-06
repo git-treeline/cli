@@ -13,9 +13,8 @@ import (
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/detect"
 	"github.com/git-treeline/git-treeline/internal/platform"
-	"github.com/git-treeline/git-treeline/internal/proxy"
-	"github.com/git-treeline/git-treeline/internal/service"
 	"github.com/git-treeline/git-treeline/internal/setup"
+	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/git-treeline/git-treeline/internal/templates"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
@@ -45,14 +44,21 @@ The server is NOT auto-started. Review the project, then run 'gtl start'.`,
 			}
 		}
 
+		if err := requireServeInstalled(); err != nil {
+			return err
+		}
+
 		if len(args) == 0 {
-			return fmt.Errorf("repository URL is required\n\nUsage: gtl clone <url> [directory] [git clone flags...]")
+			return &CliError{
+				Message: "Repository URL is required.",
+				Hint:    "Usage: gtl clone <url> [directory] [git clone flags...]",
+			}
 		}
 
 		url := args[0]
 		extraArgs := args[1:]
 
-		fmt.Printf("==> Cloning %s\n", url)
+		fmt.Println(style.Actionf("Cloning %s", url))
 		gitArgs := append([]string{"clone", url}, extraArgs...)
 		gitCmd := exec.Command("git", gitArgs...)
 		gitCmd.Stdout = os.Stdout
@@ -72,7 +78,10 @@ The server is NOT auto-started. Review the project, then run 'gtl start'.`,
 			return err
 		}
 		if st, err := os.Stat(absPath); err != nil || !st.IsDir() {
-			return fmt.Errorf("cloned repository not found at %s", absPath)
+			return &CliError{
+				Message: fmt.Sprintf("Cloned repository not found at %s", absPath),
+				Hint:    "The git clone succeeded but the expected directory is missing. Check the repo name.",
+			}
 		}
 
 		uc := config.LoadUserConfig("")
@@ -80,12 +89,12 @@ The server is NOT auto-started. Review the project, then run 'gtl start'.`,
 			if err := uc.Init(); err != nil {
 				return err
 			}
-			fmt.Printf("==> Created user config at %s\n", platform.ConfigFile())
+			fmt.Println(style.Actionf("Created user config at %s", platform.ConfigFile()))
 		}
 
 		configPath := filepath.Join(absPath, config.ProjectConfigFile)
 		if _, err := os.Stat(configPath); err != nil {
-			fmt.Println("==> No .treeline.yml found, detecting framework...")
+			fmt.Println(style.Actionf("No .treeline.yml found, detecting framework..."))
 			project := filepath.Base(absPath)
 			templateDB := project + "_development"
 			detection := detect.Detect(absPath)
@@ -94,38 +103,27 @@ The server is NOT auto-started. Review the project, then run 'gtl start'.`,
 			if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
 				return fmt.Errorf("init failed: %w", err)
 			}
-			fmt.Printf("==> Created %s for project '%s'", config.ProjectConfigFile, project)
+			msg := fmt.Sprintf("Created %s for project '%s'", config.ProjectConfigFile, project)
 			if detection.Framework != "unknown" {
-				fmt.Printf(" (detected: %s)", detection.Framework)
+				msg += fmt.Sprintf(" (detected: %s)", detection.Framework)
 			}
-			fmt.Println()
+			fmt.Println(style.Actionf("%s", msg))
 			agentPath, err := templates.WriteAgentContext(absPath, project, detection)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to write agent context: %s\n", err)
+				fmt.Fprintln(os.Stderr, style.Warnf("failed to write agent context: %s", err))
 			} else if agentPath != "" {
-				fmt.Printf("==> Agent context written to %s\n", agentPath)
+				fmt.Println(style.Actionf("Agent context written to %s", agentPath))
 			}
 		}
 
-		fmt.Println("==> Running setup...")
+		fmt.Println(style.Actionf("Running setup..."))
 		s := setup.New(absPath, absPath, uc)
 		alloc, err := s.Run()
 		if err != nil {
-			return fmt.Errorf("setup failed: %w", err)
+			return errSetupFailed(err)
 		}
 
-		routeKey := proxy.RouteKey(s.ProjectConfig.Project(), alloc.Branch)
-		if service.IsRunning() {
-			if service.IsPortForwardConfigured() {
-				fmt.Printf("==> Router: https://%s.localhost\n", routeKey)
-			} else {
-				port := uc.RouterPort()
-				fmt.Printf("==> Router: https://%s.localhost:%d\n", routeKey, port)
-			}
-		}
-		if domain := uc.TunnelDomain(""); domain != "" {
-			fmt.Printf("==> Tunnel: gtl tunnel → https://%s.%s\n", routeKey, domain)
-		}
+		printRouterAndTunnel(uc, s.ProjectConfig.Project(), alloc.Branch)
 
 		mainRepo := worktree.DetectMainRepo(absPath)
 		pc := config.LoadProjectConfig(mainRepo)
@@ -160,8 +158,7 @@ func inferDirectory(url string, extraArgs []string) string {
 		if strings.HasPrefix(arg, "-") {
 			switch arg {
 			case "-o", "--origin", "--depth", "-b", "--branch", "--reference", "--config", "-c",
-				"--separate-git-dir", "--server-option", "--filter", "--jobs", "--shallow-since", "--shallow-exclude",
-				"--recursive", "--recurse-submodules":
+				"--separate-git-dir", "--server-option", "--filter", "--jobs", "--shallow-since", "--shallow-exclude":
 				skipNext = true
 			}
 			continue

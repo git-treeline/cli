@@ -8,9 +8,8 @@ import (
 
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/detect"
-	"github.com/git-treeline/git-treeline/internal/proxy"
-	"github.com/git-treeline/git-treeline/internal/service"
 	"github.com/git-treeline/git-treeline/internal/setup"
+	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/git-treeline/git-treeline/internal/templates"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
@@ -33,17 +32,15 @@ func printSetupDiagnostics(absPath string, pc *config.ProjectConfig) {
 
 	if hasEnvConfig && !hasEnvFileConfig && !det.AutoLoadsEnvFile() {
 		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, "⚠  Config has env vars but no env_file block.")
-		fmt.Fprintln(os.Stderr, "  gtl start injects these into the process environment,")
-		fmt.Fprintln(os.Stderr, "  but they won't be written to disk for other tools.")
-		fmt.Fprintln(os.Stderr, "  Add an env_file block to .treeline.yml if your app reads .env files.")
+		fmt.Fprintln(os.Stderr, style.Warnf("env vars configured but no env_file — values won't be written to disk."))
+		fmt.Fprintln(os.Stderr, style.Dimf("  Add an env_file block to .treeline.yml if needed."))
 	}
 
 	diags := templates.Diagnose(det)
 	for _, d := range diags {
 		fmt.Fprintln(os.Stderr)
 		if d.Level == "warn" {
-			fmt.Fprintln(os.Stderr, "⚠  Action needed:")
+			fmt.Fprintln(os.Stderr, style.Warn.Render("Warning:"))
 		}
 		for _, line := range strings.Split(d.Message, "\n") {
 			fmt.Fprintf(os.Stderr, "  %s\n", line)
@@ -56,6 +53,10 @@ var setupCmd = &cobra.Command{
 	Short: "Allocate resources and set up a worktree environment",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := requireServeInstalled(); err != nil {
+			return err
+		}
+
 		path := "."
 		if len(args) > 0 {
 			path = args[0]
@@ -66,25 +67,11 @@ var setupCmd = &cobra.Command{
 		s.Options.DryRun = setupDryRun
 		alloc, err := s.Run()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %s\n", err)
-			os.Exit(1)
+			return err
 		}
 
 		if !setupDryRun {
-			routeKey := proxy.RouteKey(s.ProjectConfig.Project(), alloc.Branch)
-
-			if service.IsRunning() {
-				if service.IsPortForwardConfigured() {
-					fmt.Printf("==> Router: https://%s.localhost\n", routeKey)
-				} else {
-					port := uc.RouterPort()
-					fmt.Printf("==> Router: https://%s.localhost:%d\n", routeKey, port)
-				}
-			}
-
-			if domain := uc.TunnelDomain(""); domain != "" {
-				fmt.Printf("==> Tunnel: gtl tunnel → https://%s.%s\n", routeKey, domain)
-			}
+			printRouterAndTunnel(uc, s.ProjectConfig.Project(), alloc.Branch)
 		}
 
 		absPath, _ := filepath.Abs(path)

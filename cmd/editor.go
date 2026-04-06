@@ -3,9 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/registry"
@@ -34,7 +32,7 @@ var editorRefreshCmd = &cobra.Command{
 
 		pc := config.LoadProjectConfig(mainRepo)
 		if pc.Project() == "" {
-			return fmt.Errorf("no .treeline.yml found — run gtl init first")
+			return errNoProjectConfig()
 		}
 
 		uc := config.LoadUserConfig("")
@@ -48,7 +46,7 @@ var editorRefreshCmd = &cobra.Command{
 			}
 		}
 
-		branch := detectCurrentBranch(absPath)
+		branch := worktree.CurrentBranch(absPath)
 
 		results := setup.ConfigureEditor(absPath, pc, uc, port, branch)
 		if len(results) == 0 {
@@ -67,12 +65,3 @@ var editorRefreshCmd = &cobra.Command{
 	},
 }
 
-func detectCurrentBranch(dir string) string {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}

@@ -47,7 +47,10 @@ Examples:
 			return listLinks(reg, absPath)
 		}
 		if len(args) != 2 {
-			return fmt.Errorf("usage: gtl link <project> <branch>")
+			return &CliError{
+				Message: "Missing arguments.",
+				Hint:    "Usage: gtl link <project> <branch>",
+			}
 		}
 
 		project := args[0]
@@ -55,13 +58,15 @@ Examples:
 
 		alloc := reg.Find(absPath)
 		if alloc == nil {
-			fmt.Fprintf(os.Stderr, "No allocation found for %s\nRun `gtl setup` first.\n", absPath)
-			os.Exit(1)
+			return errNoAllocation(absPath)
 		}
 
 		target := reg.FindProjectBranch(project, branch)
 		if target == nil {
-			return fmt.Errorf("no allocation for project %q on branch %q — run `gtl setup` in that worktree first", project, branch)
+			return &CliError{
+				Message: fmt.Sprintf("No allocation for project %q on branch %q.", project, branch),
+				Hint:    "Run 'gtl setup' in that worktree first.",
+			}
 		}
 
 		if err := reg.SetLink(absPath, project, branch); err != nil {
@@ -120,7 +125,10 @@ func listLinks(reg *registry.Registry, absPath string) error {
 	}
 
 	if linkJSON {
-		data, _ := json.MarshalIndent(links, "", "  ")
+		data, err := json.MarshalIndent(links, "", "  ")
+		if err != nil {
+			return fmt.Errorf("encoding links: %w", err)
+		}
 		fmt.Println(string(data))
 		return nil
 	}

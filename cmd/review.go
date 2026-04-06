@@ -36,9 +36,16 @@ resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 			return err
 		}
 
+		if err := requireServeInstalled(); err != nil {
+			return err
+		}
+
 		prNumber, err := strconv.Atoi(args[0])
 		if err != nil {
-			return fmt.Errorf("invalid PR number: %s", args[0])
+			return &CliError{
+				Message: fmt.Sprintf("Invalid PR number: %s", args[0]),
+				Hint:    "Pass the numeric PR number, e.g. 'gtl review 42'.",
+			}
 		}
 
 		fmt.Printf("==> Looking up PR #%d...\n", prNumber)
@@ -56,11 +63,19 @@ resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 		}
 		mainRepo := worktree.DetectMainRepo(cwd)
 		pc := config.LoadProjectConfig(mainRepo)
+		uc := config.LoadUserConfig("")
 		projectName := pc.Project()
 
 		wtPath := reviewPath
 		if wtPath == "" {
+			wtPath = uc.ResolveWorktreePath(mainRepo, projectName, branch)
+		}
+		if wtPath == "" {
 			wtPath = filepath.Join(filepath.Dir(mainRepo), fmt.Sprintf("%s-pr-%d", projectName, prNumber))
+		}
+
+		if err := ensureGitignored(mainRepo, wtPath); err != nil {
+			return err
 		}
 
 		// Check if this branch is already checked out in a worktree
@@ -77,7 +92,7 @@ resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 
 		fmt.Printf("==> Fetching origin/%s...\n", branch)
 		if err := worktree.Fetch("origin", branch); err != nil {
-			return fmt.Errorf("branch '%s' not found on remote (PR may be merged with branch deleted)", branch)
+			return errBranchNotFound(branch)
 		}
 
 		fmt.Printf("==> Creating worktree at %s\n", wtPath)
@@ -86,11 +101,14 @@ resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 		}
 
 		fmt.Println("==> Running setup...")
-		uc := config.LoadUserConfig("")
 		s := setup.New(wtPath, mainRepo, uc)
 		alloc, err := s.Run()
 		if err != nil {
-			return fmt.Errorf("setup failed: %w", err)
+			return errSetupFailed(err)
+		}
+
+		if alloc != nil {
+			printRouterAndTunnel(uc, projectName, alloc.Branch)
 		}
 
 		fmt.Println()

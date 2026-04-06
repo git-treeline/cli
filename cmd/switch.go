@@ -10,6 +10,7 @@ import (
 	"github.com/git-treeline/git-treeline/internal/github"
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/git-treeline/git-treeline/internal/setup"
+	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
 )
@@ -44,44 +45,38 @@ Must be run from inside a worktree (not the main repo).`,
 		resolvedAbs, _ := filepath.EvalSymlinks(absPath)
 		resolvedMain, _ := filepath.EvalSymlinks(mainRepo)
 		if resolvedAbs == resolvedMain {
-			return fmt.Errorf("you're in the main repo, not a worktree.\n\n" +
-				"  To create a new worktree:\n" +
-				"    gtl new <branch>\n\n" +
-				"  To review a PR in a new worktree:\n" +
-				"    gtl review <PR#>")
+			return errNotInWorktree()
 		}
 
 		branch := target
 		if prNum, err := strconv.Atoi(target); err == nil {
-			fmt.Printf("==> Looking up PR #%d...\n", prNum)
+			fmt.Println(style.Actionf("Looking up PR #%d...", prNum))
 			pr, err := github.LookupPR(prNum)
 			if err != nil {
 				return err
 			}
 			branch = pr.HeadRefName
-			fmt.Printf("==> PR #%d → branch '%s'\n", prNum, branch)
+			fmt.Println(style.Actionf("PR #%d → branch '%s'", prNum, branch))
 		}
 
-		fmt.Printf("==> Fetching origin/%s...\n", branch)
+		fmt.Println(style.Actionf("Fetching origin/%s...", branch))
 		if err := worktree.Fetch("origin", branch); err != nil {
-			fmt.Fprintf(os.Stderr, "  Warning: fetch failed (%s), trying local checkout\n", err)
+			fmt.Fprintln(os.Stderr, style.Warnf("fetch failed (%s), trying local checkout", err))
 		}
 
-		fmt.Printf("==> Checking out '%s'...\n", branch)
+		fmt.Println(style.Actionf("Checking out '%s'...", branch))
 		if err := worktree.Checkout(branch); err != nil {
 			return err
 		}
 
 		reg := registry.New("")
-		_ = reg.UpdateField(absPath, "branch", branch)
+		if err := reg.UpdateField(absPath, "branch", branch); err != nil {
+			fmt.Fprintln(os.Stderr, style.Warnf("could not update branch in registry: %v", err))
+		}
 
 		uc := config.LoadUserConfig("")
 		s := setup.New(absPath, mainRepo, uc)
-		if switchRunSetup {
-			s.Options.RefreshOnly = false
-		} else {
-			s.Options.RefreshOnly = true
-		}
+		s.Options.RefreshOnly = !switchRunSetup
 		alloc, err := s.Run()
 		if err != nil {
 			return fmt.Errorf("refresh failed: %w", err)

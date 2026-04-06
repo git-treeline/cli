@@ -50,11 +50,13 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 
 		startCommand := pc.StartCommand()
 		if startCommand == "" {
-			return fmt.Errorf("no commands.start configured in .treeline.yml")
+			return errNoStartCommand()
 		}
 
 		sockPath := supervisor.SocketPath(absPath)
 		port := resolvePort(absPath)
+
+		startCommand = interpolateCommand(startCommand, port)
 
 		resp, err := supervisor.Send(sockPath, "status")
 		if err == nil {
@@ -62,14 +64,17 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 				if startAwait {
 					return awaitReady(sockPath)
 				}
-				return fmt.Errorf("server is already running — use 'gtl restart' to restart it")
+				return errServerAlreadyRunning()
 			}
 			resp, err = supervisor.Send(sockPath, "start")
 			if err != nil {
 				return err
 			}
 			if strings.HasPrefix(resp, "error") {
-				return fmt.Errorf("server: %s", resp)
+				return &CliError{
+					Message: fmt.Sprintf("Server error: %s", resp),
+					Hint:    "Check the server logs, or run 'gtl stop' and try again.",
+				}
 			}
 			fmt.Println("Server resumed.")
 			if startAwait {
@@ -82,13 +87,31 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 			sv := supervisor.New(startCommand, absPath, sockPath)
 			sv.Env = resolveEnvVars(pc, absPath)
 			sv.Port = port
-			go func() { _ = sv.Run() }()
+			svErr := make(chan error, 1)
+			go func() { svErr <- sv.Run() }()
 
 			for i := 0; i < 50; i++ {
+				select {
+				case err := <-svErr:
+					return &CliError{
+						Message: fmt.Sprintf("Supervisor exited before ready: %s", err),
+						Hint:    "Check commands.start in .treeline.yml — the process crashed on startup.",
+					}
+				default:
+				}
 				time.Sleep(100 * time.Millisecond)
 				if _, err := os.Stat(sockPath); err == nil {
 					break
 				}
+			}
+
+			select {
+			case err := <-svErr:
+				return &CliError{
+					Message: fmt.Sprintf("Supervisor exited before ready: %s", err),
+					Hint:    "Check commands.start in .treeline.yml — the process crashed on startup.",
+				}
+			default:
 			}
 
 			if err := awaitReady(sockPath); err != nil {
@@ -120,7 +143,10 @@ terminal to fully exit the supervisor.`,
 			return err
 		}
 		if strings.HasPrefix(resp, "error") {
-			return fmt.Errorf("server: %s", resp)
+			return &CliError{
+				Message: fmt.Sprintf("Server error: %s", resp),
+				Hint:    "The supervisor may be in an unexpected state. Check 'gtl start' output.",
+			}
 		}
 		fmt.Println("Server stopped. Supervisor still running — 'gtl start' to resume.")
 		return nil
@@ -140,7 +166,10 @@ var restartCmd = &cobra.Command{
 			return err
 		}
 		if strings.HasPrefix(resp, "error") {
-			return fmt.Errorf("server: %s", resp)
+			return &CliError{
+				Message: fmt.Sprintf("Server error: %s", resp),
+				Hint:    "The server may have crashed. Check logs and try 'gtl stop' then 'gtl start'.",
+			}
 		}
 		fmt.Println("Server restarted.")
 		return nil
@@ -160,7 +189,7 @@ func resolveEnvVars(pc *config.ProjectConfig, absPath string) map[string]string 
 		config.LoadUserConfig("").RedisURL(),
 		interpolation.Allocation(alloc),
 	)
-	branch := detectCurrentBranch(absPath)
+	branch := worktree.CurrentBranch(absPath)
 	r := resolve.New(reg, absPath, branch)
 	result, err := setup.BuildEnvVarsWithResolver(pc, interpolation.Allocation(alloc), redisURL, r.Resolve)
 	if err != nil {
@@ -194,15 +223,41 @@ func resolvePort(absPath string) int {
 	return ports[0]
 }
 
+// interpolateCommand expands {port} (and {port_N}) tokens in the start
+// command string. This lets frameworks that ignore PORT env (Vite, Angular,
+// Expo) receive the allocated port via CLI flags.
+func interpolateCommand(cmd string, port int) string {
+	if !strings.Contains(cmd, "{port") {
+		return cmd
+	}
+	cmd = strings.ReplaceAll(cmd, "{port}", fmt.Sprintf("%d", port))
+
+	inc := 1
+	for i := 2; i <= 10; i++ {
+		token := fmt.Sprintf("{port_%d}", i)
+		if strings.Contains(cmd, token) {
+			cmd = strings.ReplaceAll(cmd, token, fmt.Sprintf("%d", port+inc))
+		}
+		inc++
+	}
+	return cmd
+}
+
 func awaitReady(sockPath string) error {
 	cmd := fmt.Sprintf("wait-ready:%d", startAwaitTimeout)
 	resp, err := supervisor.SendWithTimeout(sockPath, cmd, time.Duration(startAwaitTimeout+5)*time.Second)
 	if err != nil {
-		return fmt.Errorf("waiting for server: %w", err)
+		return &CliError{
+			Message: fmt.Sprintf("Timed out waiting for server: %s", err),
+			Hint:    fmt.Sprintf("Server didn't respond within %ds. It may still be starting — check logs.", startAwaitTimeout),
+		}
 	}
 	if resp == "ok" {
 		fmt.Println("Server is ready.")
 		return nil
 	}
-	return fmt.Errorf("server: %s", resp)
+	return &CliError{
+		Message: fmt.Sprintf("Server not ready: %s", resp),
+		Hint:    "The server started but isn't accepting connections. Check commands.start output.",
+	}
 }

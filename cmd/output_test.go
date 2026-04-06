@@ -1,0 +1,134 @@
+package cmd
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestErrServeNotInstalled_ContainsGuidance(t *testing.T) {
+	ce, ok := errServeNotInstalled.(*CliError)
+	if !ok {
+		t.Fatal("expected *CliError")
+	}
+	if !strings.Contains(ce.Message, "router") {
+		t.Errorf("expected 'router' in message, got: %s", ce.Message)
+	}
+	if !strings.Contains(ce.Hint, "gtl serve install") {
+		t.Errorf("expected 'gtl serve install' in hint, got: %s", ce.Hint)
+	}
+	if !strings.Contains(ce.DocsURL, "git-treeline.dev") {
+		t.Errorf("expected docs URL, got: %s", ce.DocsURL)
+	}
+}
+
+func TestSortedRouteKeys(t *testing.T) {
+	routes := map[string]int{
+		"myapp-feature":  3010,
+		"myapp-main":     3000,
+		"other-dev":      3020,
+		"api-staging":    4000,
+	}
+	keys := sortedRouteKeys(routes)
+	if len(keys) != 4 {
+		t.Fatalf("expected 4 keys, got %d", len(keys))
+	}
+	expected := []string{"api-staging", "myapp-feature", "myapp-main", "other-dev"}
+	for i, want := range expected {
+		if keys[i] != want {
+			t.Errorf("keys[%d] = %q, want %q", i, keys[i], want)
+		}
+	}
+}
+
+func TestSortedRouteKeys_Empty(t *testing.T) {
+	keys := sortedRouteKeys(map[string]int{})
+	if len(keys) != 0 {
+		t.Errorf("expected empty, got %v", keys)
+	}
+}
+
+func TestSortedRouteKeys_Single(t *testing.T) {
+	keys := sortedRouteKeys(map[string]int{"only": 3000})
+	if len(keys) != 1 || keys[0] != "only" {
+		t.Errorf("expected [only], got %v", keys)
+	}
+}
+
+func initGitRepo(t *testing.T, dir string) {
+	t.Helper()
+	cmd := exec.Command("git", "init", "--initial-branch=main")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %s: %v", out, err)
+	}
+}
+
+func TestEnsureGitignored_OutsideRepo_Noop(t *testing.T) {
+	repo := t.TempDir()
+	initGitRepo(t, repo)
+	sibling := filepath.Join(filepath.Dir(repo), "sibling-wt")
+
+	if err := ensureGitignored(repo, sibling); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".gitignore")); err == nil {
+		t.Error(".gitignore should not be created for sibling paths")
+	}
+}
+
+func TestEnsureGitignored_InsideRepo_AddsPattern(t *testing.T) {
+	repo := t.TempDir()
+	initGitRepo(t, repo)
+	wtPath := filepath.Join(repo, ".worktrees", "feat-x")
+
+	if err := ensureGitignored(repo, wtPath); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(repo, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "/.worktrees/") {
+		t.Errorf("expected /.worktrees/ in .gitignore, got: %s", data)
+	}
+}
+
+func TestEnsureGitignored_AlreadyIgnored_NoDoubleAdd(t *testing.T) {
+	repo := t.TempDir()
+	initGitRepo(t, repo)
+	_ = os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("/.worktrees/\n"), 0o644)
+	wtPath := filepath.Join(repo, ".worktrees", "feat-y")
+
+	if err := ensureGitignored(repo, wtPath); err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(repo, ".gitignore"))
+	if strings.Count(string(data), "/.worktrees/") != 1 {
+		t.Errorf("expected exactly one /.worktrees/ entry, got: %s", data)
+	}
+}
+
+func TestEnsureGitignored_AppendsToExistingGitignore(t *testing.T) {
+	repo := t.TempDir()
+	initGitRepo(t, repo)
+	_ = os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("node_modules/\n"), 0o644)
+	wtPath := filepath.Join(repo, ".worktrees", "feat-z")
+
+	if err := ensureGitignored(repo, wtPath); err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(repo, ".gitignore"))
+	content := string(data)
+	if !strings.Contains(content, "node_modules/") {
+		t.Error("existing entries should be preserved")
+	}
+	if !strings.Contains(content, "/.worktrees/") {
+		t.Error("expected /.worktrees/ to be appended")
+	}
+}

@@ -265,7 +265,7 @@ func TestForDetection_Vite(t *testing.T) {
 	assertContains(t, content, `PORT: "{port}"`)
 	assertContains(t, content, "commands:")
 	assertContains(t, content, "npm install")
-	assertContains(t, content, "start: npx vite")
+	assertContains(t, content, "start: npx vite --port {port} --host")
 	assertNotContains(t, content, "setup_commands")
 }
 
@@ -326,7 +326,7 @@ func TestDiagnose_Vite(t *testing.T) {
 	hasPortWarning := false
 	hasEnvInfo := false
 	for _, d := range diags {
-		if strings.Contains(d.Message, "vite.config.js") {
+		if strings.Contains(d.Message, "{port}") {
 			hasPortWarning = true
 		}
 		if strings.Contains(d.Message, "auto-loads") {
@@ -370,19 +370,19 @@ func TestDiagnose_Rails_NoWarnings(t *testing.T) {
 func TestPortHint_Vite(t *testing.T) {
 	det := &detect.Result{Framework: "vite"}
 	hint := PortHint(det)
-	if !strings.Contains(hint, "vite.config.js") {
-		t.Errorf("expected Vite port hint, got: %s", hint)
+	if !strings.Contains(hint, "{port}") {
+		t.Errorf("expected Vite port hint to mention {port}, got: %s", hint)
 	}
-	if !strings.Contains(hint, "loadEnv") {
-		t.Errorf("expected loadEnv in hint, got: %s", hint)
+	if !strings.Contains(hint, "--port") {
+		t.Errorf("expected --port flag in hint, got: %s", hint)
 	}
 }
 
 func TestPortHint_NextJS(t *testing.T) {
 	det := &detect.Result{Framework: "nextjs"}
 	hint := PortHint(det)
-	if !strings.Contains(hint, "next dev --port") {
-		t.Errorf("expected Next.js port hint, got: %s", hint)
+	if !strings.Contains(hint, "--port {port}") {
+		t.Errorf("expected Next.js port hint with {port}, got: %s", hint)
 	}
 }
 

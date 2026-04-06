@@ -531,6 +531,32 @@ func TestRewriteEnvFileBlock_Extended(t *testing.T) {
 	}
 }
 
+func TestProjectAliases(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: myapp\naliases:\n  redis-ui: 8081\n  mailhog: 8025\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pc := LoadProjectConfig(dir)
+	aliases := pc.Aliases()
+	if aliases["redis-ui"] != 8081 {
+		t.Errorf("expected redis-ui=8081, got %d", aliases["redis-ui"])
+	}
+	if aliases["mailhog"] != 8025 {
+		t.Errorf("expected mailhog=8025, got %d", aliases["mailhog"])
+	}
+}
+
+func TestProjectAliases_Empty(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: myapp\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pc := LoadProjectConfig(dir)
+	if aliases := pc.Aliases(); len(aliases) != 0 {
+		t.Errorf("expected no aliases, got %v", aliases)
+	}
+}
+
 func TestRewriteEnvFileBlock_PreservesRestOfFile(t *testing.T) {
 	input := "project: myapp\n\nenv_file:\n  target: .env.local\n  source: .env.local\n\ndatabase:\n  adapter: postgresql\n"
 	got := rewriteEnvFileToSimple(input, ".env.local")

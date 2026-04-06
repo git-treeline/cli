@@ -40,9 +40,12 @@ var dbNameCmd = &cobra.Command{
 			return err
 		}
 		if dbNameJSON {
-			data, _ := json.MarshalIndent(map[string]string{
+			data, err := json.MarshalIndent(map[string]string{
 				"database": info.target,
 			}, "", "  ")
+			if err != nil {
+				return fmt.Errorf("encoding database name: %w", err)
+			}
 			fmt.Println(string(data))
 			return nil
 		}
@@ -91,7 +94,10 @@ in .treeline.yml. Use --from to clone from a different database instead.`,
 			source = dbResetFrom
 		}
 		if source == "" {
-			return fmt.Errorf("no template database configured in .treeline.yml and no --from specified")
+			return &CliError{
+				Message: "No template database configured and no --from specified.",
+				Hint:    "Set 'database.template' in .treeline.yml, or pass --from <db_name>.",
+			}
 		}
 
 		fmt.Printf("==> Dropping %s\n", info.target)
@@ -118,7 +124,10 @@ pg_dump file. Supports both custom format and plain SQL dumps.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dumpFile := args[0]
 		if _, err := os.Stat(dumpFile); err != nil {
-			return fmt.Errorf("dump file not found: %s", dumpFile)
+			return &CliError{
+				Message: fmt.Sprintf("Dump file not found: %s", dumpFile),
+				Hint:    "Check the path — expected a pg_dump output file (custom or plain SQL).",
+			}
 		}
 
 		info, err := resolveDB()
@@ -160,12 +169,12 @@ func resolveDB() (*dbInfo, error) {
 	reg := registry.New("")
 	alloc := reg.Find(absPath)
 	if alloc == nil {
-		return nil, fmt.Errorf("no allocation found for %s — run 'gtl setup' first", absPath)
+		return nil, errNoAllocation(absPath)
 	}
 
 	dbName, _ := alloc["database"].(string)
 	if dbName == "" {
-		return nil, fmt.Errorf("no database configured for this worktree")
+		return nil, errNoDatabaseConfigured()
 	}
 
 	adapterName := pc.DatabaseAdapter()

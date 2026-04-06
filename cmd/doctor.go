@@ -140,7 +140,10 @@ func doctorJSONOutput(pc *config.ProjectConfig, det *detect.Result, absPath stri
 		result["diagnostics"] = diagList
 	}
 
-	data, _ := json.MarshalIndent(result, "", "  ")
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding doctor output: %w", err)
+	}
 	fmt.Println(string(data))
 	return nil
 }
@@ -170,10 +173,22 @@ func doctorConfig(pc *config.ProjectConfig, det *detect.Result, absPath string) 
 		doctorLine("env_file", fmt.Sprintf("configured (%s) but file missing on disk", target))
 	}
 
-	if sc := pc.StartCommand(); sc != "" {
+	sc := pc.StartCommand()
+	if sc != "" {
 		doctorLine("commands.start", fmt.Sprintf("ok (%s)", sc))
 	} else {
 		doctorLine("commands.start", "not configured")
+	}
+
+	if sc != "" && !strings.Contains(sc, "{port}") {
+		switch det.Framework {
+		case "vite":
+			doctorLine("port wiring", "⚠ Vite ignores PORT env — add {port} to commands.start")
+		case "django", "python":
+			if !strings.Contains(sc, "$PORT") && !strings.Contains(sc, "${PORT") {
+				doctorLine("port wiring", "⚠ Django needs the port in the command — use {port}")
+			}
+		}
 	}
 }
 
@@ -257,12 +272,12 @@ func doctorServe() {
 		case "warn":
 			doctorLine(label, "⚠ "+c.Detail)
 			if c.Fix != "" {
-				fmt.Printf("    fix: %s\n", c.Fix)
+				fmt.Printf("  fix: %s\n", c.Fix)
 			}
 		case "error":
 			doctorLine(label, "✗ "+c.Detail)
 			if c.Fix != "" {
-				fmt.Printf("    fix: %s\n", c.Fix)
+				fmt.Printf("  fix: %s\n", c.Fix)
 			}
 		}
 	}
@@ -273,7 +288,7 @@ func doctorServe() {
 			doctorLine("CA cert", "⚠ could not read: "+err.Error())
 		} else if time.Now().After(expiry) {
 			doctorLine("CA cert", "✗ expired on "+expiry.Format("2006-01-02"))
-			fmt.Println("    fix: gtl serve uninstall && gtl serve install")
+			fmt.Println("  fix: gtl serve uninstall && gtl serve install")
 		} else {
 			doctorLine("CA cert", "ok (expires "+expiry.Format("2006-01-02")+")")
 		}
@@ -292,13 +307,13 @@ func doctorDiagnostics(det *detect.Result) {
 	for _, d := range diags {
 		prefix := "  "
 		if d.Level == "warn" {
-			prefix = "  ! "
+			prefix = "  Warning: "
 		}
 		for i, line := range strings.Split(d.Message, "\n") {
 			if i == 0 {
 				fmt.Printf("%s%s\n", prefix, line)
 			} else {
-				fmt.Printf("    %s\n", line)
+				fmt.Printf("  %s\n", line)
 			}
 		}
 	}

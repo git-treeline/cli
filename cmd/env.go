@@ -60,15 +60,16 @@ var envCmd = &cobra.Command{
 		reg := registry.New("")
 		entry := reg.Find(absPath)
 		if entry == nil {
-			fmt.Fprintf(os.Stderr, "No allocation found for %s\nRun `gtl setup` first.\n", absPath)
-			os.Exit(1)
+			return errNoAllocation(absPath)
 		}
 
 		envPath := filepath.Join(absPath, pc.EnvFileTarget())
 		if _, err := os.Stat(envPath); err != nil {
 			if os.IsNotExist(err) {
-				fmt.Fprintf(os.Stderr, "Env file does not exist: %s\n", envPath)
-				os.Exit(1)
+				return &CliError{
+					Message: fmt.Sprintf("Env file does not exist: %s", envPath),
+					Hint:    "Run 'gtl setup' to generate it from .treeline.yml env: template.",
+				}
 			}
 			return err
 		}

@@ -49,7 +49,10 @@ var configListCmd = &cobra.Command{
 			fmt.Println("No config file found. Run 'gtl config set <key> <value>' to create one.")
 			return nil
 		}
-		data, _ := json.MarshalIndent(uc.Data, "", "  ")
+		data, err := json.MarshalIndent(uc.Data, "", "  ")
+		if err != nil {
+			return fmt.Errorf("encoding config: %w", err)
+		}
 		fmt.Println(string(data))
 		return nil
 	},
@@ -76,11 +79,17 @@ var configGetCmd = &cobra.Command{
 		uc := config.LoadUserConfig("")
 		val := uc.Get(args[0])
 		if val == nil {
-			return fmt.Errorf("key %q not found", args[0])
+			return &CliError{
+				Message: fmt.Sprintf("Key %q not found.", args[0]),
+				Hint:    "Use 'gtl config list' to see all keys, or 'gtl config set <key> <value>' to create one.",
+			}
 		}
 		switch v := val.(type) {
 		case map[string]any:
-			data, _ := json.MarshalIndent(v, "", "  ")
+			data, err := json.MarshalIndent(v, "", "  ")
+			if err != nil {
+				return fmt.Errorf("encoding config value: %w", err)
+			}
 			fmt.Println(string(data))
 		case float64:
 			if v == float64(int(v)) {
