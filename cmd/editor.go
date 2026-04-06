@@ -32,7 +32,7 @@ var editorRefreshCmd = &cobra.Command{
 
 		pc := config.LoadProjectConfig(mainRepo)
 		if pc.Project() == "" {
-			return fmt.Errorf("no .treeline.yml found — run gtl init first")
+			return errNoProjectConfig()
 		}
 
 		uc := config.LoadUserConfig("")

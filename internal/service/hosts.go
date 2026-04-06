@@ -188,7 +188,7 @@ func writeHosts(content, prompt string) error {
 		return fmt.Errorf("flushing temp hosts file: %w", err)
 	}
 
-	script := fmt.Sprintf("cp '%s' '%s'", tmp.Name(), hostsPath)
+	script := fmt.Sprintf("/bin/cp '%s' '%s'", tmp.Name(), hostsPath)
 	cmd := exec.Command("sudo", "-p",
 		fmt.Sprintf("\nEnter your password to %s: ", prompt),
 		"sh", "-c", script)

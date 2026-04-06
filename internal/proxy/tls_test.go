@@ -1,12 +1,19 @@
 package proxy
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestGenerateSelfSigned(t *testing.T) {
@@ -243,6 +250,56 @@ func TestCertManager_ConcurrentAccess(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestCertNeedsRegeneration_MissingFile(t *testing.T) {
+	if !certNeedsRegeneration("/nonexistent/cert.pem") {
+		t.Error("missing file should need regeneration")
+	}
+}
+
+func TestCertNeedsRegeneration_CorruptFile(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "corrupt.pem")
+	_ = os.WriteFile(f, []byte("not a cert"), 0o644)
+	if !certNeedsRegeneration(f) {
+		t.Error("corrupt file should need regeneration")
+	}
+}
+
+func TestCertNeedsRegeneration_ExpiringSoon(t *testing.T) {
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "expiring.pem")
+	writeTestCert(t, certFile, time.Now().Add(3*24*time.Hour))
+	if !certNeedsRegeneration(certFile) {
+		t.Error("cert expiring in 3 days should need regeneration (buffer is 7 days)")
+	}
+}
+
+func TestCertNeedsRegeneration_Valid(t *testing.T) {
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "valid.pem")
+	writeTestCert(t, certFile, time.Now().Add(365*24*time.Hour))
+	if certNeedsRegeneration(certFile) {
+		t.Error("cert valid for a year should not need regeneration")
+	}
+}
+
+func writeTestCert(t *testing.T, path string, notAfter time.Time) {
+	t.Helper()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     notAfter,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, _ := os.Create(path)
+	_ = pem.Encode(f, &pem.Block{Type: "CERTIFICATE", Bytes: der})
+	_ = f.Close()
 }
 
 func TestCertManager_VerifiesAgainstCA(t *testing.T) {

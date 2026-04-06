@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +16,7 @@ import (
 	"os/signal"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -148,11 +151,15 @@ func (r *Router) Run() error {
 	return nil
 }
 
+const maxProxyHops = 5
+
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if req.Header.Get("X-Gtl-Proxy") != "" {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusLoopDetected)
-		_, _ = fmt.Fprint(w, "508 Loop Detected\n\nThe dev server proxied this request back through the gtl router.\nCheck your app's proxy/redirect config to avoid the loop.\n")
+	hops := 0
+	if v := req.Header.Get("X-Gtl-Hops"); v != "" {
+		hops, _ = strconv.Atoi(v)
+	}
+	if hops >= maxProxyHops {
+		r.serveLoopDetected(w, hops)
 		return
 	}
 
@@ -191,11 +198,17 @@ func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, targetPort in
 		Scheme: "http",
 		Host:   fmt.Sprintf("%s:%d", backendHost, targetPort),
 	}
+
+	hops := 0
+	if v := req.Header.Get("X-Gtl-Hops"); v != "" {
+		hops, _ = strconv.Atoi(v)
+	}
+
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
 			pr.Out.Host = pr.In.Host
-			pr.Out.Header.Set("X-Gtl-Proxy", "1")
+			pr.Out.Header.Set("X-Gtl-Hops", strconv.Itoa(hops+1))
 		},
 	}
 	proxy.ServeHTTP(w, req)
@@ -213,12 +226,12 @@ func (r *Router) refreshRoutes() {
 	}
 
 	for _, a := range allocs {
-		project := getString(a, "project")
-		branch := getString(a, "branch")
+		project := registry.GetString(a, "project")
+		branch := registry.GetString(a, "branch")
 		if project == "" {
 			continue
 		}
-		ports := extractAllocPorts(a)
+		ports := registry.ExtractPorts(a)
 		if len(ports) == 0 {
 			continue
 		}
@@ -286,12 +299,48 @@ func (r *Router) serveStatusPage(w http.ResponseWriter, _ *http.Request) {
 
 func (r *Router) serveNotFound(w http.ResponseWriter, subdomain string) {
 	routes := r.Routes()
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusNotFound)
-	_, _ = fmt.Fprintf(w, "No route for %q\n\nAvailable routes:\n", subdomain)
-	for _, k := range sortedKeys(routes) {
-		_, _ = fmt.Fprintf(w, "  %s://%s.%s\n", r.scheme(), k, r.baseDomain)
+
+	var body strings.Builder
+	body.WriteString(fmt.Sprintf("<p>No route matches <code>%s</code>.</p>", subdomain))
+	if len(routes) > 0 {
+		body.WriteString("<p>Available routes:</p><table><tr><th>Route</th><th>Port</th></tr>")
+		for _, k := range sortedKeys(routes) {
+			href := fmt.Sprintf("%s://%s.%s", r.scheme(), k, r.baseDomain)
+			body.WriteString(fmt.Sprintf("<tr><td><a href=%q>%s</a></td><td>%d</td></tr>", href, k, routes[k]))
+		}
+		body.WriteString("</table>")
+	} else {
+		body.WriteString("<p>No active routes. Run <code>gtl setup</code> in a worktree to allocate one.</p>")
 	}
+	_, _ = fmt.Fprint(w, renderErrorPage(404, "Route Not Found", body.String()))
+}
+
+func (r *Router) serveLoopDetected(w http.ResponseWriter, hops int) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusLoopDetected)
+	body := fmt.Sprintf(
+		"<p>This request looped through the router <strong>%d times</strong> before being stopped.</p>"+
+			"<p>Your dev server is proxying requests back through the gtl router. Common fixes:</p>"+
+			"<ul>"+
+			"<li>Vite: set <code>server.proxy['/api'].changeOrigin = true</code></li>"+
+			"<li>webpack-dev-server: set <code>devServer.proxy['/api'].changeOrigin = true</code></li>"+
+			"<li>Next.js rewrites: ensure the destination uses <code>http://localhost:PORT</code>, not the <code>.localhost</code> hostname</li>"+
+			"</ul>", hops)
+	_, _ = fmt.Fprint(w, renderErrorPage(508, "Loop Detected", body))
+}
+
+const errorPageCSS = `body{font-family:system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 20px;color:#333;background:#fff}` +
+	`@media(prefers-color-scheme:dark){body{background:#1a1a1a;color:#ddd}a{color:#58a6ff}code{background:#2d2d2d}table{border-color:#333}td,th{border-color:#333}}` +
+	`a{color:#0969da}code{background:#f0f0f0;padding:2px 6px;border-radius:3px;font-size:0.9em}` +
+	`h1{font-size:1.3em}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:6px 12px;border-bottom:1px solid #eee}th{color:#888;font-weight:500}` +
+	`ul{line-height:1.8}`
+
+func renderErrorPage(status int, title, body string) string {
+	return fmt.Sprintf(
+		"<html><head><title>%d — %s</title><style>%s</style></head><body><h1>%d — %s</h1>%s</body></html>",
+		status, title, errorPageCSS, status, title, body)
 }
 
 func (r *Router) extractSubdomain(host string) string {
@@ -324,7 +373,7 @@ func RouteKey(project, branch string) string {
 	project = sanitizeRouteRe.ReplaceAllString(strings.ReplaceAll(project, "_", "-"), "")
 
 	if branch == "" {
-		return project
+		return truncateDNSLabel(project)
 	}
 
 	branch = strings.ToLower(branch)
@@ -335,39 +384,46 @@ func RouteKey(project, branch string) string {
 	branch = collapseDashRe.ReplaceAllString(branch, "-")
 	branch = strings.Trim(branch, "-")
 
-	return project + "-" + branch
+	return truncateDNSLabel(project + "-" + branch)
 }
 
-func extractAllocPorts(a registry.Allocation) []int {
-	if ps, ok := a["ports"].([]any); ok {
-		result := make([]int, 0, len(ps))
-		for _, p := range ps {
-			if f, ok := p.(float64); ok {
-				result = append(result, int(f))
-			}
-		}
-		if len(result) > 0 {
-			return result
-		}
+const maxDNSLabel = 63
+
+func truncateDNSLabel(label string) string {
+	if len(label) <= maxDNSLabel {
+		return label
 	}
-	if p, ok := a["port"].(float64); ok {
-		return []int{int(p)}
-	}
-	return nil
+	h := sha256.Sum256([]byte(label))
+	suffix := hex.EncodeToString(h[:])[:6]
+	prefix := label[:maxDNSLabel-7]
+	prefix = strings.TrimRight(prefix, "-")
+	return prefix + "-" + suffix
 }
 
-func getString(a registry.Allocation, key string) string {
-	if v, ok := a[key].(string); ok {
-		return v
-	}
-	return ""
+var localhostCache sync.Map // port (int) → localhostEntry
+
+type localhostEntry struct {
+	host    string
+	expires time.Time
 }
+
+const localhostCacheTTL = 5 * time.Second
 
 // resolveLocalhost checks whether a port is reachable on IPv4 (127.0.0.1)
-// or IPv6 (::1) and returns the appropriate address. Prefers IPv4; falls back
-// to IPv6 for dev servers that bind to localhost on dual-stack systems where
-// localhost resolves to ::1 (e.g. Vite 6 on macOS).
+// or IPv6 (::1) and returns the appropriate address. Results are cached for
+// localhostCacheTTL to avoid probing on every proxied request.
 func resolveLocalhost(port int) string {
+	if v, ok := localhostCache.Load(port); ok {
+		if e := v.(localhostEntry); time.Now().Before(e.expires) {
+			return e.host
+		}
+	}
+	host := probeLocalhost(port)
+	localhostCache.Store(port, localhostEntry{host: host, expires: time.Now().Add(localhostCacheTTL)})
+	return host
+}
+
+func probeLocalhost(port int) string {
 	for _, host := range []string{"127.0.0.1", "::1"} {
 		addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)

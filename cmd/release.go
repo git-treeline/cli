@@ -47,7 +47,7 @@ var releaseCmd = &cobra.Command{
 			modes++
 		}
 		if modes > 1 {
-			return fmt.Errorf("PATH, --project, and --all are mutually exclusive; use only one")
+			return errMutuallyExclusive("PATH, --project, and --all")
 		}
 
 		if releaseProject != "" {
@@ -71,8 +71,7 @@ func runReleaseSingle(args []string) error {
 	reg := registry.New("")
 	alloc := reg.Find(absPath)
 	if alloc == nil {
-		fmt.Fprintf(os.Stderr, "No allocation found for %s\n", absPath)
-		os.Exit(1)
+		return errNoAllocation(absPath)
 	}
 
 	fa := format.Allocation(alloc)

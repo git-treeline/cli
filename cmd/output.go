@@ -3,7 +3,10 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/proxy"
@@ -13,9 +16,11 @@ import (
 
 // errServeNotInstalled is the shared error returned when commands require
 // the HTTPS router but it hasn't been installed yet.
-var errServeNotInstalled = fmt.Errorf(
-	"HTTPS router not installed.\n\n  Run 'gtl serve install' first (one-time setup).\n  Docs: https://gittreeline.com/docs/#getting-started",
-)
+var errServeNotInstalled error = &CliError{
+	Message: "HTTPS router not installed.",
+	Hint:    "Run 'gtl serve install' first (one-time setup).",
+	DocsURL: "https://gittreeline.com/docs/#getting-started",
+}
 
 // requireServeInstalled returns errServeNotInstalled when the HTTPS CA is
 // absent and GTL_HEADLESS is not set. Call from commands that need the router.
@@ -51,4 +56,42 @@ func printRouterAndTunnel(uc *config.UserConfig, project, branch string) {
 			fmt.Fprintln(os.Stderr, style.Dimf("  Safari: run %s to resolve this route", style.Cmd("gtl serve hosts sync")))
 		}
 	}
+}
+
+// ensureGitignored checks whether a worktree path that lives inside the repo
+// root is gitignored. If not, it appends the directory to .gitignore.
+// Paths outside the repo root (the default sibling layout) are a no-op.
+func ensureGitignored(mainRepo, wtPath string) error {
+	absRepo, _ := filepath.Abs(mainRepo)
+	absWT, _ := filepath.Abs(wtPath)
+
+	rel, err := filepath.Rel(absRepo, absWT)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return nil
+	}
+
+	cmd := exec.Command("git", "check-ignore", "-q", absWT)
+	cmd.Dir = mainRepo
+	if cmd.Run() == nil {
+		return nil
+	}
+
+	topLevel := strings.SplitN(rel, string(filepath.Separator), 2)[0]
+	pattern := "/" + topLevel + "/"
+
+	gitignorePath := filepath.Join(absRepo, ".gitignore")
+	existing, _ := os.ReadFile(gitignorePath)
+	if strings.Contains(string(existing), pattern) {
+		return nil
+	}
+
+	entry := pattern + "\n"
+	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
+		entry = "\n" + entry
+	}
+	if err := os.WriteFile(gitignorePath, append(existing, []byte(entry)...), 0o644); err != nil {
+		return fmt.Errorf("updating .gitignore: %w", err)
+	}
+	fmt.Println(style.Actionf("Added %s to .gitignore", pattern))
+	return nil
 }

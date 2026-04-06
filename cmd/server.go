@@ -50,7 +50,7 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 
 		startCommand := pc.StartCommand()
 		if startCommand == "" {
-			return fmt.Errorf("no commands.start configured in .treeline.yml")
+			return errNoStartCommand()
 		}
 
 		sockPath := supervisor.SocketPath(absPath)
@@ -64,14 +64,17 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 				if startAwait {
 					return awaitReady(sockPath)
 				}
-				return fmt.Errorf("server is already running — use 'gtl restart' to restart it")
+				return errServerAlreadyRunning()
 			}
 			resp, err = supervisor.Send(sockPath, "start")
 			if err != nil {
 				return err
 			}
 			if strings.HasPrefix(resp, "error") {
-				return fmt.Errorf("server: %s", resp)
+				return &CliError{
+					Message: fmt.Sprintf("Server error: %s", resp),
+					Hint:    "Check the server logs, or run 'gtl stop' and try again.",
+				}
 			}
 			fmt.Println("Server resumed.")
 			if startAwait {
@@ -90,7 +93,10 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 			for i := 0; i < 50; i++ {
 				select {
 				case err := <-svErr:
-					return fmt.Errorf("supervisor exited before ready: %w", err)
+					return &CliError{
+						Message: fmt.Sprintf("Supervisor exited before ready: %s", err),
+						Hint:    "Check commands.start in .treeline.yml — the process crashed on startup.",
+					}
 				default:
 				}
 				time.Sleep(100 * time.Millisecond)
@@ -101,7 +107,10 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 
 			select {
 			case err := <-svErr:
-				return fmt.Errorf("supervisor exited before ready: %w", err)
+				return &CliError{
+					Message: fmt.Sprintf("Supervisor exited before ready: %s", err),
+					Hint:    "Check commands.start in .treeline.yml — the process crashed on startup.",
+				}
 			default:
 			}
 
@@ -134,7 +143,10 @@ terminal to fully exit the supervisor.`,
 			return err
 		}
 		if strings.HasPrefix(resp, "error") {
-			return fmt.Errorf("server: %s", resp)
+			return &CliError{
+				Message: fmt.Sprintf("Server error: %s", resp),
+				Hint:    "The supervisor may be in an unexpected state. Check 'gtl start' output.",
+			}
 		}
 		fmt.Println("Server stopped. Supervisor still running — 'gtl start' to resume.")
 		return nil
@@ -154,7 +166,10 @@ var restartCmd = &cobra.Command{
 			return err
 		}
 		if strings.HasPrefix(resp, "error") {
-			return fmt.Errorf("server: %s", resp)
+			return &CliError{
+				Message: fmt.Sprintf("Server error: %s", resp),
+				Hint:    "The server may have crashed. Check logs and try 'gtl stop' then 'gtl start'.",
+			}
 		}
 		fmt.Println("Server restarted.")
 		return nil
@@ -232,11 +247,17 @@ func awaitReady(sockPath string) error {
 	cmd := fmt.Sprintf("wait-ready:%d", startAwaitTimeout)
 	resp, err := supervisor.SendWithTimeout(sockPath, cmd, time.Duration(startAwaitTimeout+5)*time.Second)
 	if err != nil {
-		return fmt.Errorf("waiting for server: %w", err)
+		return &CliError{
+			Message: fmt.Sprintf("Timed out waiting for server: %s", err),
+			Hint:    fmt.Sprintf("Server didn't respond within %ds. It may still be starting — check logs.", startAwaitTimeout),
+		}
 	}
 	if resp == "ok" {
 		fmt.Println("Server is ready.")
 		return nil
 	}
-	return fmt.Errorf("server: %s", resp)
+	return &CliError{
+		Message: fmt.Sprintf("Server not ready: %s", resp),
+		Hint:    "The server started but isn't accepting connections. Check commands.start output.",
+	}
 }

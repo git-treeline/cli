@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"os"
 	"testing"
 )
 
@@ -56,5 +58,82 @@ func TestDig(t *testing.T) {
 	}
 	if v := Dig(m, "nope"); v != nil {
 		t.Errorf("expected nil, got %v", v)
+	}
+}
+
+func TestWarnUnknownKeys_NoWarning(t *testing.T) {
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	known := map[string]bool{"port": true, "redis": true}
+	WarnUnknownKeys(map[string]any{"port": 1}, known, "config.json")
+
+	_ = w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	if buf.Len() > 0 {
+		t.Errorf("expected no warnings, got: %s", buf.String())
+	}
+}
+
+func TestWarnUnknownKeys_UnknownKey(t *testing.T) {
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	known := map[string]bool{"port": true, "redis": true}
+	WarnUnknownKeys(map[string]any{"prot": 1, "redis": "x"}, known, "config.json")
+
+	_ = w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	output := buf.String()
+	if !bytes.Contains([]byte(output), []byte(`"prot"`)) {
+		t.Errorf("expected warning about 'prot', got: %s", output)
+	}
+	if !bytes.Contains([]byte(output), []byte(`"port"`)) {
+		t.Errorf("expected suggestion 'port', got: %s", output)
+	}
+}
+
+func TestWarnUnknownKeys_NoSuggestionForDistantKey(t *testing.T) {
+	old := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	known := map[string]bool{"port": true}
+	WarnUnknownKeys(map[string]any{"zzzzz": 1}, known, "test.yml")
+
+	_ = w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+
+	output := buf.String()
+	if !bytes.Contains([]byte(output), []byte(`"zzzzz"`)) {
+		t.Errorf("expected warning about 'zzzzz', got: %s", output)
+	}
+	if bytes.Contains([]byte(output), []byte("did you mean")) {
+		t.Errorf("should not suggest for distant keys, got: %s", output)
+	}
+}
+
+func TestLevenshtein(t *testing.T) {
+	tests := []struct{ a, b string; want int }{
+		{"port", "port", 0},
+		{"port", "prot", 2},
+		{"port", "ports", 1},
+		{"", "abc", 3},
+		{"abc", "", 3},
+	}
+	for _, tt := range tests {
+		if got := levenshtein(tt.a, tt.b); got != tt.want {
+			t.Errorf("levenshtein(%q, %q) = %d, want %d", tt.a, tt.b, got, tt.want)
+		}
 	}
 }

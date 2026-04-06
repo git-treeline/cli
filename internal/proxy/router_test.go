@@ -162,8 +162,43 @@ func TestRouterStatusPage(t *testing.T) {
 	}
 }
 
+func TestRouteKey_LongLabelTruncated(t *testing.T) {
+	key := RouteKey("my-long-company-name", "feature/redesign-entire-authentication-flow-for-enterprise-clients")
+	if len(key) > 63 {
+		t.Errorf("RouteKey produced label of length %d (max 63): %s", len(key), key)
+	}
+	if len(key) < 50 {
+		t.Errorf("truncated key too short (%d chars), lost too much info: %s", len(key), key)
+	}
+}
+
+func TestRouteKey_ShortLabelUnchanged(t *testing.T) {
+	key := RouteKey("salt", "main")
+	if key != "salt-main" {
+		t.Errorf("short key should be unchanged, got %q", key)
+	}
+}
+
+func TestRouteKey_TruncationIsDeterministic(t *testing.T) {
+	a := RouteKey("mycompany", "feature/this-is-a-very-long-branch-name-that-exceeds-the-dns-label-limit")
+	b := RouteKey("mycompany", "feature/this-is-a-very-long-branch-name-that-exceeds-the-dns-label-limit")
+	if a != b {
+		t.Errorf("truncation should be deterministic: %q != %q", a, b)
+	}
+}
+
+func TestRouteKey_DifferentLongBranchesGetDifferentKeys(t *testing.T) {
+	a := RouteKey("mycompany", "feature/this-is-a-very-long-branch-name-variant-a-for-testing-truncation")
+	b := RouteKey("mycompany", "feature/this-is-a-very-long-branch-name-variant-b-for-testing-truncation")
+	if a == b {
+		t.Errorf("different long branches should produce different keys: both got %q", a)
+	}
+}
+
 func TestRouterNotFound(t *testing.T) {
-	reg := testRegistry(t, []registry.Allocation{})
+	reg := testRegistry(t, []registry.Allocation{
+		{"project": "salt", "branch": "main", "port": float64(3001), "ports": []any{float64(3001)}, "worktree": "/tmp/salt"},
+	})
 	router := NewRouter(3000, reg)
 	ts := httptest.NewServer(router)
 	defer ts.Close()
@@ -179,6 +214,14 @@ func TestRouterNotFound(t *testing.T) {
 	if resp.StatusCode != 404 {
 		t.Errorf("expected 404, got %d", resp.StatusCode)
 	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.Contains(ct, "text/html") {
+		t.Errorf("expected HTML content-type, got %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "salt-main") {
+		t.Error("404 page should list available routes")
+	}
 }
 
 func TestRouterLoopDetection(t *testing.T) {
@@ -191,7 +234,7 @@ func TestRouterLoopDetection(t *testing.T) {
 
 	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
 	req.Host = "salt-main.localhost:3000"
-	req.Header.Set("X-Gtl-Proxy", "1")
+	req.Header.Set("X-Gtl-Hops", "5")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
@@ -207,12 +250,44 @@ func TestRouterLoopDetection(t *testing.T) {
 	}
 }
 
-func TestRouterSetsProxyHeader(t *testing.T) {
+func TestRouterAllowsLegitimateMultiHop(t *testing.T) {
+	targetPort := freePort(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, "ok")
+	})
+	target := &http.Server{Addr: fmt.Sprintf(":%d", targetPort), Handler: mux}
+	go func() { _ = target.ListenAndServe() }()
+	defer func() { _ = target.Close() }()
+	waitForPort(t, targetPort)
+
+	reg := testRegistry(t, []registry.Allocation{
+		{"project": "salt", "branch": "main", "port": float64(targetPort), "ports": []any{float64(targetPort)}, "worktree": "/tmp/salt"},
+	})
+	router := NewRouter(0, reg)
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "salt-main.localhost"
+	req.Header.Set("X-Gtl-Hops", "2")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200 for hop count < 5, got %d", resp.StatusCode)
+	}
+}
+
+func TestRouterSetsHopHeader(t *testing.T) {
 	targetPort := freePort(t)
 	var gotHeader string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		gotHeader = r.Header.Get("X-Gtl-Proxy")
+		gotHeader = r.Header.Get("X-Gtl-Hops")
 		_, _ = fmt.Fprint(w, "ok")
 	})
 	target := &http.Server{Addr: fmt.Sprintf(":%d", targetPort), Handler: mux}
@@ -236,7 +311,41 @@ func TestRouterSetsProxyHeader(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if gotHeader != "1" {
-		t.Errorf("expected X-Gtl-Proxy header to be set on proxied request, got %q", gotHeader)
+		t.Errorf("expected X-Gtl-Hops=1 on first proxy hop, got %q", gotHeader)
+	}
+}
+
+func TestRouterIncrementsHopCount(t *testing.T) {
+	targetPort := freePort(t)
+	var gotHeader string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get("X-Gtl-Hops")
+		_, _ = fmt.Fprint(w, "ok")
+	})
+	target := &http.Server{Addr: fmt.Sprintf(":%d", targetPort), Handler: mux}
+	go func() { _ = target.ListenAndServe() }()
+	defer func() { _ = target.Close() }()
+	waitForPort(t, targetPort)
+
+	reg := testRegistry(t, []registry.Allocation{
+		{"project": "salt", "branch": "main", "port": float64(targetPort), "ports": []any{float64(targetPort)}, "worktree": "/tmp/salt"},
+	})
+	router := NewRouter(0, reg)
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "salt-main.localhost"
+	req.Header.Set("X-Gtl-Hops", "3")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if gotHeader != "4" {
+		t.Errorf("expected X-Gtl-Hops=4 (incremented from 3), got %q", gotHeader)
 	}
 }
 

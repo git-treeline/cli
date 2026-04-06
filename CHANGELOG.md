@@ -1,3 +1,17 @@
+## [0.30.0]
+
+- **Configurable worktree path** — set `worktree.path` in user config to control where `gtl new` and `gtl review` create worktrees. Template supports `{project}` and `{branch}` interpolation. Example: `"worktree": {"path": ".worktrees/{branch}"}` creates worktrees inside the repo instead of as siblings. Relative paths resolve from the repo root; absolute paths are used as-is. Default behavior (sibling directories) is unchanged.
+- **Automatic `.gitignore` protection** — when worktree paths resolve inside the repo root, Treeline verifies the directory is gitignored before creating the worktree. If not, it appends the pattern to `.gitignore` automatically. Prevents accidentally committing worktree contents. Sibling paths (the default layout) skip this check.
+- **Hop-counted loop detection** — the HTTPS router replaces the binary `X-Gtl-Proxy` header with a counted `X-Gtl-Hops` header, allowing up to 5 legitimate proxy hops before returning 508. Fixes false positives in multi-service setups where requests pass through the router more than once.
+- **DNS label truncation** — route keys for long project/branch combinations are truncated to 63 characters (the DNS label limit) with a deterministic hash suffix, preventing routing failures for long branch names.
+- **HTML error pages** — the router's 404 (route not found) and 508 (loop detected) responses are now styled HTML pages with dark mode support, available route listings, and framework-specific fix suggestions.
+- **Atomic registry writes** — `registry.json` is now written via temp file + rename, preventing corruption from interrupted writes. Corrupt JSON is detected and reported as an error instead of being silently replaced.
+- **CA auto-renewal** — `gtl serve install` and `EnsureCA` now regenerate the local CA certificate when it's within 7 days of expiry, preventing surprise HTTPS failures.
+- **Browser blocked port avoidance** — the port allocator now skips ports on the WHATWG "bad port" list (e.g. 6000, 6665–6669) that browsers silently refuse to connect to.
+- **Stale supervisor detection** — `gtl start` detects when a supervisor socket already exists and reports the conflict instead of silently failing.
+- **Security hardening** — privileged operations (`pfctl`, `iptables`, `cp`) now use full binary paths to prevent PATH injection in sudo contexts. `SECURITY.md` rewritten to document the trust model and privileged operations.
+- **macOS CI** — platform-specific packages (proxy, service, supervisor) now run on macOS in CI.
+
 ## [0.29.0]
 
 - **`gtl dashboard`** — interactive TUI for monitoring and managing all worktrees in real time. Two-panel layout with project-grouped worktree list and live detail view. Keyboard-driven: start/stop/restart supervisors, open in browser, release worktrees with confirmation, filter search, and help overlay. Mouse support included. Accessible via `gtl dashboard`, `gtl dash`, or `gtl ui`. Built on Bubble Tea v2.

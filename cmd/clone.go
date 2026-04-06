@@ -49,7 +49,10 @@ The server is NOT auto-started. Review the project, then run 'gtl start'.`,
 		}
 
 		if len(args) == 0 {
-			return fmt.Errorf("repository URL is required\n\nUsage: gtl clone <url> [directory] [git clone flags...]")
+			return &CliError{
+				Message: "Repository URL is required.",
+				Hint:    "Usage: gtl clone <url> [directory] [git clone flags...]",
+			}
 		}
 
 		url := args[0]
@@ -75,7 +78,10 @@ The server is NOT auto-started. Review the project, then run 'gtl start'.`,
 			return err
 		}
 		if st, err := os.Stat(absPath); err != nil || !st.IsDir() {
-			return fmt.Errorf("cloned repository not found at %s", absPath)
+			return &CliError{
+				Message: fmt.Sprintf("Cloned repository not found at %s", absPath),
+				Hint:    "The git clone succeeded but the expected directory is missing. Check the repo name.",
+			}
 		}
 
 		uc := config.LoadUserConfig("")
@@ -114,7 +120,7 @@ The server is NOT auto-started. Review the project, then run 'gtl start'.`,
 		s := setup.New(absPath, absPath, uc)
 		alloc, err := s.Run()
 		if err != nil {
-			return fmt.Errorf("setup failed: %w", err)
+			return errSetupFailed(err)
 		}
 
 		printRouterAndTunnel(uc, s.ProjectConfig.Project(), alloc.Branch)

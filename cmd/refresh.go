@@ -219,7 +219,7 @@ func runRefresh() error {
 }
 
 func detectPortChange(project, branch string, currentPorts []int, isMain bool, reservations map[string]int, uc *config.UserConfig, wtPath string) (bool, string) {
-	expected := resolveExpectedPort(project, branch, isMain, reservations)
+	expected := reservedPort(project, branch, isMain, reservations)
 
 	if expected > 0 && expected != currentPorts[0] {
 		key := project
@@ -245,22 +245,6 @@ func detectPortChange(project, branch string, currentPorts []int, isMain bool, r
 	}
 
 	return false, ""
-}
-
-// resolveExpectedPort mirrors the allocator's reservation resolution:
-// project/branch first, then project-only for main repos only.
-func resolveExpectedPort(project, branch string, isMain bool, reservations map[string]int) int {
-	if branch != "" {
-		if p, ok := reservations[project+"/"+branch]; ok {
-			return p
-		}
-	}
-	if isMain {
-		if p, ok := reservations[project]; ok {
-			return p
-		}
-	}
-	return 0
 }
 
 func reservedPort(project, branch string, isMain bool, reservations map[string]int) int {

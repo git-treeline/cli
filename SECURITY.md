@@ -1,19 +1,21 @@
-# Security Policy
+# Security
 
-## Reporting a Vulnerability
+## Trust model
 
-If you discover a security vulnerability, please report it privately. **Do not open a public issue.**
+Git Treeline executes commands defined in your repository's `.treeline.yml` — setup commands, start commands, and lifecycle hooks. This is the same trust model as `Makefile`, `.envrc` (direnv), `.devcontainer.json`, and `package.json` scripts: **you are trusting the repository to run code on your machine.**
 
-Email: oss@productmatter.co
+Review `.treeline.yml` before running `gtl setup`, `gtl new`, or `gtl start` in repositories you don't control.
 
-Include:
+## Privileged operations
 
-- Description of the vulnerability
-- Steps to reproduce
-- Impact assessment (if known)
+Some operations require `sudo` and will prompt for your password:
 
-We will acknowledge receipt within 48 hours and aim to provide a fix or mitigation plan within 7 days.
+- **CA trust** (`gtl serve install`): Adds a locally-generated certificate authority to the system trust store so `*.localhost` HTTPS works without browser warnings. Uses `/usr/bin/security` on macOS, distro-appropriate trust commands on Linux.
+- **Port forwarding** (`gtl serve install`): Configures OS-level port forwarding (443 → router port) so HTTPS works on the standard port. Uses `/sbin/pfctl` on macOS, `/sbin/iptables` on Linux.
+- **Hosts file** (`gtl serve hosts sync`): Writes entries to `/etc/hosts` for Safari compatibility. Uses atomic copy via `/bin/cp`.
 
-## Supported Versions
+The router process itself runs unprivileged. Privilege is used once during install, not at runtime.
 
-Only the latest release is supported with security updates.
+## Reporting vulnerabilities
+
+If you find a security issue, please email security@gittreeline.com rather than opening a public issue.

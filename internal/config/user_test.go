@@ -539,6 +539,67 @@ func TestUserConfig_RouterAliases(t *testing.T) {
 	}
 }
 
+func TestUserConfig_WorktreePathTemplate_Default(t *testing.T) {
+	uc := LoadUserConfig("/nonexistent/config.json")
+	if uc.WorktreePathTemplate() != "" {
+		t.Errorf("expected empty default, got %q", uc.WorktreePathTemplate())
+	}
+}
+
+func TestUserConfig_WorktreePathTemplate_Custom(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"worktree":{"path":".worktrees/{branch}"}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	if uc.WorktreePathTemplate() != ".worktrees/{branch}" {
+		t.Errorf("expected .worktrees/{branch}, got %q", uc.WorktreePathTemplate())
+	}
+}
+
+func TestUserConfig_ResolveWorktreePath_NoTemplate(t *testing.T) {
+	uc := LoadUserConfig("/nonexistent/config.json")
+	if p := uc.ResolveWorktreePath("/repo", "myapp", "feat"); p != "" {
+		t.Errorf("expected empty when no template, got %q", p)
+	}
+}
+
+func TestUserConfig_ResolveWorktreePath_Relative(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"worktree":{"path":".worktrees/{branch}"}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	result := uc.ResolveWorktreePath("/home/dev/myapp", "myapp", "feature-x")
+	if result != "/home/dev/myapp/.worktrees/feature-x" {
+		t.Errorf("expected /home/dev/myapp/.worktrees/feature-x, got %q", result)
+	}
+}
+
+func TestUserConfig_ResolveWorktreePath_WithProject(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"worktree":{"path":"../{project}-worktrees/{branch}"}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	result := uc.ResolveWorktreePath("/home/dev/myapp", "myapp", "feat")
+	if result != "/home/dev/myapp-worktrees/feat" {
+		t.Errorf("expected /home/dev/myapp-worktrees/feat, got %q", result)
+	}
+}
+
+func TestUserConfig_ResolveWorktreePath_Absolute(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"worktree":{"path":"/tmp/worktrees/{project}/{branch}"}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	result := uc.ResolveWorktreePath("/home/dev/myapp", "myapp", "feat")
+	if result != "/tmp/worktrees/myapp/feat" {
+		t.Errorf("expected /tmp/worktrees/myapp/feat, got %q", result)
+	}
+}
+
 func TestUserConfig_RouterAliases_Empty(t *testing.T) {
 	uc := LoadUserConfig(filepath.Join(t.TempDir(), "config.json"))
 	if aliases := uc.RouterAliases(); len(aliases) != 0 {

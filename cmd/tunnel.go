@@ -68,7 +68,10 @@ Related commands:
 		if domain != "" {
 			tunnelName := uc.TunnelName(tunnelConfigName)
 			if tunnelName == "" {
-				return fmt.Errorf("tunnel domain is configured but no tunnel name found\nRun 'gtl tunnel setup' to complete configuration")
+				return &CliError{
+				Message: "Tunnel domain is configured but no tunnel name found.",
+				Hint:    "Run 'gtl tunnel setup' to complete configuration.",
+			}
 			}
 			if err := validateTunnelPrereqs(tunnelName); err != nil {
 				return err
@@ -104,13 +107,22 @@ Subdomains are derived from project and branch names, matching gtl serve routes.
 
 		if _, err := tunnel.ResolveCloudflared(); err != nil {
 			if !confirm.Prompt("cloudflared not found. Install it?", false, nil) {
-				return fmt.Errorf("cloudflared is required for tunnel setup")
+				return &CliError{
+					Message: "cloudflared is required for tunnel setup.",
+					Hint:    "Install it with 'brew install cloudflare/cloudflare/cloudflared' or see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/",
+				}
 			}
 			if !tunnel.OfferInstall() {
-				return fmt.Errorf("cloudflared still not found after install attempt")
+				return &CliError{
+					Message: "cloudflared still not found after install attempt.",
+					Hint:    "Install manually: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/",
+				}
 			}
 			if _, err := tunnel.ResolveCloudflared(); err != nil {
-				return fmt.Errorf("cloudflared still not found after install attempt")
+				return &CliError{
+					Message: "cloudflared still not found after install attempt.",
+					Hint:    "Install manually: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/",
+				}
 			}
 		}
 
@@ -132,7 +144,10 @@ Subdomains are derived from project and branch names, matching gtl serve routes.
 		tunnelName = confirm.Input("Tunnel identifier", tunnelName, nil)
 		tunnelName = strings.TrimSpace(tunnelName)
 		if tunnelName == "" || strings.ContainsAny(tunnelName, " \t\n/\\:.") {
-			return fmt.Errorf("invalid tunnel name %q — use only letters, numbers, and hyphens (this is an identifier, not your domain)", tunnelName)
+			return &CliError{
+				Message: fmt.Sprintf("Invalid tunnel name %q.", tunnelName),
+				Hint:    "Use only letters, numbers, and hyphens (this is an identifier, not your domain).",
+			}
 		}
 
 		if !tunnel.TunnelExists(tunnelName) {
@@ -145,10 +160,16 @@ Subdomains are derived from project and branch names, matching gtl serve routes.
 		existingDomain := uc.TunnelDomain("")
 		domain := strings.TrimSpace(confirm.Input("Domain (e.g. myteam.dev)", existingDomain, nil))
 		if domain == "" {
-			return fmt.Errorf("domain is required for named tunnel setup")
+			return &CliError{
+				Message: "Domain is required for named tunnel setup.",
+				Hint:    "Enter the domain you manage in Cloudflare, e.g. myteam.dev",
+			}
 		}
 		if strings.ContainsAny(domain, " \t\n/:") || !strings.Contains(domain, ".") {
-			return fmt.Errorf("invalid domain %q — expected something like myteam.dev", domain)
+			return &CliError{
+				Message: fmt.Sprintf("Invalid domain %q.", domain),
+				Hint:    "Expected a bare domain like myteam.dev (no protocol, path, or port).",
+			}
 		}
 
 		wildcardHost := "*." + domain
@@ -257,7 +278,10 @@ With an argument, sets the default to the named tunnel config.
 		name := args[0]
 		configs := uc.TunnelConfigs()
 		if _, ok := configs[name]; !ok {
-			return fmt.Errorf("tunnel %q not found in config\nAvailable: %v", name, tunnelConfigNames(configs))
+			return &CliError{
+				Message: fmt.Sprintf("Tunnel %q not found in config.", name),
+				Hint:    fmt.Sprintf("Available tunnels: %v", tunnelConfigNames(configs)),
+			}
 		}
 		uc.Set("tunnel.default", name)
 		if err := uc.Save(); err != nil {
@@ -284,7 +308,10 @@ tunnels (random *.trycloudflare.com URLs).`,
 
 		configs := uc.TunnelConfigs()
 		if _, ok := configs[name]; !ok {
-			return fmt.Errorf("tunnel %q not found in config\nAvailable: %v", name, tunnelConfigNames(configs))
+			return &CliError{
+				Message: fmt.Sprintf("Tunnel %q not found in config.", name),
+				Hint:    fmt.Sprintf("Available tunnels: %v", tunnelConfigNames(configs)),
+			}
 		}
 
 		wasDefault := uc.TunnelDefault() == name
@@ -314,10 +341,16 @@ func tunnelConfigNames(configs map[string]string) []string {
 
 func validateTunnelPrereqs(tunnelName string) error {
 	if !tunnel.IsLoggedIn() {
-		return fmt.Errorf("not authenticated with Cloudflare — run 'gtl tunnel setup'")
+		return &CliError{
+			Message: "Not authenticated with Cloudflare.",
+			Hint:    "Run 'gtl tunnel setup' to authenticate.",
+		}
 	}
 	if !tunnel.TunnelExists(tunnelName) {
-		return fmt.Errorf("tunnel %q not found — run 'gtl tunnel setup'", tunnelName)
+		return &CliError{
+			Message: fmt.Sprintf("Tunnel %q not found.", tunnelName),
+			Hint:    "Run 'gtl tunnel setup' to create it.",
+		}
 	}
 	return nil
 }
@@ -326,7 +359,7 @@ func resolveTunnelTarget(args []string) (int, format.Allocation, error) {
 	if len(args) == 1 {
 		p, err := strconv.Atoi(args[0])
 		if err != nil || p < 1 || p > 65535 {
-			return 0, nil, fmt.Errorf("invalid port: %s", args[0])
+			return 0, nil, errInvalidPort(args[0])
 		}
 		entry := findAllocationForCwd()
 		return p, entry, nil
@@ -340,12 +373,15 @@ func resolveTunnelTarget(args []string) (int, format.Allocation, error) {
 	reg := registry.New("")
 	entry := reg.Find(absPath)
 	if entry == nil {
-		return 0, nil, fmt.Errorf("no allocation found for %s\nSpecify a port: gtl tunnel <port>", absPath)
+		return 0, nil, &CliError{
+			Message: fmt.Sprintf("No allocation found for %s", absPath),
+			Hint:    "Run 'gtl setup' first, or specify a port: gtl tunnel <port>",
+		}
 	}
 
 	ports := format.GetPorts(format.Allocation(entry))
 	if len(ports) == 0 {
-		return 0, nil, fmt.Errorf("allocation exists but has no ports")
+		return 0, nil, errNoAllocationNoPorts(absPath)
 	}
 	return ports[0], format.Allocation(entry), nil
 }

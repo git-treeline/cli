@@ -36,7 +36,10 @@ var initCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		path := filepath.Join(".", config.ProjectConfigFile)
 		if _, err := os.Stat(path); err == nil {
-			return fmt.Errorf(".treeline.yml already exists")
+			return &CliError{
+				Message: ".treeline.yml already exists.",
+				Hint:    "Edit the existing file, or delete it and re-run 'gtl init'.",
+			}
 		}
 
 		uc := config.LoadUserConfig("")

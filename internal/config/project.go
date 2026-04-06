@@ -523,6 +523,15 @@ func (pc *ProjectConfig) configPath() string {
 	return filepath.Join(pc.ProjectRoot, ProjectConfigFile)
 }
 
+var projectKnownKeys = map[string]bool{
+	"project": true, "port_count": true, "env_file": true, "database": true,
+	"copy_files": true, "env": true, "hooks": true, "commands": true,
+	"editor": true, "merge_target": true, "aliases": true,
+	// Legacy keys accepted during migration
+	"default_branch": true, "setup_commands": true, "start_command": true,
+	"ports_needed": true,
+}
+
 func (pc *ProjectConfig) load() map[string]any {
 	raw, err := os.ReadFile(pc.configPath())
 	if err != nil {
@@ -533,6 +542,8 @@ func (pc *ProjectConfig) load() map[string]any {
 	if err := yaml.Unmarshal(raw, &yamlData); err != nil || yamlData == nil {
 		return copyMap(ProjectDefaults)
 	}
+
+	WarnUnknownKeys(yamlData, projectKnownKeys, ProjectConfigFile)
 
 	return DeepMerge(ProjectDefaults, yamlData)
 }

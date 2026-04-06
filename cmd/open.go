@@ -34,13 +34,13 @@ var openCmd = &cobra.Command{
 		reg := registry.New("")
 		entry := reg.Find(absPath)
 		if entry == nil {
-			return fmt.Errorf("no allocation found for %s — run `gtl setup` first", absPath)
+			return errNoAllocation(absPath)
 		}
 
 		fa := format.Allocation(entry)
 		ports := format.GetPorts(fa)
 		if len(ports) == 0 {
-			return fmt.Errorf("allocation exists but has no ports")
+			return errNoAllocationNoPorts(absPath)
 		}
 
 		mainRepo := worktree.DetectMainRepo(absPath)
@@ -75,6 +75,9 @@ func openBrowser(url string) error {
 	case "linux":
 		return exec.Command("xdg-open", url).Start()
 	default:
-		return fmt.Errorf("unsupported platform %s", runtime.GOOS)
+		return &CliError{
+			Message: fmt.Sprintf("Unsupported platform: %s", runtime.GOOS),
+			Hint:    "'gtl open' supports macOS and Linux. Open the URL manually.",
+		}
 	}
 }

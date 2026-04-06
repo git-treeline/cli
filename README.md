@@ -44,6 +44,40 @@ Download the latest binary from [GitHub Releases](https://github.com/git-treelin
 
 > **Naming:** The binary is `git-treeline`, which also works as `git treeline` (git subcommand convention). Homebrew additionally installs `gtl` as a short alias. All three invocations are equivalent.
 
+## First-time setup on your machine
+
+Two different “setups”: **once per computer** (CLI + local HTTPS stack on macOS/Linux), and **once per git repository** (`gtl init`, then worktrees).
+
+- You do **not** need `gtl serve` before **`gtl init`**—only the binary on your `PATH`.
+- On **macOS and Linux**, you **do** need to run **`gtl serve install`** (or have the same local CA already present) **before** your first **`gtl setup`**, **`gtl new`**, or **`gtl clone`**: the CLI checks for the generated CA. That install also sets up the router, trusted certs, port forwarding, and background service—the product experience assumes this stack. See **`GTL_HEADLESS=1`** only for automation (CI) where you intentionally skip that check.
+
+### 1. Install the CLI
+
+Use [Homebrew](#homebrew), [Go](#from-source-requires-go-126), or a [release binary](#from-release-binary). Installing `gtl` does **not** require `sudo` and does **not** install certificates or background services by itself.
+
+### 2. Local HTTPS router — `gtl serve install` (macOS / Linux)
+
+Run **once per machine** before your first worktree allocation:
+
+```bash
+gtl serve install
+```
+
+The installer will ask for your **system password twice** (via `sudo`):
+
+1. **Trust a local certificate authority** — Adds a dev CA to your login keychain (macOS) or equivalent so browsers accept `https://*.localhost` without certificate errors. This CA is what **`gtl setup` / `gtl new` require** on macOS/Linux.
+2. **Forward port 443** — Installs a rule so HTTPS on port 443 is forwarded to Treeline’s router (default listen port `3001`, configurable as `router.port`). That’s what makes `https://project-branch.localhost` work **without** `:3001` in the URL.
+
+What gets installed: the CA, a wildcard server cert for `*.localhost`, a **background service** (`launchd` on macOS, `systemd` on Linux) that starts the router on boot, and the port-forward rule. See **`gtl serve status`** and **`gtl serve uninstall`** to inspect or remove.
+
+**Safari on macOS** does not treat `*.localhost` like Chrome or Firefox. After you have routes, run **`gtl serve hosts sync`** (asks for `sudo`) to add a managed block to `/etc/hosts`, or use another browser. On Linux, `*.localhost` usually resolves without this.
+
+### 3. Per repository — `gtl init` and worktrees
+
+With the CLI on your `PATH`, go to your app repo and follow **[Quick start](#quick-start)** below (`gtl init` → `gtl new` / `gtl setup`). On macOS/Linux, complete **step 2** before **`gtl new` / `gtl setup`** (or run `gtl init` first—order between init and `serve install` is flexible as long as the CA exists before allocation).
+
+---
+
 ## Quick start
 
 ### 1. Initialize your project
@@ -529,6 +563,9 @@ Controls allocation policy for your machine. Created automatically by `gtl init`
       "gtl": { "domain": "myteam.dev" }
     }
   },
+  "worktree": {
+    "path": ".worktrees/{branch}"
+  },
   "editor": {
     "name": "cursor",
     "themes": { "salt": "Monokai" },
@@ -536,6 +573,18 @@ Controls allocation policy for your machine. Created automatically by `gtl init`
   }
 }
 ```
+
+**Worktree path:** `worktree.path` controls where `gtl new` and `gtl review` create worktrees. Supports `{project}` and `{branch}` interpolation. Relative paths resolve from the repo root. If the resulting path is inside the repo, Treeline automatically ensures the directory is in `.gitignore`.
+
+```json
+{
+  "worktree": {
+    "path": ".worktrees/{branch}"
+  }
+}
+```
+
+Without this setting, worktrees are created as siblings of the repo (e.g. `../myapp-feature-x`).
 
 **Router config:** `router.port` sets the port the subdomain router listens on (default 3001). Port 443 is forwarded here by `gtl serve install`.
 

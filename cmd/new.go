@@ -54,16 +54,24 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		}
 		mainRepo := worktree.DetectMainRepo(cwd)
 		pc := config.LoadProjectConfig(mainRepo)
+		uc := config.LoadUserConfig("")
 		projectName := pc.Project()
 
 		wtPath := newPath
 		if wtPath == "" {
+			wtPath = uc.ResolveWorktreePath(mainRepo, projectName, branch)
+		}
+		if wtPath == "" {
 			wtPath = filepath.Join(filepath.Dir(mainRepo), fmt.Sprintf("%s-%s", projectName, branch))
+		}
+
+		if err := ensureGitignored(mainRepo, wtPath); err != nil {
+			return err
 		}
 
 		// Check if this branch is already checked out in another worktree
 		if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
-			return fmt.Errorf("branch '%s' is already checked out at %s\nUse 'gtl setup %s' to re-run setup on it", branch, existingWT, existingWT)
+			return errBranchAlreadyCheckedOut(branch, existingWT)
 		}
 
 		existing := worktree.BranchExists(branch)
@@ -109,12 +117,11 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		fmt.Println(style.Actionf("Worktree created at %s", wtPath))
 		fmt.Println(style.Actionf("Running setup..."))
 
-		uc := config.LoadUserConfig("")
 		s := setup.New(wtPath, mainRepo, uc)
 		s.Options.DryRun = false
 		alloc, err := s.Run()
 		if err != nil {
-			return fmt.Errorf("setup failed: %w", err)
+			return errSetupFailed(err)
 		}
 
 		printRouterAndTunnel(uc, projectName, alloc.Branch)
@@ -147,13 +154,12 @@ func worktreeGuard(cmd *cobra.Command, args []string) error {
 	resolvedAbs, _ := filepath.EvalSymlinks(absPath)
 	resolvedMain, _ := filepath.EvalSymlinks(mainRepo)
 	if resolvedAbs != resolvedMain {
-		return fmt.Errorf("you're inside worktree '%s', not the main repo.\n\n"+
-			"  To switch this worktree to a different branch:\n"+
-			"    gtl switch <branch-or-PR#>\n\n"+
-			"  To create a new worktree, run from the main repo:\n"+
-			"    cd %s\n"+
-			"    gtl %s %s",
-			filepath.Base(absPath), mainRepo, cmd.Name(), strings.Join(args, " "))
+		return &CliError{
+			Message: fmt.Sprintf("You're inside worktree '%s', not the main repo.", filepath.Base(absPath)),
+			Hint: fmt.Sprintf("To switch this worktree: gtl switch <branch-or-PR#>\n"+
+				"  To create from main repo:  cd %s && gtl %s %s",
+				mainRepo, cmd.Name(), strings.Join(args, " ")),
+		}
 	}
 	return nil
 }

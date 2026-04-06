@@ -75,7 +75,10 @@ Requires sudo for two things (explained before each prompt):
 After install, access worktrees at https://{project}-{branch}.localhost`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-			return fmt.Errorf("gtl serve requires macOS or Linux (detected %s)", runtime.GOOS)
+			return &CliError{
+				Message: fmt.Sprintf("gtl serve requires macOS or Linux (detected %s).", runtime.GOOS),
+				Hint:    "Windows support via WSL2 is planned.",
+			}
 		}
 
 		gtlPath, err := os.Executable()
@@ -302,7 +305,10 @@ Aliases let you route non-gtl services through the router:
 
 		if len(args) == 0 {
 			if serveAliasRemove {
-				return fmt.Errorf("usage: gtl serve alias --remove <name>")
+				return &CliError{
+					Message: "Missing alias name.",
+					Hint:    "Usage: gtl serve alias --remove <name>",
+				}
 			}
 			aliases := uc.RouterAliases()
 			if len(aliases) == 0 {
@@ -320,10 +326,16 @@ Aliases let you route non-gtl services through the router:
 		if serveAliasRemove {
 			aliases, _ := config.Dig(uc.Data, "router", "aliases").(map[string]any)
 			if aliases == nil {
-				return fmt.Errorf("alias %q not found", name)
+				return &CliError{
+					Message: fmt.Sprintf("Alias %q not found.", name),
+					Hint:    "Run 'gtl serve alias' to list existing aliases.",
+				}
 			}
 			if _, exists := aliases[name]; !exists {
-				return fmt.Errorf("alias %q not found", name)
+				return &CliError{
+					Message: fmt.Sprintf("Alias %q not found.", name),
+					Hint:    "Run 'gtl serve alias' to list existing aliases.",
+				}
 			}
 			delete(aliases, name)
 			if err := uc.Save(); err != nil {
@@ -334,12 +346,15 @@ Aliases let you route non-gtl services through the router:
 		}
 
 		if len(args) < 2 {
-			return fmt.Errorf("usage: gtl serve alias <name> <port>")
+			return &CliError{
+				Message: "Missing port for alias.",
+				Hint:    "Usage: gtl serve alias <name> <port>",
+			}
 		}
 
 		port, err := strconv.Atoi(args[1])
 		if err != nil || port < 1 || port > 65535 {
-			return fmt.Errorf("invalid port: %s", args[1])
+			return errInvalidPort(args[1])
 		}
 
 		uc.Set("router.aliases."+name, float64(port))

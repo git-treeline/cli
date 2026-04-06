@@ -33,12 +33,12 @@ var portCmd = &cobra.Command{
 		reg := registry.New("")
 		entry := reg.Find(absPath)
 		if entry == nil {
-			return fmt.Errorf("no allocation found for %s — run `gtl setup` first", absPath)
+			return errNoAllocation(absPath)
 		}
 
 		ports := format.GetPorts(format.Allocation(entry))
 		if len(ports) == 0 {
-			return fmt.Errorf("allocation exists but has no ports")
+			return errNoAllocationNoPorts(absPath)
 		}
 
 		if portJSON {

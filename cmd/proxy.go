@@ -41,14 +41,20 @@ Related commands:
 	RunE: func(cmd *cobra.Command, args []string) error {
 		listenPort, err := strconv.Atoi(args[0])
 		if err != nil || listenPort < 1 || listenPort > 65535 {
-			return fmt.Errorf("invalid listen port: %s", args[0])
+			return &CliError{
+				Message: fmt.Sprintf("Invalid listen port: %s", args[0]),
+				Hint:    "Port must be a number between 1 and 65535.",
+			}
 		}
 
 		var targetPort int
 		if len(args) == 2 {
 			targetPort, err = strconv.Atoi(args[1])
 			if err != nil || targetPort < 1 || targetPort > 65535 {
-				return fmt.Errorf("invalid target port: %s", args[1])
+				return &CliError{
+					Message: fmt.Sprintf("Invalid target port: %s", args[1]),
+					Hint:    "Port must be a number between 1 and 65535.",
+				}
 			}
 		} else {
 			targetPort, err = inferTargetPort()
@@ -58,7 +64,10 @@ Related commands:
 		}
 
 		if listenPort == targetPort {
-			return fmt.Errorf("listen port and target port are the same (%d)", listenPort)
+			return &CliError{
+				Message: fmt.Sprintf("Listen port and target port are the same (%d).", listenPort),
+				Hint:    "The proxy needs different ports for listen and target.",
+			}
 		}
 
 		return proxy.Run(proxy.Options{
@@ -79,12 +88,12 @@ func inferTargetPort() (int, error) {
 	reg := registry.New("")
 	entry := reg.Find(absPath)
 	if entry == nil {
-		return 0, fmt.Errorf("no allocation found for %s\nRun `gtl setup` first", absPath)
+		return 0, errNoAllocation(absPath)
 	}
 
 	ports := format.GetPorts(format.Allocation(entry))
 	if len(ports) == 0 {
-		return 0, fmt.Errorf("allocation exists but has no ports")
+		return 0, errNoAllocationNoPorts(absPath)
 	}
 
 	return ports[0], nil

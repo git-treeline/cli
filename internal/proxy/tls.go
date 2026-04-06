@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -127,14 +128,32 @@ func caCertPath() string { return filepath.Join(certsDir(), "ca.pem") }
 // CACertPath returns the path to the CA certificate (for display to the user).
 func CACertPath() string { return caCertPath() }
 
-// EnsureCA generates a local CA if one doesn't already exist. Returns
-// the path to the CA certificate (for trusting).
+const certRenewalBuffer = 7 * 24 * time.Hour
+
+func certNeedsRegeneration(certFile string) bool {
+	data, err := os.ReadFile(certFile)
+	if err != nil {
+		return true
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return true
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return true
+	}
+	return time.Until(cert.NotAfter) < certRenewalBuffer
+}
+
+// EnsureCA generates a local CA if one doesn't exist or is expiring within 7
+// days. Returns the path to the CA certificate (for trusting).
 func EnsureCA() (string, error) {
 	if err := os.MkdirAll(certsDir(), 0o700); err != nil {
 		return "", err
 	}
 
-	if _, err := os.Stat(caCertPath()); err == nil {
+	if !certNeedsRegeneration(caCertPath()) {
 		if _, err := os.Stat(caKeyPath()); err == nil {
 			return caCertPath(), nil
 		}
@@ -227,8 +246,11 @@ func NewCertManager() (*CertManager, error) {
 	}, nil
 }
 
+const maxCachedCerts = 1000
+
 // GetCertificate is a tls.Config callback that returns a cert with an exact
-// SAN for the requested hostname.
+// SAN for the requested hostname. The cache is capped to prevent unbounded
+// growth from garbage hostnames.
 func (cm *CertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	hostname := hello.ServerName
 	if hostname == "" {
@@ -239,7 +261,10 @@ func (cm *CertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certific
 	cert, ok := cm.cache[hostname]
 	cm.mu.RUnlock()
 	if ok {
-		return cert, nil
+		leaf, _ := x509.ParseCertificate(cert.Certificate[0])
+		if leaf != nil && time.Until(leaf.NotAfter) > certRenewalBuffer {
+			return cert, nil
+		}
 	}
 
 	cert, err := cm.issueCert(hostname)
@@ -248,7 +273,9 @@ func (cm *CertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certific
 	}
 
 	cm.mu.Lock()
-	cm.cache[hostname] = cert
+	if len(cm.cache) < maxCachedCerts {
+		cm.cache[hostname] = cert
+	}
 	cm.mu.Unlock()
 	return cert, nil
 }
@@ -335,7 +362,7 @@ func CACertExpiry() (time.Time, error) {
 func trustDarwin(caCertFile string) error {
 	cmd := exec.Command("sudo", "-p",
 		"\nEnter your password (1 of 2): ",
-		"security", "add-trusted-cert",
+		"/usr/bin/security", "add-trusted-cert",
 		"-d", "-r", "trustRoot",
 		"-k", "/Library/Keychains/System.keychain",
 		caCertFile)
@@ -351,19 +378,53 @@ func untrustDarwin() error {
 	}
 	cmd := exec.Command("sudo", "-p",
 		"\nEnter your password to remove git-treeline CA: ",
-		"security", "remove-trusted-cert",
+		"/usr/bin/security", "remove-trusted-cert",
 		"-d", caCertPath())
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	_ = cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to remove CA from system keychain: %w", err)
+	}
 	return nil
 }
 
-const linuxCACopyPath = "/usr/local/share/ca-certificates/git-treeline.crt"
+type linuxTrustConfig struct {
+	certDir       string
+	updateCommand string
+}
+
+var linuxTrustConfigs = map[string]linuxTrustConfig{
+	"debian": {"/usr/local/share/ca-certificates", "update-ca-certificates"},
+	"arch":   {"/etc/ca-certificates/trust-source/anchors", "update-ca-trust"},
+	"fedora": {"/etc/pki/ca-trust/source/anchors", "update-ca-trust"},
+	"suse":   {"/etc/pki/trust/anchors", "update-ca-certificates"},
+}
+
+func detectLinuxDistro() string {
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return "debian"
+	}
+	content := strings.ToLower(string(data))
+	switch {
+	case strings.Contains(content, "arch"):
+		return "arch"
+	case strings.Contains(content, "fedora"),
+		strings.Contains(content, "rhel"),
+		strings.Contains(content, "centos"):
+		return "fedora"
+	case strings.Contains(content, "suse"):
+		return "suse"
+	default:
+		return "debian"
+	}
+}
 
 func trustLinux(caCertFile string) error {
-	script := fmt.Sprintf("cp '%s' '%s' && update-ca-certificates", caCertFile, linuxCACopyPath)
+	cfg := linuxTrustConfigs[detectLinuxDistro()]
+	script := fmt.Sprintf("/bin/mkdir -p '%s' && /bin/cp '%s' '%s' && %s",
+		cfg.certDir, caCertFile, filepath.Join(cfg.certDir, "git-treeline.crt"), cfg.updateCommand)
 	cmd := exec.Command("sudo", "-p",
 		"\nEnter your password (1 of 2): ",
 		"sh", "-c", script)
@@ -374,13 +435,17 @@ func trustLinux(caCertFile string) error {
 }
 
 func untrustLinux() error {
-	script := fmt.Sprintf("rm -f '%s' && update-ca-certificates --fresh", linuxCACopyPath)
+	cfg := linuxTrustConfigs[detectLinuxDistro()]
+	certFile := filepath.Join(cfg.certDir, "git-treeline.crt")
+	script := fmt.Sprintf("/bin/rm -f '%s' && %s", certFile, cfg.updateCommand)
 	cmd := exec.Command("sudo", "-p",
 		"\nEnter your password to remove git-treeline CA: ",
 		"sh", "-c", script)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	_ = cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to remove CA from trust store: %w", err)
+	}
 	return nil
 }

@@ -47,8 +47,7 @@ var pruneCmd = &cobra.Command{
 		}
 
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %s\n", err)
-			os.Exit(1)
+			return err
 		}
 
 		if count == 0 {

@@ -64,7 +64,7 @@ func IsPortForwardConfigured() bool {
 }
 
 func isLinuxPortForwardConfigured() bool {
-	out, err := exec.Command("iptables", "-t", "nat", "-L", "OUTPUT", "-n",
+	out, err := exec.Command("/sbin/iptables", "-t", "nat", "-L", "OUTPUT", "-n",
 		"--line-numbers").CombinedOutput()
 	if err != nil {
 		return false
@@ -113,7 +113,8 @@ func installDarwinPortForward(routerPort int) error {
 	_ = tmpPfConf.Close()
 
 	script := fmt.Sprintf(
-		"cp '%s' '%s' && mkdir -p /etc/pf.anchors && cp '%s' '%s' && cp '%s' '%s' && pfctl -ef '%s' 2>/dev/null; true",
+		"/sbin/pfctl -n -f '%s' 2>&1 || exit 1; /bin/cp '%s' '%s' && /bin/mkdir -p /etc/pf.anchors && /bin/cp '%s' '%s' && /bin/cp '%s' '%s' && /sbin/pfctl -ef '%s' 2>/dev/null; true",
+		tmpPfConf.Name(),
 		pfConfPath, pfBackupPath,
 		tmpAnchor.Name(), pfAnchorPath(),
 		tmpPfConf.Name(), pfConfPath,
@@ -140,7 +141,7 @@ func installDarwinPortForward(routerPort int) error {
 func reloadPf() error {
 	cmd := exec.Command("sudo", "-p",
 		"\nEnter your password to reload port forwarding: ",
-		"pfctl", "-ef", pfConfPath)
+		"/sbin/pfctl", "-ef", pfConfPath)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -176,7 +177,7 @@ func uninstallDarwinPortForward() error {
 	_ = tmpPfConf.Close()
 
 	script := fmt.Sprintf(
-		"cp '%s' '%s' && rm -f '%s' && pfctl -f '%s' 2>/dev/null; true",
+		"/bin/cp '%s' '%s' && /bin/rm -f '%s' && /sbin/pfctl -f '%s' 2>/dev/null; true",
 		tmpPfConf.Name(), pfConfPath,
 		pfAnchorPath(),
 		pfConfPath,
@@ -232,7 +233,7 @@ func installLinuxPortForward(routerPort int) error {
 	portStr := fmt.Sprintf("%d", routerPort)
 	cmd := exec.Command("sudo", "-p",
 		"\nEnter your password (2 of 2): ",
-		"iptables", "-t", "nat", "-A", "OUTPUT",
+		"/sbin/iptables", "-t", "nat", "-A", "OUTPUT",
 		"-p", "tcp", "-d", "127.0.0.1", "--dport", "443",
 		"-j", "REDIRECT", "--to-port", portStr,
 		"-m", "comment", "--comment", "git-treeline")
@@ -249,7 +250,7 @@ func installLinuxPortForward(routerPort int) error {
 
 func uninstallLinuxPortForward() error {
 	for {
-		out, err := exec.Command("iptables", "-t", "nat", "-L", "OUTPUT", "-n",
+		out, err := exec.Command("/sbin/iptables", "-t", "nat", "-L", "OUTPUT", "-n",
 			"--line-numbers").CombinedOutput()
 		if err != nil || !strings.Contains(string(out), "git-treeline") {
 			break
@@ -264,7 +265,7 @@ func uninstallLinuxPortForward() error {
 			}
 			_ = exec.Command("sudo", "-p",
 				"\nEnter your password to remove port forwarding: ",
-				"iptables", "-t", "nat", "-D", "OUTPUT", fields[0]).Run()
+				"/sbin/iptables", "-t", "nat", "-D", "OUTPUT", fields[0]).Run()
 			break
 		}
 	}

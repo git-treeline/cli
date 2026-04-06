@@ -203,6 +203,34 @@ func (uc *UserConfig) DeleteTunnel(name string) string {
 	return newDefault
 }
 
+// WorktreePathTemplate returns the configured worktree path template, or "".
+// The template supports {project} and {branch} interpolation and is resolved
+// relative to the main repo root. Example: ".worktrees/{branch}".
+func (uc *UserConfig) WorktreePathTemplate() string {
+	if v, ok := Dig(uc.Data, "worktree", "path").(string); ok {
+		return v
+	}
+	return ""
+}
+
+// ResolveWorktreePath applies the worktree path template. Returns "" if no
+// template is configured (caller should fall back to default behavior).
+func (uc *UserConfig) ResolveWorktreePath(mainRepo, project, branch string) string {
+	tmpl := uc.WorktreePathTemplate()
+	if tmpl == "" {
+		return ""
+	}
+	resolved := strings.NewReplacer(
+		"{project}", project,
+		"{branch}", branch,
+	).Replace(tmpl)
+
+	if filepath.IsAbs(resolved) {
+		return resolved
+	}
+	return filepath.Join(mainRepo, resolved)
+}
+
 // EditorName returns the stored editor name (e.g. "cursor", "vscode"), or empty.
 func (uc *UserConfig) EditorName() string {
 	if v, ok := Dig(uc.Data, "editor", "name").(string); ok {
@@ -290,6 +318,11 @@ func (uc *UserConfig) Init() error {
 	return os.WriteFile(uc.Path, append(data, '\n'), 0o644)
 }
 
+var userKnownKeys = map[string]bool{
+	"port": true, "redis": true, "router": true, "tunnel": true,
+	"worktree": true, "editor": true,
+}
+
 func (uc *UserConfig) load() map[string]any {
 	raw, err := os.ReadFile(uc.Path)
 	if err != nil {
@@ -300,6 +333,8 @@ func (uc *UserConfig) load() map[string]any {
 	if err := json.Unmarshal(raw, &userData); err != nil {
 		return copyMap(UserDefaults)
 	}
+
+	WarnUnknownKeys(userData, userKnownKeys, filepath.Base(uc.Path))
 
 	merged := DeepMerge(UserDefaults, userData)
 	migrateTunnelConfig(merged)

@@ -10,6 +10,47 @@ import (
 	"strings"
 )
 
+// gitRun executes a git command in dir and returns trimmed stdout.
+// On failure, the error includes the git subcommand and trimmed stderr.
+func gitRun(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		detail := strings.TrimSpace(string(out))
+		if detail != "" {
+			return "", fmt.Errorf("git %s: %s", args[0], detail)
+		}
+		return "", fmt.Errorf("git %s: %w", args[0], err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// gitOutput executes a git command in dir and returns stdout only (no stderr).
+// Returns "" and nil on failure for queries where absence is not an error.
+func gitOutput(dir string, args ...string) string {
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// gitCheck runs a git command and returns true if it exits 0.
+func gitCheck(dir string, args ...string) bool {
+	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	return cmd.Run() == nil
+}
+
 // Create adds a git worktree at path. If newBranch is true, it creates a new
 // branch from base. Otherwise it checks out an existing branch.
 func Create(path, branch string, newBranch bool, base string) error {
@@ -23,55 +64,32 @@ func Create(path, branch string, newBranch bool, base string) error {
 		args = append(args, path, branch)
 	}
 
-	cmd := exec.Command("git", args...)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git worktree add failed: %s", strings.TrimSpace(string(out)))
-	}
-	return nil
+	_, err := gitRun("", args...)
+	return err
 }
 
 // BranchExists checks whether a branch exists locally or as a remote tracking ref.
 func BranchExists(branch string) bool {
-	if localBranchExists(branch) {
-		return true
-	}
-	return remoteBranchExists(branch)
-}
-
-func localBranchExists(branch string) bool {
-	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
-	return cmd.Run() == nil
-}
-
-func remoteBranchExists(branch string) bool {
-	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/remotes/origin/"+branch)
-	return cmd.Run() == nil
+	return gitCheck("", "show-ref", "--verify", "--quiet", "refs/heads/"+branch) ||
+		gitCheck("", "show-ref", "--verify", "--quiet", "refs/remotes/origin/"+branch)
 }
 
 // Fetch fetches a branch from the given remote.
 func Fetch(remote, branch string) error {
-	cmd := exec.Command("git", "fetch", remote, branch)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git fetch %s %s failed: %s", remote, branch, strings.TrimSpace(string(out)))
-	}
-	return nil
+	_, err := gitRun("", "fetch", remote, branch)
+	return err
 }
 
 // FindWorktreeForBranch returns the path of an existing worktree that has
 // the given branch checked out, or empty string if none.
 func FindWorktreeForBranch(branch string) string {
-	cmd := exec.Command("git", "worktree", "list", "--porcelain")
-	out, err := cmd.Output()
-	if err != nil {
+	out := gitOutput("", "worktree", "list", "--porcelain")
+	if out == "" {
 		return ""
 	}
 
 	var currentPath string
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		if strings.HasPrefix(line, "worktree ") {
 			currentPath = strings.TrimPrefix(line, "worktree ")
 		}
@@ -91,17 +109,14 @@ func MergedBranches(repoPath, defaultBranchOverride string) ([]string, error) {
 	if defaultBranch == "" {
 		defaultBranch = DetectDefaultBranch(repoPath)
 	}
-	cmd := exec.Command("git", "branch", "--merged", defaultBranch)
-	cmd.Dir = repoPath
-	out, err := cmd.Output()
+	out, err := gitRun(repoPath, "branch", "--merged", defaultBranch)
 	if err != nil {
-		return nil, fmt.Errorf("git branch --merged %s: %w\n\nSet merge_target in .treeline.yml if your integration branch is not main/master", defaultBranch, err)
+		return nil, fmt.Errorf("%w\n\nSet merge_target in .treeline.yml if your integration branch is not main/master", err)
 	}
 
 	var branches []string
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		name := strings.TrimSpace(line)
-		// Strip "* " (current branch) and "+ " (checked out in another worktree)
 		name = strings.TrimPrefix(name, "* ")
 		name = strings.TrimPrefix(name, "+ ")
 		name = strings.TrimSpace(name)
@@ -116,13 +131,7 @@ func MergedBranches(repoPath, defaultBranchOverride string) ([]string, error) {
 // CurrentBranch returns the currently checked-out branch in dir.
 // Returns "" if dir is not a git repo or HEAD is detached.
 func CurrentBranch(dir string) string {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	branch := strings.TrimSpace(string(out))
+	branch := gitOutput(dir, "rev-parse", "--abbrev-ref", "HEAD")
 	if branch == "HEAD" {
 		return ""
 	}
@@ -147,13 +156,10 @@ func DetectDefaultBranch(repoPath string) string {
 }
 
 func detectBranchFromSymbolicRef(repoPath string) string {
-	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
-	cmd.Dir = repoPath
-	out, err := cmd.Output()
-	if err != nil {
+	ref := gitOutput(repoPath, "symbolic-ref", "refs/remotes/origin/HEAD")
+	if ref == "" {
 		return ""
 	}
-	ref := strings.TrimSpace(string(out))
 	parts := strings.Split(ref, "/")
 	if len(parts) > 0 {
 		return parts[len(parts)-1]
@@ -162,13 +168,11 @@ func detectBranchFromSymbolicRef(repoPath string) string {
 }
 
 func detectBranchFromRemoteShow(repoPath string) string {
-	cmd := exec.Command("git", "remote", "show", "origin")
-	cmd.Dir = repoPath
-	out, err := cmd.Output()
-	if err != nil {
+	out := gitOutput(repoPath, "remote", "show", "origin")
+	if out == "" {
 		return ""
 	}
-	return parseHeadBranch(string(out))
+	return parseHeadBranch(out)
 }
 
 func parseHeadBranch(output string) string {
@@ -186,9 +190,7 @@ func parseHeadBranch(output string) string {
 
 func detectBranchFromLocalCandidates(repoPath string) string {
 	for _, candidate := range []string{"main", "master", "develop", "trunk"} {
-		cmd := exec.Command("git", "show-ref", "--verify", "--quiet", "refs/heads/"+candidate)
-		cmd.Dir = repoPath
-		if cmd.Run() == nil {
+		if gitCheck(repoPath, "show-ref", "--verify", "--quiet", "refs/heads/"+candidate) {
 			return candidate
 		}
 	}
@@ -199,16 +201,14 @@ func detectBranchFromLocalCandidates(repoPath string) string {
 // by parsing `git worktree list --porcelain`. Paths are normalized via
 // filepath.EvalSymlinks to match the paths stored in the registry.
 func WorktreeBranches(repoPath string) map[string]string {
-	cmd := exec.Command("git", "worktree", "list", "--porcelain")
-	cmd.Dir = repoPath
-	out, err := cmd.Output()
-	if err != nil {
+	out := gitOutput(repoPath, "worktree", "list", "--porcelain")
+	if out == "" {
 		return nil
 	}
 
 	result := make(map[string]string)
 	var currentPath string
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		if strings.HasPrefix(line, "worktree ") {
 			p := strings.TrimPrefix(line, "worktree ")
 			if resolved, err := filepath.EvalSymlinks(p); err == nil {
@@ -226,26 +226,21 @@ func WorktreeBranches(repoPath string) map[string]string {
 
 // Checkout switches the current directory's worktree to a different branch.
 func Checkout(branch string) error {
-	cmd := exec.Command("git", "checkout", branch)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git checkout failed: %s", strings.TrimSpace(string(out)))
-	}
-	return nil
+	_, err := gitRun("", "checkout", branch)
+	return err
 }
 
 // ListBranches returns branch names matching the given prefix.
 // Lists both local and remote branches, deduplicating origin/ variants.
 func ListBranches(prefix string) []string {
-	cmd := exec.Command("git", "branch", "-a", "--format=%(refname:short)")
-	out, err := cmd.Output()
-	if err != nil {
+	out := gitOutput("", "branch", "-a", "--format=%(refname:short)")
+	if out == "" {
 		return nil
 	}
 
 	seen := make(map[string]bool)
 	var result []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		name := strings.TrimPrefix(line, "origin/")
 		if name == "" || name == "HEAD" || seen[name] {
 			continue
@@ -261,13 +256,11 @@ func ListBranches(prefix string) []string {
 // DetectMainRepo returns the root worktree path (the main repo) by parsing
 // `git worktree list --porcelain`. Falls back to the given path.
 func DetectMainRepo(worktreePath string) string {
-	cmd := exec.Command("git", "worktree", "list", "--porcelain")
-	cmd.Dir = worktreePath
-	out, err := cmd.Output()
-	if err != nil {
+	out := gitOutput(worktreePath, "worktree", "list", "--porcelain")
+	if out == "" {
 		return worktreePath
 	}
-	lines := strings.Split(string(out), "\n")
+	lines := strings.Split(out, "\n")
 	if len(lines) > 0 && strings.HasPrefix(lines[0], "worktree ") {
 		return strings.TrimPrefix(lines[0], "worktree ")
 	}

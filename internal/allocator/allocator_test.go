@@ -776,7 +776,7 @@ func TestReuseExisting_PortConflict(t *testing.T) {
 
 	al := New(uc, pc, reg)
 
-	ln, err := net.Listen("tcp", ":49990")
+	ln, err := net.Listen("tcp", "127.0.0.1:49990")
 	if err != nil {
 		t.Skip("cannot bind test port 49990")
 	}
@@ -791,5 +791,19 @@ func TestReuseExisting_PortConflict(t *testing.T) {
 	}
 	if alloc.Reused {
 		t.Error("expected Reused=false after port conflict")
+	}
+}
+
+func TestBrowserBlockedPorts_NotAllocated(t *testing.T) {
+	for _, port := range []int{6000, 6665, 6666, 6667} {
+		if !browserBlockedPorts[port] {
+			t.Errorf("expected port %d in blocked set", port)
+		}
+	}
+
+	for _, port := range []int{3000, 4000, 8080, 9000} {
+		if browserBlockedPorts[port] {
+			t.Errorf("port %d should not be in blocked set", port)
+		}
 	}
 }

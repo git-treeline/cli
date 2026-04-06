@@ -45,11 +45,7 @@ Must be run from inside a worktree (not the main repo).`,
 		resolvedAbs, _ := filepath.EvalSymlinks(absPath)
 		resolvedMain, _ := filepath.EvalSymlinks(mainRepo)
 		if resolvedAbs == resolvedMain {
-			return fmt.Errorf("you're in the main repo, not a worktree.\n\n" +
-				"  To create a new worktree:\n" +
-				"    gtl new <branch>\n\n" +
-				"  To review a PR in a new worktree:\n" +
-				"    gtl review <PR#>")
+			return errNotInWorktree()
 		}
 
 		branch := target
