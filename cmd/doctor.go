@@ -257,12 +257,12 @@ func doctorServe() {
 		case "warn":
 			doctorLine(label, "⚠ "+c.Detail)
 			if c.Fix != "" {
-				fmt.Printf("    fix: %s\n", c.Fix)
+				fmt.Printf("  fix: %s\n", c.Fix)
 			}
 		case "error":
 			doctorLine(label, "✗ "+c.Detail)
 			if c.Fix != "" {
-				fmt.Printf("    fix: %s\n", c.Fix)
+				fmt.Printf("  fix: %s\n", c.Fix)
 			}
 		}
 	}
@@ -273,7 +273,7 @@ func doctorServe() {
 			doctorLine("CA cert", "⚠ could not read: "+err.Error())
 		} else if time.Now().After(expiry) {
 			doctorLine("CA cert", "✗ expired on "+expiry.Format("2006-01-02"))
-			fmt.Println("    fix: gtl serve uninstall && gtl serve install")
+			fmt.Println("  fix: gtl serve uninstall && gtl serve install")
 		} else {
 			doctorLine("CA cert", "ok (expires "+expiry.Format("2006-01-02")+")")
 		}
@@ -292,13 +292,13 @@ func doctorDiagnostics(det *detect.Result) {
 	for _, d := range diags {
 		prefix := "  "
 		if d.Level == "warn" {
-			prefix = "  ! "
+			prefix = "  Warning: "
 		}
 		for i, line := range strings.Split(d.Message, "\n") {
 			if i == 0 {
 				fmt.Printf("%s%s\n", prefix, line)
 			} else {
-				fmt.Printf("    %s\n", line)
+				fmt.Printf("  %s\n", line)
 			}
 		}
 	}

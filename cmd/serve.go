@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
 
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/proxy"
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/git-treeline/git-treeline/internal/service"
+	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/spf13/cobra"
 )
 
@@ -67,38 +69,30 @@ After install, access worktrees at https://{project}-{branch}.localhost`,
 			return fmt.Errorf("CA generation failed: %w", err)
 		}
 
-		fmt.Println("gtl serve is a local HTTPS router that gives every worktree a URL:")
-		fmt.Println("  https://{project}-{branch}.localhost")
-		fmt.Println()
-		fmt.Println("It runs as a background service, routes traffic by subdomain,")
-		fmt.Println("and generates trusted HTTPS certificates automatically.")
-		fmt.Println()
-		fmt.Println("To set this up, your system password will be needed twice:")
-		fmt.Println("  1. To trust a certificate authority so browsers accept *.localhost")
-		fmt.Printf("  2. To forward port 443 → %d so URLs don't need a port number\n", port)
+		fmt.Println("System password needed for:")
+		fmt.Println("  1. Trusting the CA (browsers accept *.localhost)")
+		fmt.Printf("  2. Port forwarding (443 → %d)\n", port)
 		fmt.Println()
 
 		if err := proxy.TrustCA(caCertFile); err != nil {
-			fmt.Fprintf(os.Stderr, "  CA trust failed: %v\n", err)
-			fmt.Fprintln(os.Stderr, "  HTTPS will work but browsers will show a certificate warning.")
+			fmt.Fprintln(os.Stderr, style.Warnf("CA trust failed: %v", err))
+			fmt.Fprintln(os.Stderr, style.Dimf("  HTTPS will work but browsers will show a certificate warning."))
 		}
 
 		if err := service.InstallPortForward(port); err != nil {
-			fmt.Fprintf(os.Stderr, "  Port forwarding skipped: %v\n", err)
-			fmt.Fprintf(os.Stderr, "  Worktrees will be accessible at https://{branch}.localhost:%d\n\n", port)
+			fmt.Fprintln(os.Stderr, style.Warnf("port forwarding skipped: %v", err))
+			fmt.Fprintln(os.Stderr, style.Dimf("  URLs will require a port number: https://{branch}.localhost:%d", port))
+			fmt.Println()
 		}
 
-		svcPath, err := service.Install(gtlPath, port)
-		if err != nil {
+		if _, err := service.Install(gtlPath, port); err != nil {
 			return err
 		}
+
 		fmt.Println()
-		fmt.Println("All set! Router is running in the background.")
-		fmt.Printf("  Service: %s\n", svcPath)
-		fmt.Println("  Status:  gtl serve status")
-		fmt.Println()
-		fmt.Println("Your worktrees are now at:")
-		fmt.Println("  https://{project}-{branch}.localhost")
+		fmt.Println(style.Actionf("Router running."))
+		fmt.Printf("  Status: %s\n", style.Cmd("gtl serve status"))
+		fmt.Printf("  URL:    %s\n", style.Link("https://{project}-{branch}.localhost"))
 		return nil
 	},
 }
@@ -114,14 +108,14 @@ var serveUninstallCmd = &cobra.Command{
 
 		if service.IsPortForwardConfigured() {
 			if err := service.UninstallPortForward(); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: could not remove port forwarding: %v\n", err)
+				fmt.Fprintln(os.Stderr, style.Warnf("could not remove port forwarding: %v", err))
 			} else {
 				fmt.Println("Port forwarding removed.")
 			}
 		}
 
 		if err := proxy.UntrustCA(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not remove CA trust: %v\n", err)
+			fmt.Fprintln(os.Stderr, style.Warnf("could not remove CA trust: %v", err))
 		} else {
 			fmt.Println("CA trust removed.")
 		}
@@ -210,10 +204,6 @@ func sortedRouteKeys(m map[string]int) []string {
 	for k := range m {
 		keys = append(keys, k)
 	}
-	for i := 1; i < len(keys); i++ {
-		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
-			keys[j], keys[j-1] = keys[j-1], keys[j]
-		}
-	}
+	sort.Strings(keys)
 	return keys
 }

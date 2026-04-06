@@ -9,8 +9,8 @@ import (
 
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/proxy"
-	"github.com/git-treeline/git-treeline/internal/service"
 	"github.com/git-treeline/git-treeline/internal/setup"
+	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
 )
@@ -33,7 +33,7 @@ var newCmd = &cobra.Command{
 	Use:   "new <branch>",
 	Short: "Create a worktree, allocate resources, and run setup",
 	Long: `Create a new git worktree for the given branch, allocate ports/databases/Redis,
-and run setup commands. Combines 'git worktree add' with 'git-treeline setup' in one step.
+and run setup commands. Combines 'git worktree add' with 'gtl setup' in one step.
 
 If the branch already exists locally or on origin, it is checked out.
 Otherwise a new branch is created from --base (or the current branch).`,
@@ -41,6 +41,10 @@ Otherwise a new branch is created from --base (or the current branch).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := worktreeGuard(cmd, args); err != nil {
 			return err
+		}
+
+		if !proxy.IsCAInstalled() && os.Getenv("GTL_HEADLESS") == "" {
+			return errServeNotInstalled
 		}
 
 		branch := args[0]
@@ -60,7 +64,7 @@ Otherwise a new branch is created from --base (or the current branch).`,
 
 		// Check if this branch is already checked out in another worktree
 		if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
-			return fmt.Errorf("branch '%s' is already checked out at %s\nUse 'git-treeline setup %s' to re-run setup on it", branch, existingWT, existingWT)
+			return fmt.Errorf("branch '%s' is already checked out at %s\nUse 'gtl setup %s' to re-run setup on it", branch, existingWT, existingWT)
 		}
 
 		existing := worktree.BranchExists(branch)
@@ -76,7 +80,7 @@ Otherwise a new branch is created from --base (or the current branch).`,
 				fmt.Printf("[dry-run] Would create new branch '%s' from %s\n", branch, base)
 			}
 			fmt.Printf("[dry-run] Worktree path: %s\n", wtPath)
-			fmt.Println("[dry-run] Would run: git-treeline setup")
+			fmt.Println("[dry-run] Would run: gtl setup")
 			if newStart && pc.StartCommand() != "" {
 				fmt.Printf("[dry-run] Would run: %s\n", pc.StartCommand())
 			}
@@ -85,7 +89,7 @@ Otherwise a new branch is created from --base (or the current branch).`,
 
 		if existing {
 			_ = worktree.Fetch("origin", branch) // non-fatal: branch may only exist locally
-			fmt.Printf("==> Checking out existing branch '%s'\n", branch)
+			fmt.Println(style.Actionf("Checking out existing branch '%s'", branch))
 			if err := worktree.Create(wtPath, branch, false, ""); err != nil {
 				return err
 			}
@@ -94,14 +98,14 @@ Otherwise a new branch is created from --base (or the current branch).`,
 			if base == "" {
 				base = currentBranch()
 			}
-			fmt.Printf("==> Creating branch '%s' from '%s'\n", branch, base)
+			fmt.Println(style.Actionf("Creating branch '%s' from '%s'", branch, base))
 			if err := worktree.Create(wtPath, branch, true, base); err != nil {
 				return err
 			}
 		}
 
-		fmt.Printf("==> Worktree created at %s\n", wtPath)
-		fmt.Println("==> Running setup...")
+		fmt.Println(style.Actionf("Worktree created at %s", wtPath))
+		fmt.Println(style.Actionf("Running setup..."))
 
 		uc := config.LoadUserConfig("")
 		s := setup.New(wtPath, mainRepo, uc)
@@ -111,27 +115,15 @@ Otherwise a new branch is created from --base (or the current branch).`,
 			return fmt.Errorf("setup failed: %w", err)
 		}
 
-		if service.IsRunning() {
-			routeKey := proxy.RouteKey(projectName, alloc.Branch)
-			if service.IsPortForwardConfigured() {
-				fmt.Printf("==> Router: https://%s.localhost\n", routeKey)
-			} else {
-				port := uc.RouterPort()
-				fmt.Printf("==> Router: https://%s.localhost:%d\n", routeKey, port)
-			}
-		}
-		if domain := uc.TunnelDomain(""); domain != "" {
-			routeKey := proxy.RouteKey(projectName, alloc.Branch)
-			fmt.Printf("==> Tunnel: gtl tunnel → https://%s.%s\n", routeKey, domain)
-		}
+		printRouterAndTunnel(uc, projectName, alloc.Branch)
 
 		if newStart {
 			startCmd := pc.StartCommand()
 			if startCmd == "" {
-				fmt.Println("Warning: --start passed but no commands.start configured in .treeline.yml")
+				fmt.Println(style.Warnf("--start passed but no commands.start configured in .treeline.yml"))
 				return nil
 			}
-			fmt.Printf("==> Starting: %s\n", startCmd)
+			fmt.Println(style.Actionf("Starting: %s", startCmd))
 			return execInWorktree(wtPath, startCmd)
 		}
 
@@ -145,7 +137,7 @@ func currentBranch() string {
 	if err != nil {
 		return "main"
 	}
-	return string(out[:len(out)-1]) // trim trailing newline
+	return strings.TrimSpace(string(out))
 }
 
 // worktreeGuard returns an error if the cwd is inside a worktree rather than

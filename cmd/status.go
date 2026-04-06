@@ -202,7 +202,7 @@ func renderStatus() error {
 			if links, ok := a["links"].(map[string]any); ok && len(links) > 0 {
 				for proj, branch := range links {
 					if b, ok := branch.(string); ok {
-						fmt.Printf("    → %s linked to %s\n", proj, b)
+						fmt.Printf("  → %s linked to %s\n", proj, b)
 					}
 				}
 			}

@@ -47,17 +47,17 @@ func diagnoseEnvLoading(det *detect.Result) []Diagnostic {
 		case "node":
 			diags = append(diags, Diagnostic{
 				Level:   "warn",
-				Message: "No dotenv library detected. Treeline writes .env but your app won't read it without dotenv.\n  npm install dotenv\n  Then add: require('dotenv').config() to your entry point.",
+				Message: "no dotenv library detected.\n  Treeline writes .env but your app won't load it.\n  npm install dotenv",
 			})
 		case "django", "python":
 			diags = append(diags, Diagnostic{
 				Level:   "warn",
-				Message: "No python-dotenv or django-environ detected. Treeline writes .env but your app won't read it.\n  pip install python-dotenv\n  Then load it in manage.py or settings.py.",
+				Message: "no python-dotenv detected.\n  Treeline writes .env but your app won't load it.\n  pip install python-dotenv",
 			})
 		case "go", "rust":
 			diags = append(diags, Diagnostic{
 				Level: "info",
-				Message: fmt.Sprintf("Treeline will write %s but %s apps don't typically auto-load env files.\n  Source it in your start command: set -a && . %s && set +a && your-command",
+				Message: fmt.Sprintf("Treeline will write %s but %s apps don't typically auto-load env files.\n  Source it: set -a && . %s && set +a && your-command",
 					target, det.Framework, target),
 			})
 		}

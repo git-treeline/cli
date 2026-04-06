@@ -20,6 +20,7 @@ import (
 	"github.com/git-treeline/git-treeline/internal/interpolation"
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/git-treeline/git-treeline/internal/resolve"
+	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 )
 
@@ -105,11 +106,6 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	} else {
 		s.log("Allocating port %d for '%s'", alloc.Port, worktreeName)
 	}
-	if alloc.Database != "" {
-		s.log("Database: %s", alloc.Database)
-	}
-	s.log("Redis: %s", redisURL)
-
 	if !alloc.Reused {
 		if err := s.Registry.Allocate(alloc.ToRegistryEntry()); err != nil {
 			return nil, fmt.Errorf("registering allocation: %w", err)
@@ -124,19 +120,19 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 		return nil, err
 	}
 
-	s.log("")
-	s.log("Done! Worktree '%s' ready:", worktreeName)
+	_, _ = fmt.Fprintln(s.Log)
+	_, _ = fmt.Fprintln(s.Log, style.Successf("Done!")+" Worktree '"+worktreeName+"' ready:")
 	if len(alloc.Ports) > 1 {
-		s.log("  Ports:    %s", format.JoinInts(alloc.Ports, ", "))
+		_, _ = fmt.Fprintln(s.Log, style.Dimf("  Ports:    %s", format.JoinInts(alloc.Ports, ", ")))
 	} else {
-		s.log("  Port:     %d", alloc.Port)
+		_, _ = fmt.Fprintln(s.Log, style.Dimf("  Port:     %d", alloc.Port))
 	}
 	if alloc.Database != "" {
-		s.log("  Database: %s", alloc.Database)
+		_, _ = fmt.Fprintln(s.Log, style.Dimf("  Database: %s", alloc.Database))
 	}
-	s.log("  Redis:    %s", redisURL)
-	s.log("  URL:      http://localhost:%d", alloc.Port)
-	s.log("  Dir:      %s", s.WorktreePath)
+	_, _ = fmt.Fprintln(s.Log, style.Dimf("  Redis:    %s", redisURL))
+	_, _ = fmt.Fprintln(s.Log, style.Dimf("  URL:      http://localhost:%d", alloc.Port))
+	_, _ = fmt.Fprintln(s.Log, style.Dimf("  Dir:      %s", s.WorktreePath))
 
 	return alloc, nil
 }
@@ -175,7 +171,7 @@ func (s *Setup) runPostAllocation(alloc *allocator.Allocation, redisURL string) 
 	s.configureEditor(alloc)
 
 	if err := s.runHooks("post_setup"); err != nil {
-		s.log("Warning: post_setup hook failed: %s", err)
+		s.warn("post_setup hook failed: %s", err)
 	}
 
 	return nil
@@ -191,21 +187,21 @@ func (s *Setup) printDryRun(alloc *allocator.Allocation, redisURL string) error 
 	}
 
 	if len(alloc.Ports) > 1 {
-		s.log("  Ports:    %s", format.JoinInts(alloc.Ports, ", "))
+		s.detail("  Ports:    %s", format.JoinInts(alloc.Ports, ", "))
 	} else {
-		s.log("  Port:     %d", alloc.Port)
+		s.detail("  Port:     %d", alloc.Port)
 	}
 	if alloc.Database != "" {
-		s.log("  Database: %s", alloc.Database)
+		s.detail("  Database: %s", alloc.Database)
 	}
-	s.log("  Redis:    %s", redisURL)
-	s.log("  Dir:      %s", s.WorktreePath)
+	s.detail("  Redis:    %s", redisURL)
+	s.detail("  Dir:      %s", s.WorktreePath)
 
 	interpMap := alloc.ToInterpolationMap()
 	envVars, _ := s.buildEnvVars(interpMap, redisURL)
-	s.log("  Env vars:")
+	s.detail("  Env vars:")
 	for k, v := range envVars {
-		s.log("    %s=%s", k, v)
+		s.detail("    %s=%s", k, v)
 	}
 
 	return nil
@@ -339,12 +335,11 @@ func (s *Setup) cloneDatabase(alloc *allocator.Allocation) error {
 		return nil
 	}
 
-	s.log("Cloning database %s -> %s", s.ProjectConfig.DatabaseTemplate(), alloc.Database)
+	s.log("Cloning database %s → %s", s.ProjectConfig.DatabaseTemplate(), alloc.Database)
 	if err := adapter.Clone(template, target); err != nil {
 		return err
 	}
 
-	s.log("Database cloned")
 	return nil
 }
 
@@ -398,7 +393,7 @@ func (s *Setup) configureEditor(alloc *allocator.Allocation) {
 	results := ConfigureEditor(s.WorktreePath, s.ProjectConfig, s.UserConfig, alloc.Port, alloc.Branch)
 	for _, r := range results {
 		if r.Err != nil {
-			_, _ = fmt.Fprintf(s.Log, "warning: %s: %v\n", r.Label, r.Err)
+			_, _ = fmt.Fprintln(s.Log, style.Warnf("%s: %v", r.Label, r.Err))
 		} else if r.Path != "" {
 			s.log("%s written to %s", r.Label, filepath.Base(r.Path))
 		}
@@ -487,5 +482,15 @@ func (s *Setup) log(format string, args ...any) {
 		_, _ = fmt.Fprintln(s.Log)
 		return
 	}
-	_, _ = fmt.Fprintf(s.Log, "==> "+format+"\n", args...)
+	_, _ = fmt.Fprintln(s.Log, style.Actionf(format, args...))
+}
+
+// detail writes a subordinate line without the ==> prefix.
+func (s *Setup) detail(format string, args ...any) {
+	_, _ = fmt.Fprintf(s.Log, format+"\n", args...)
+}
+
+// warn writes a warning line using the Warning: prefix.
+func (s *Setup) warn(format string, args ...any) {
+	_, _ = fmt.Fprintln(s.Log, style.Warnf(format, args...))
 }
