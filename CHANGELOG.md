@@ -1,6 +1,6 @@
 ## [0.36.0]
 
-- **Start hooks** — `.treeline.yml` now supports named hooks with `pre_start` and `post_stop` commands, activated via `gtl start --with <name>`. Hooks are for quick environment setup/teardown (registering aliases, seeding data, setting debug flags), not for managing long-running processes. `pre_start` hooks run before the supervisor launches and abort on failure. `post_stop` hooks run in reverse order when the supervisor exits (Ctrl+C). Hooks support `{port}` interpolation. Active hook names are persisted alongside the supervisor socket so post_stop cleanup survives the session. Hooks are not re-fired on `gtl restart` or resume — only on a fresh `gtl start`.
+- **Start hooks** — `.treeline.yml` now supports named hooks with `pre_start` and `post_stop` commands, activated via `gtl start --with <name>`. Hooks with `auto: true` run on every fresh `gtl start` without needing `--with`. Both `pre_start` and `post_stop` accept a single string or an array of strings for multi-step hooks. Hooks are for quick environment setup/teardown (registering aliases, seeding data, setting debug flags), not for managing long-running processes. `pre_start` hooks abort on failure. `post_stop` hooks run in reverse order on supervisor exit (Ctrl+C) and log errors without blocking. Hooks support `{port}` interpolation and are not re-fired on `gtl restart` or resume.
 
 ## [0.35.6]
 

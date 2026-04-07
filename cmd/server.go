@@ -349,23 +349,41 @@ func warnPortWiring(startCommand, worktreePath string) {
 
 // --- Start hooks ---
 
-// resolveStartHooks parses the --with flag and validates hook names
-// against the project config. Returns an ordered slice of (name, hook) pairs.
+// resolveStartHooks collects auto hooks (always run) plus any --with hooks.
+// Auto hooks come first; --with hooks are appended in flag order.
+// Duplicates are deduplicated (--with naming an auto hook is a no-op).
 func resolveStartHooks(pc *config.ProjectConfig, withFlag string) ([]startHookEntry, error) {
-	if withFlag == "" {
-		return nil, nil
-	}
 	allHooks := pc.StartHooks()
+
+	// Collect auto hooks
+	var result []startHookEntry
+	seen := map[string]bool{}
+	if allHooks != nil {
+		for name, h := range allHooks {
+			if h.Auto {
+				result = append(result, startHookEntry{Name: name, Hook: h})
+				seen[name] = true
+			}
+		}
+	}
+
+	if withFlag == "" {
+		if len(result) == 0 {
+			return nil, nil
+		}
+		return result, nil
+	}
+
 	if allHooks == nil {
 		return nil, &CliError{
 			Message: "No hooks defined in .treeline.yml.",
 			Hint:    "Add a hooks: block with named pre_start/post_stop entries.",
 		}
 	}
-	var result []startHookEntry
+
 	for _, name := range strings.Split(withFlag, ",") {
 		name = strings.TrimSpace(name)
-		if name == "" {
+		if name == "" || seen[name] {
 			continue
 		}
 		h, ok := allHooks[name]
@@ -380,6 +398,7 @@ func resolveStartHooks(pc *config.ProjectConfig, withFlag string) ([]startHookEn
 			}
 		}
 		result = append(result, startHookEntry{Name: name, Hook: h})
+		seen[name] = true
 	}
 	return result, nil
 }
@@ -392,19 +411,18 @@ type startHookEntry struct {
 // runPreStartHooks executes pre_start commands. Aborts on first failure.
 func runPreStartHooks(hooks []startHookEntry, port int, dir string) error {
 	for _, entry := range hooks {
-		if entry.Hook.PreStart == "" {
-			continue
-		}
-		expanded := interpolateCommand(entry.Hook.PreStart, port)
-		fmt.Printf("==> Hook [%s] pre_start: %s\n", entry.Name, expanded)
-		cmd := exec.Command("sh", "-c", expanded)
-		cmd.Dir = dir
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return &CliError{
-				Message: fmt.Sprintf("Hook %q pre_start failed: %s", entry.Name, err),
-				Hint:    "Fix the hook command or start without --with.",
+		for _, cmdStr := range entry.Hook.PreStart {
+			expanded := interpolateCommand(cmdStr, port)
+			fmt.Printf("==> Hook [%s] pre_start: %s\n", entry.Name, expanded)
+			cmd := exec.Command("sh", "-c", expanded)
+			cmd.Dir = dir
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				return &CliError{
+					Message: fmt.Sprintf("Hook %q pre_start failed: %s", entry.Name, err),
+					Hint:    "Fix the hook command or start without --with.",
+				}
 			}
 		}
 	}
@@ -425,20 +443,21 @@ func runPostStopHooks(sockPath string, pc *config.ProjectConfig, port int, dir s
 		return
 	}
 
-	// Reverse order
 	for i := len(names) - 1; i >= 0; i-- {
 		h, ok := allHooks[names[i]]
-		if !ok || h.PostStop == "" {
+		if !ok || len(h.PostStop) == 0 {
 			continue
 		}
-		expanded := interpolateCommand(h.PostStop, port)
-		fmt.Printf("==> Hook [%s] post_stop: %s\n", names[i], expanded)
-		cmd := exec.Command("sh", "-c", expanded)
-		cmd.Dir = dir
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: hook %q post_stop failed: %s\n", names[i], err)
+		for _, cmdStr := range h.PostStop {
+			expanded := interpolateCommand(cmdStr, port)
+			fmt.Printf("==> Hook [%s] post_stop: %s\n", names[i], expanded)
+			cmd := exec.Command("sh", "-c", expanded)
+			cmd.Dir = dir
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: hook %q post_stop failed: %s\n", names[i], err)
+			}
 		}
 	}
 }

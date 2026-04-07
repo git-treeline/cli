@@ -579,17 +579,20 @@ hooks:
 	if len(hooks) != 2 {
 		t.Errorf("expected 2 start hooks, got %d", len(hooks))
 	}
-	if hooks["oauth"].PreStart != "gtl serve alias salt-oauth 3000" {
-		t.Errorf("unexpected oauth pre_start: %s", hooks["oauth"].PreStart)
+	if len(hooks["oauth"].PreStart) != 1 || hooks["oauth"].PreStart[0] != "gtl serve alias salt-oauth 3000" {
+		t.Errorf("unexpected oauth pre_start: %v", hooks["oauth"].PreStart)
 	}
-	if hooks["oauth"].PostStop != "gtl serve alias --remove salt-oauth" {
-		t.Errorf("unexpected oauth post_stop: %s", hooks["oauth"].PostStop)
+	if len(hooks["oauth"].PostStop) != 1 || hooks["oauth"].PostStop[0] != "gtl serve alias --remove salt-oauth" {
+		t.Errorf("unexpected oauth post_stop: %v", hooks["oauth"].PostStop)
 	}
-	if hooks["workers"].PreStart != "bundle exec sidekiq" {
-		t.Errorf("unexpected workers pre_start: %s", hooks["workers"].PreStart)
+	if len(hooks["workers"].PreStart) != 1 || hooks["workers"].PreStart[0] != "bundle exec sidekiq" {
+		t.Errorf("unexpected workers pre_start: %v", hooks["workers"].PreStart)
 	}
-	if hooks["workers"].PostStop != "" {
-		t.Errorf("expected empty workers post_stop, got %s", hooks["workers"].PostStop)
+	if len(hooks["workers"].PostStop) != 0 {
+		t.Errorf("expected empty workers post_stop, got %v", hooks["workers"].PostStop)
+	}
+	if hooks["oauth"].Auto {
+		t.Error("expected oauth auto=false")
 	}
 
 	// Legacy array hooks should NOT appear in StartHooks
@@ -626,10 +629,10 @@ func TestStartHooks_PreStartOnly(t *testing.T) {
 	if hooks == nil {
 		t.Fatal("expected hooks")
 	}
-	if hooks["seed"].PreStart != "bin/rails db:seed" {
-		t.Errorf("unexpected: %s", hooks["seed"].PreStart)
+	if len(hooks["seed"].PreStart) != 1 || hooks["seed"].PreStart[0] != "bin/rails db:seed" {
+		t.Errorf("unexpected: %v", hooks["seed"].PreStart)
 	}
-	if hooks["seed"].PostStop != "" {
+	if len(hooks["seed"].PostStop) != 0 {
 		t.Error("expected empty post_stop")
 	}
 }
@@ -643,11 +646,78 @@ func TestStartHooks_PostStopOnly(t *testing.T) {
 	if hooks == nil {
 		t.Fatal("expected hooks")
 	}
-	if hooks["cleanup"].PreStart != "" {
+	if len(hooks["cleanup"].PreStart) != 0 {
 		t.Error("expected empty pre_start")
 	}
-	if hooks["cleanup"].PostStop != "echo done" {
-		t.Errorf("unexpected: %s", hooks["cleanup"].PostStop)
+	if len(hooks["cleanup"].PostStop) != 1 || hooks["cleanup"].PostStop[0] != "echo done" {
+		t.Errorf("unexpected: %v", hooks["cleanup"].PostStop)
+	}
+}
+
+func TestStartHooks_Auto(t *testing.T) {
+	dir := t.TempDir()
+	yml := "project: test\nhooks:\n  prepare:\n    auto: true\n    pre_start: bin/setup\n"
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+	pc := LoadProjectConfig(dir)
+	hooks := pc.StartHooks()
+	if hooks == nil {
+		t.Fatal("expected hooks")
+	}
+	if !hooks["prepare"].Auto {
+		t.Error("expected auto=true")
+	}
+}
+
+func TestStartHooks_ArrayCommands(t *testing.T) {
+	dir := t.TempDir()
+	yml := `project: test
+hooks:
+  prepare:
+    auto: true
+    pre_start:
+      - bin/setup-env
+      - bin/rails db:seed
+      - bin/compile-assets
+    post_stop:
+      - bin/cleanup
+      - echo done
+`
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+	pc := LoadProjectConfig(dir)
+	hooks := pc.StartHooks()
+	if hooks == nil {
+		t.Fatal("expected hooks")
+	}
+	if len(hooks["prepare"].PreStart) != 3 {
+		t.Errorf("expected 3 pre_start commands, got %d", len(hooks["prepare"].PreStart))
+	}
+	if hooks["prepare"].PreStart[1] != "bin/rails db:seed" {
+		t.Errorf("unexpected second command: %s", hooks["prepare"].PreStart[1])
+	}
+	if len(hooks["prepare"].PostStop) != 2 {
+		t.Errorf("expected 2 post_stop commands, got %d", len(hooks["prepare"].PostStop))
+	}
+}
+
+func TestStartHooks_MixedStringAndArray(t *testing.T) {
+	dir := t.TempDir()
+	yml := `project: test
+hooks:
+  simple:
+    pre_start: echo hello
+  multi:
+    pre_start:
+      - echo a
+      - echo b
+`
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+	pc := LoadProjectConfig(dir)
+	hooks := pc.StartHooks()
+	if len(hooks["simple"].PreStart) != 1 {
+		t.Errorf("expected 1 command for string form, got %d", len(hooks["simple"].PreStart))
+	}
+	if len(hooks["multi"].PreStart) != 2 {
+		t.Errorf("expected 2 commands for array form, got %d", len(hooks["multi"].PreStart))
 	}
 }
 

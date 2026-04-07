@@ -645,8 +645,9 @@ See [Framework examples](#framework-examples) for complete examples. Available f
 | `hooks.post_setup` | Commands run after all setup — warn on failure |
 | `hooks.pre_release` | Commands run before resource release — abort release on failure |
 | `hooks.post_release` | Commands run after resource release — warn on failure |
-| `hooks.<name>.pre_start` | Shell command run before the supervisor launches when `gtl start --with <name>` is used |
-| `hooks.<name>.post_stop` | Shell command run (in reverse order) when the supervisor exits (Ctrl+C) |
+| `hooks.<name>.auto` | `true` to run this hook on every fresh `gtl start` (default: `false`, requires `--with`) |
+| `hooks.<name>.pre_start` | Shell command(s) run before the supervisor launches — string or array of strings |
+| `hooks.<name>.post_stop` | Shell command(s) run in reverse order when the supervisor exits (Ctrl+C) — string or array |
 
 ### Interpolation tokens
 

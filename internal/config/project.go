@@ -167,16 +167,17 @@ func (pc *ProjectConfig) Hooks() map[string][]string {
 	return result
 }
 
-// StartHook defines a named hook activated via `gtl start --with <name>`.
-// Both fields are optional — a hook can define only pre_start, only
-// post_stop, or both.
+// StartHook defines a named hook activated via `gtl start --with <name>`
+// or automatically on every fresh start when Auto is true.
+// PreStart and PostStop each support a single string or an array of strings.
 type StartHook struct {
-	PreStart string
-	PostStop string
+	Auto     bool
+	PreStart []string
+	PostStop []string
 }
 
 // StartHooks returns named start-lifecycle hooks from the hooks: block.
-// Only map-valued entries with pre_start/post_stop keys are returned;
+// Only map-valued entries with pre_start/post_stop/auto keys are returned;
 // array-valued entries (pre_setup, post_setup, etc.) are ignored.
 func (pc *ProjectConfig) StartHooks() map[string]StartHook {
 	raw, ok := pc.Data["hooks"].(map[string]any)
@@ -190,13 +191,12 @@ func (pc *ProjectConfig) StartHooks() map[string]StartHook {
 			continue
 		}
 		h := StartHook{}
-		if s, ok := m["pre_start"].(string); ok {
-			h.PreStart = s
+		if b, ok := m["auto"].(bool); ok {
+			h.Auto = b
 		}
-		if s, ok := m["post_stop"].(string); ok {
-			h.PostStop = s
-		}
-		if h.PreStart != "" || h.PostStop != "" {
+		h.PreStart = parseStringOrArray(m["pre_start"])
+		h.PostStop = parseStringOrArray(m["post_stop"])
+		if len(h.PreStart) > 0 || len(h.PostStop) > 0 {
 			result[name] = h
 		}
 	}
@@ -204,6 +204,23 @@ func (pc *ProjectConfig) StartHooks() map[string]StartHook {
 		return nil
 	}
 	return result
+}
+
+// parseStringOrArray accepts a string or []any and returns a []string.
+func parseStringOrArray(v any) []string {
+	if s, ok := v.(string); ok && s != "" {
+		return []string{s}
+	}
+	if items, ok := v.([]any); ok {
+		out := make([]string, 0, len(items))
+		for _, item := range items {
+			if s, ok := item.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 func (pc *ProjectConfig) SetupCommands() []string {
