@@ -1,0 +1,31 @@
+---
+description: Semantic versioning rules for tagging releases
+alwaysApply: true
+---
+
+# Versioning
+
+This project follows **semver** (`MAJOR.MINOR.PATCH`) strictly, even pre-1.0.
+
+## Bump rules
+
+| Change type | Bump | Example |
+|---|---|---|
+| Breaking API/CLI/config change | **Major** | Removing a command, renaming a flag, changing config schema in a non-backwards-compatible way |
+| New feature, new CLI command/flag, new config token, new user-visible behavior | **Minor** | Adding `{router_domain}`, adding `X-Forwarded-Proto`, adding version tracking |
+| Bug fix, internal refactor, docs-only, test-only | **Patch** | Fixing pfctl anchor ordering, fixing a typo in output |
+
+When in doubt: if a user would need to read the changelog to understand new capabilities, it's a minor bump.
+
+## Release workflow
+
+1. Read and run `.cursor/rules/pre-release-review.mdc` against all changed files since the last tag.
+2. Update `CHANGELOG.md` under a new `## [x.y.z]` heading.
+3. Commit, then `git tag vx.y.z`.
+4. Push with `--tags` — the Release workflow handles the rest.
+
+## Batching
+
+Multiple changes can ship in one release. The highest-severity bump wins:
+- 2 bug fixes + 1 new feature = **minor** bump (not patch).
+- 1 breaking change + 3 features = **major** bump.
