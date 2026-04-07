@@ -230,9 +230,9 @@ func warnStaleCommand(w io.Writer, running, configured string) {
 	if running == configured {
 		return
 	}
-	fmt.Fprintln(w, style.Warnf("Note: commands.start has changed in .treeline.yml."))
-	fmt.Fprintln(w, style.Dimf("  The supervisor is still using the original command."))
-	fmt.Fprintln(w, style.Dimf("  To apply: Ctrl+C the supervisor, then run 'gtl start'."))
+	_, _ = fmt.Fprintln(w, style.Warnf("Note: commands.start has changed in .treeline.yml."))
+	_, _ = fmt.Fprintln(w, style.Dimf("  The supervisor is still using the original command."))
+	_, _ = fmt.Fprintln(w, style.Dimf("  To apply: Ctrl+C the supervisor, then run 'gtl start'."))
 }
 
 // resolveEnvVars looks up the worktree's allocation from the registry and
