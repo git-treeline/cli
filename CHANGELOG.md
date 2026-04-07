@@ -1,6 +1,6 @@
 ## [0.35.2]
 
-- **`{router_url}` env token** — the `env:` block in `.treeline.yml` now supports `{router_url}`, which resolves to the full HTTPS router URL (e.g. `https://salt-feature.prt.dev`). Previously this token only worked in `editor.title`.
+- **`{router_url}` and `{router_domain}` env tokens** — the `env:` block in `.treeline.yml` now supports `{router_url}` (e.g. `https://salt-feature.prt.dev`) and `{router_domain}` (e.g. `prt.dev`). Use `{router_domain}` for composable values like Rails `config.hosts << ".{router_domain}"` or cookie domains. Use `localhost:{port}` for your app's canonical host — see README for guidance.
 
 ## [0.35.1]
 

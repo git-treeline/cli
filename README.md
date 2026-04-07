@@ -515,7 +515,7 @@ env:
   DATABASE_NAME: "{database}"
   REDIS_URL: "{redis_url}"
   ESBUILD_PORT: "{port_2}"
-  APPLICATION_HOST: "{router_url}"
+  APPLICATION_HOST: "localhost:{port}"
 
 commands:
   setup:
@@ -659,9 +659,12 @@ Available in `env` values:
 | `{redis_prefix}` | Redis key prefix (if using prefixed strategy) |
 | `{project}` | Project name |
 | `{worktree}` | Worktree name |
-| `{router_url}` | HTTPS router URL (e.g. `https://salt-feature.prt.dev`) |
+| `{router_url}` | HTTPS router URL (e.g. `https://salt-feature.prt.dev`) — see note below |
+| `{router_domain}` | Router base domain (e.g. `prt.dev` or `localhost`) |
 | `{resolve:project}` | URL of another project's allocation (same-branch default, checks link overrides) |
 | `{resolve:project/branch}` | URL of another project's allocation on a specific branch |
+
+> **`{router_url}` vs `localhost:{port}` for your app's host:** Use `localhost:{port}` for your application's canonical host (e.g. `APPLICATION_HOST`, `APP_URL`). It works whether or not `gtl serve` is running and has zero external dependencies. Reserve `{router_url}` for values that specifically need the HTTPS router domain — CORS allowed origins, CSP directives, or cross-service display links.
 
 ## Database cloning (optional)
 

@@ -576,21 +576,25 @@ env:
 	}
 }
 
-func TestInjectRouterURL(t *testing.T) {
+func TestInjectRouterTokens(t *testing.T) {
 	alloc := interpolation.Allocation{"port": float64(3010)}
-	InjectRouterURL(alloc, "salt", "feature", "prt.dev")
-	got, _ := alloc["router_url"].(string)
-	if got != "https://salt-feature.prt.dev" {
-		t.Errorf("expected https://salt-feature.prt.dev, got %q", got)
+	InjectRouterTokens(alloc, "salt", "feature", "prt.dev")
+	if got := alloc["router_url"].(string); got != "https://salt-feature.prt.dev" {
+		t.Errorf("router_url: expected https://salt-feature.prt.dev, got %q", got)
+	}
+	if got := alloc["router_domain"].(string); got != "prt.dev" {
+		t.Errorf("router_domain: expected prt.dev, got %q", got)
 	}
 }
 
-func TestInjectRouterURL_EmptyBranch(t *testing.T) {
+func TestInjectRouterTokens_EmptyBranch(t *testing.T) {
 	alloc := interpolation.Allocation{"port": float64(3010)}
-	InjectRouterURL(alloc, "salt", "", "localhost")
-	got, _ := alloc["router_url"].(string)
-	if got != "https://salt.localhost" {
-		t.Errorf("expected https://salt.localhost, got %q", got)
+	InjectRouterTokens(alloc, "salt", "", "localhost")
+	if got := alloc["router_url"].(string); got != "https://salt.localhost" {
+		t.Errorf("router_url: expected https://salt.localhost, got %q", got)
+	}
+	if got := alloc["router_domain"].(string); got != "localhost" {
+		t.Errorf("router_domain: expected localhost, got %q", got)
 	}
 }
 

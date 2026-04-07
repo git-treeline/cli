@@ -145,6 +145,17 @@ func TestInterpolate_RouterURL(t *testing.T) {
 	}
 }
 
+func TestInterpolate_RouterDomain(t *testing.T) {
+	alloc := Allocation{
+		"port":          float64(3010),
+		"router_domain": "prt.dev",
+	}
+	result := Interpolate(".{router_domain}", alloc, "", "salt")
+	if result != ".prt.dev" {
+		t.Errorf("expected .prt.dev, got %s", result)
+	}
+}
+
 func TestInterpolate_RouterURL_Missing(t *testing.T) {
 	alloc := Allocation{"port": float64(3010)}
 	result := Interpolate("{router_url}", alloc, "", "salt")
