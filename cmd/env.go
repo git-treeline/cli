@@ -13,7 +13,6 @@ import (
 
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/registry"
-	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
 )
 
@@ -38,8 +37,8 @@ var envCmd = &cobra.Command{
 			return err
 		}
 		absPath, _ := filepath.Abs(cwd)
-		mainRepo := worktree.DetectMainRepo(absPath)
-		pc := config.LoadProjectConfig(mainRepo)
+		// Load from worktree (not mainRepo) so branch-specific config is respected
+		pc := config.LoadProjectConfig(absPath)
 
 		if envTemplate {
 			tmpl := pc.EnvTemplate()

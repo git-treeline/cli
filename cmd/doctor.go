@@ -17,7 +17,6 @@ import (
 	"github.com/git-treeline/git-treeline/internal/service"
 	"github.com/git-treeline/git-treeline/internal/supervisor"
 	"github.com/git-treeline/git-treeline/internal/templates"
-	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
 )
 
@@ -37,9 +36,9 @@ var doctorCmd = &cobra.Command{
 			return err
 		}
 		absPath, _ := filepath.Abs(cwd)
-		mainRepo := worktree.DetectMainRepo(absPath)
 		det := detect.Detect(absPath)
-		pc := config.LoadProjectConfig(mainRepo)
+		// Load from worktree (not mainRepo) so branch-specific config is respected
+		pc := config.LoadProjectConfig(absPath)
 
 		if doctorJSON {
 			return doctorJSONOutput(pc, det, absPath)

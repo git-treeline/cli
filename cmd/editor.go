@@ -28,9 +28,9 @@ var editorRefreshCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cwd, _ := os.Getwd()
 		absPath, _ := filepath.Abs(cwd)
-		mainRepo := worktree.DetectMainRepo(absPath)
 
-		pc := config.LoadProjectConfig(mainRepo)
+		// Load from worktree (not mainRepo) so branch-specific config is respected
+		pc := config.LoadProjectConfig(absPath)
 		if pc.Project() == "" {
 			return errNoProjectConfig()
 		}

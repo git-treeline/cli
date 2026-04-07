@@ -48,8 +48,8 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 			return err
 		}
 		absPath, _ := filepath.Abs(cwd)
-		mainRepo := worktree.DetectMainRepo(absPath)
-		pc := config.LoadProjectConfig(mainRepo)
+		// Load from worktree (not mainRepo) so branch-specific config is respected
+		pc := config.LoadProjectConfig(absPath)
 
 		startCommand := pc.StartCommand()
 		if startCommand == "" {

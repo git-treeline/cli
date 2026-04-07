@@ -1,3 +1,7 @@
+## [Unreleased]
+
+- **Branch-specific config loading** — `gtl start`, `gtl doctor`, `gtl env`, and `gtl editor refresh` now load `.treeline.yml` from the worktree instead of the main repo. This means branch-specific config overrides (e.g., different `commands.start` per branch) work correctly. Commands that provision worktrees (`gtl new`, `gtl review`, `gtl clone`) still use the main repo config as the canonical source.
+
 ## [0.33.0]
 
 - **`gtl worktrees`** — interactive TUI picker for worktrees, grouped by project. Arrow keys to navigate, Enter to print path. Alias: `gtl wt`.

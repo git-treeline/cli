@@ -264,8 +264,8 @@ func BuildEnvVarsWithResolver(pc *config.ProjectConfig, alloc interpolation.Allo
 // immediately apply link changes without running full setup.
 func RegenerateEnvFile(worktreePath string, uc *config.UserConfig) error {
 	absPath, _ := filepath.Abs(worktreePath)
-	mainRepo := worktree.DetectMainRepo(absPath)
-	pc := config.LoadProjectConfig(mainRepo)
+	// Load from worktree (not mainRepo) so branch-specific config is respected
+	pc := config.LoadProjectConfig(absPath)
 	reg := registry.New("")
 
 	allocMap := reg.Find(absPath)
