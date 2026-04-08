@@ -86,23 +86,36 @@ func TestFindCredentialsFile_NoFallbackScan(t *testing.T) {
 	}
 }
 
-func TestFilterLine_Errors(t *testing.T) {
+func TestFilterLine_OutputRouting(t *testing.T) {
 	cases := []struct {
-		line    string
-		printed bool
+		line       string
+		wantStdout bool
+		wantStderr bool
 	}{
-		{"2024 ERR failed to connect", true},
-		{"2024 WRN retrying in 5s", true},
-		{"2024 INF Registered tunnel connection", true},
-		{"2024 INF Starting tunnel", false},
-		{"GET /api/health 200 12ms", true},
-		{"POST /webhook 201 5ms", true},
-		{"some other log line", false},
-		{"connection failed to establish", true},
-		{"error: dial tcp", true},
+		{"2024 ERR failed to connect", false, true},
+		{"2024 WRN retrying in 5s", false, true},
+		{"2024 INF Registered tunnel connection", true, false},
+		{"2024 INF Starting tunnel", false, false},
+		{"GET /api/health 200 12ms", true, false},
+		{"POST /webhook 201 5ms", true, false},
+		{"some other log line", false, false},
+		{"connection failed to establish", false, true},
+		{"error: dial tcp", false, true},
 	}
 	for _, tc := range cases {
-		FilterLine(tc.line)
+		t.Run(tc.line, func(t *testing.T) {
+			var stdout, stderr strings.Builder
+			filterLineTo(&stdout, &stderr, tc.line)
+
+			gotStdout := stdout.Len() > 0
+			gotStderr := stderr.Len() > 0
+			if gotStdout != tc.wantStdout {
+				t.Errorf("stdout: got output=%v, want %v (content: %q)", gotStdout, tc.wantStdout, stdout.String())
+			}
+			if gotStderr != tc.wantStderr {
+				t.Errorf("stderr: got output=%v, want %v (content: %q)", gotStderr, tc.wantStderr, stderr.String())
+			}
+		})
 	}
 }
 
@@ -268,7 +281,10 @@ func TestLoginForDomain_Success_WithPriorCert(t *testing.T) {
 
 	// Domain cert should have the new content
 	domainCert := filepath.Join(cfDir, "cert-example.com.pem")
-	data, _ := os.ReadFile(domainCert)
+	data, err := os.ReadFile(domainCert)
+	if err != nil {
+		t.Fatalf("reading domain cert: %v", err)
+	}
 	if string(data) != "new-domain-cert" {
 		t.Errorf("domain cert = %q, want %q", string(data), "new-domain-cert")
 	}

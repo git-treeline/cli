@@ -122,17 +122,20 @@ var requestMethodRe = regexp.MustCompile(`\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTI
 // FilterLine writes a single cloudflared log line to stdout/stderr if it
 // looks like an error, warning, or HTTP request.
 func FilterLine(line string) {
+	filterLineTo(os.Stdout, os.Stderr, line)
+}
+
+func filterLineTo(stdout, stderr io.Writer, line string) {
 	switch {
 	case strings.Contains(line, "ERR"),
 		strings.Contains(line, "WRN"),
 		strings.Contains(line, "failed"),
 		strings.Contains(line, "error"):
-		fmt.Fprintln(os.Stderr, line)
+		fmt.Fprintln(stderr, line)
 	case requestMethodRe.MatchString(line):
-		fmt.Println(line)
+		fmt.Fprintln(stdout, line)
 	case strings.Contains(line, "INF") && strings.Contains(line, "Registered"):
-		// Connection events are useful feedback
-		fmt.Println(line)
+		fmt.Fprintln(stdout, line)
 	}
 }
 

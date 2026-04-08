@@ -40,6 +40,11 @@ func run(t *testing.T, dir string, name string, args ...string) {
 	}
 }
 
+// TODO: These tests use os.Chdir because several worktree functions rely on
+// process-wide cwd rather than accepting a dir parameter. This makes them
+// incompatible with t.Parallel(). The long-term fix is to thread dir through
+// the production API (Create, BranchExists, Checkout, ListBranches, etc.).
+
 func TestCreateNewBranch(t *testing.T) {
 	repo := initTestRepo(t)
 	wtDir := t.TempDir()
