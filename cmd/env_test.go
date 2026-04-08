@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/git-treeline/git-treeline/internal/envparse"
 )
 
 func TestStripEnvQuotes(t *testing.T) {
@@ -21,9 +23,9 @@ func TestStripEnvQuotes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.in, func(t *testing.T) {
-			got := stripEnvQuotes(tt.in)
+			got := envparse.StripQuotes(tt.in)
 			if got != tt.want {
-				t.Errorf("stripEnvQuotes(%q) = %q, want %q", tt.in, got, tt.want)
+				t.Errorf("StripQuotes(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
@@ -42,7 +44,7 @@ INVALID LINE WITHOUT EQUALS
 `
 	_ = os.WriteFile(f, []byte(content), 0o644)
 
-	entries, err := parseEnvLines(f)
+	entries, err := envparse.ParseFile(f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,19 +61,19 @@ INVALID LINE WITHOUT EQUALS
 	}
 
 	for _, e := range entries {
-		expected, ok := want[e.key]
+		expected, ok := want[e.Key]
 		if !ok {
-			t.Errorf("unexpected key %q", e.key)
+			t.Errorf("unexpected key %q", e.Key)
 			continue
 		}
-		if e.val != expected {
-			t.Errorf("key %q: got %q, want %q", e.key, e.val, expected)
+		if e.Val != expected {
+			t.Errorf("key %q: got %q, want %q", e.Key, e.Val, expected)
 		}
 	}
 }
 
 func TestParseEnvLines_FileNotFound(t *testing.T) {
-	_, err := parseEnvLines("/nonexistent/.env")
+	_, err := envparse.ParseFile("/nonexistent/.env")
 	if err == nil {
 		t.Error("expected error for missing file")
 	}

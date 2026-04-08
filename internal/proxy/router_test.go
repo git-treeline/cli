@@ -519,3 +519,61 @@ func TestRouterRefreshPicksUpNewAllocations(t *testing.T) {
 		t.Errorf("expected salt-main → 3001 after refresh, got %v", routes)
 	}
 }
+
+func TestBuildRouterURL(t *testing.T) {
+	tests := []struct {
+		name        string
+		port        int
+		project     string
+		branch      string
+		domain      string
+		routerPort  int
+		svcRunning  bool
+		pfConfigured bool
+		want        string
+	}{
+		{
+			name: "router with port forward",
+			port: 3010, project: "myapp", branch: "feature-x",
+			domain: "prt.dev", routerPort: 3001,
+			svcRunning: true, pfConfigured: true,
+			want: "https://myapp-feature-x.prt.dev",
+		},
+		{
+			name: "router without port forward",
+			port: 3010, project: "myapp", branch: "feature-x",
+			domain: "prt.dev", routerPort: 3001,
+			svcRunning: true, pfConfigured: false,
+			want: "https://myapp-feature-x.prt.dev:3001",
+		},
+		{
+			name: "router not running",
+			port: 3010, project: "myapp", branch: "feature-x",
+			domain: "prt.dev", routerPort: 3001,
+			svcRunning: false, pfConfigured: false,
+			want: "http://localhost:3010",
+		},
+		{
+			name: "no branch falls back to localhost",
+			port: 3010, project: "myapp", branch: "",
+			domain: "prt.dev", routerPort: 3001,
+			svcRunning: true, pfConfigured: true,
+			want: "http://localhost:3010",
+		},
+		{
+			name: "custom domain",
+			port: 3010, project: "api", branch: "main",
+			domain: "dev.local", routerPort: 8443,
+			svcRunning: true, pfConfigured: true,
+			want: "https://api-main.dev.local",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BuildRouterURL(tt.port, tt.project, tt.branch, tt.domain, tt.routerPort, tt.svcRunning, tt.pfConfigured)
+			if got != tt.want {
+				t.Errorf("BuildRouterURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

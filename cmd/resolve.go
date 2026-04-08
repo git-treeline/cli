@@ -64,20 +64,15 @@ Examples:
 			return err
 		}
 
-		if service.IsRunning() {
+		svcRunning := service.IsRunning()
+		if svcRunning {
 			targetAlloc := findResolvedAlloc(reg, project, explicitBranch, branch, absPath)
 			if targetAlloc != nil {
 				targetBranch, _ := targetAlloc["branch"].(string)
 				targetProject, _ := targetAlloc["project"].(string)
 				if targetBranch != "" && targetProject != "" {
-					routeKey := proxy.RouteKey(targetProject, targetBranch)
 					uc := config.LoadUserConfig("")
-					domain := uc.RouterDomain()
-					if service.IsPortForwardConfigured() {
-						url = fmt.Sprintf("https://%s.%s", routeKey, domain)
-					} else {
-						url = fmt.Sprintf("https://%s.%s:%d", routeKey, domain, uc.RouterPort())
-					}
+					url = proxy.BuildRouterURL(0, targetProject, targetBranch, uc.RouterDomain(), uc.RouterPort(), svcRunning, service.IsPortForwardConfigured())
 				}
 			}
 		}

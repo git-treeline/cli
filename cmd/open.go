@@ -56,14 +56,7 @@ var openCmd = &cobra.Command{
 }
 
 func buildOpenURL(port int, project, branch, domain string, routerPort int, svcRunning, pfConfigured bool) string {
-	if branch != "" && svcRunning {
-		routeKey := proxy.RouteKey(project, branch)
-		if pfConfigured {
-			return fmt.Sprintf("https://%s.%s", routeKey, domain)
-		}
-		return fmt.Sprintf("https://%s.%s:%d", routeKey, domain, routerPort)
-	}
-	return fmt.Sprintf("http://localhost:%d", port)
+	return proxy.BuildRouterURL(port, project, branch, domain, routerPort, svcRunning, pfConfigured)
 }
 
 func openBrowser(url string) error {

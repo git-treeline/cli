@@ -35,12 +35,8 @@ func printRouterAndTunnel(uc *config.UserConfig, project, branch string) {
 	domain := uc.RouterDomain()
 
 	if service.IsRunning() {
-		if service.IsPortForwardConfigured() {
-			fmt.Println(style.Actionf("Router: %s", style.Link("https://"+routeKey+"."+domain)))
-		} else {
-			port := uc.RouterPort()
-			fmt.Println(style.Actionf("Router: %s", style.Link(fmt.Sprintf("https://%s.%s:%d", routeKey, domain, port))))
-		}
+		url := proxy.BuildRouterURL(0, project, branch, domain, uc.RouterPort(), true, service.IsPortForwardConfigured())
+		fmt.Println(style.Actionf("Router: %s", style.Link(url)))
 	}
 
 	if tunnelDomain := uc.TunnelDomain(""); tunnelDomain != "" {

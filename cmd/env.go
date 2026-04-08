@@ -1,25 +1,22 @@
 package cmd
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/git-treeline/internal/envparse"
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/spf13/cobra"
 )
 
 var envJSON bool
 var envTemplate bool
-
-var envLineRE = regexp.MustCompile(`^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$`)
 
 func init() {
 	envCmd.PersistentFlags().BoolVar(&envJSON, "json", false, "Output as JSON")
@@ -85,7 +82,7 @@ var envShowCmd = &cobra.Command{
 			return err
 		}
 
-		entries, err := parseEnvLines(envPath)
+		entries, err := envparse.ParseFile(envPath)
 		if err != nil {
 			return err
 		}
@@ -98,7 +95,7 @@ var envShowCmd = &cobra.Command{
 
 		varsMap := make(map[string]string, len(entries))
 		for _, e := range entries {
-			varsMap[e.key] = e.val
+			varsMap[e.Key] = e.Val
 		}
 
 		if envJSON {
@@ -126,8 +123,8 @@ var envShowCmd = &cobra.Command{
 		lines := make([]lineOut, 0, len(entries))
 		maxW := 0
 		for _, e := range entries {
-			d := fmt.Sprintf("%s=%s", e.key, strconv.Quote(e.val))
-			_, tl := managed[e.key]
+			d := fmt.Sprintf("%s=%s", e.Key, strconv.Quote(e.Val))
+			_, tl := managed[e.Key]
 			lines = append(lines, lineOut{display: d, tl: tl})
 			if len(d) > maxW {
 				maxW = len(d)
@@ -148,48 +145,3 @@ var envShowCmd = &cobra.Command{
 	},
 }
 
-type envEntry struct {
-	key string
-	val string
-}
-
-func stripEnvQuotes(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) >= 2 {
-		if s[0] == '"' && s[len(s)-1] == '"' {
-			if u, err := strconv.Unquote(s); err == nil {
-				return u
-			}
-		}
-		if s[0] == '\'' && s[len(s)-1] == '\'' {
-			return strings.ReplaceAll(s[1:len(s)-1], `\'`, `'`)
-		}
-	}
-	return s
-}
-
-func parseEnvLines(path string) ([]envEntry, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-
-	var entries []envEntry
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		m := envLineRE.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-		entries = append(entries, envEntry{key: m[1], val: stripEnvQuotes(m[2])})
-	}
-	if err := sc.Err(); err != nil {
-		return nil, err
-	}
-	return entries, nil
-}

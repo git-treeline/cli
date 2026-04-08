@@ -395,6 +395,21 @@ func RouteKey(project, branch string) string {
 	return truncateDNSLabel(project + "-" + branch)
 }
 
+// BuildRouterURL returns the HTTPS router URL for a given project/branch
+// when the router is active, or falls back to a plain localhost URL.
+// Pass svcRunning and pfConfigured from service.IsRunning() and
+// service.IsPortForwardConfigured() to keep this function testable.
+func BuildRouterURL(port int, project, branch, domain string, routerPort int, svcRunning, pfConfigured bool) string {
+	if branch != "" && svcRunning {
+		routeKey := RouteKey(project, branch)
+		if pfConfigured {
+			return fmt.Sprintf("https://%s.%s", routeKey, domain)
+		}
+		return fmt.Sprintf("https://%s.%s:%d", routeKey, domain, routerPort)
+	}
+	return fmt.Sprintf("http://localhost:%d", port)
+}
+
 const maxDNSLabel = 63
 
 func truncateDNSLabel(label string) string {
