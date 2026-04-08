@@ -118,6 +118,7 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 		}
 		branch := worktree.CurrentBranch(absPath)
 		setup.ConfigureEditor(absPath, pc, uc, port, branch)
+		printRouterAndTunnel(uc, pc.Project(), branch)
 
 		if startAwait {
 			sv := supervisor.New(startCommand, absPath, sockPath)
