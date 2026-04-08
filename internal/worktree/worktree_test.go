@@ -488,3 +488,215 @@ func TestUnpushedCommitCount_NoRemote(t *testing.T) {
 		t.Errorf("expected 2 unpushed commits, got %d", count)
 	}
 }
+
+func TestCurrentBranch_OnBranch(t *testing.T) {
+	repo := initTestRepo(t)
+	got := CurrentBranch(repo)
+	if got != "main" {
+		t.Errorf("expected main, got %q", got)
+	}
+}
+
+func TestCurrentBranch_DetachedHEAD(t *testing.T) {
+	repo := initTestRepo(t)
+	run(t, repo, "git", "checkout", "--detach", "HEAD")
+
+	got := CurrentBranch(repo)
+	if got != "" {
+		t.Errorf("expected empty string for detached HEAD, got %q", got)
+	}
+}
+
+func TestCurrentBranch_InWorktree(t *testing.T) {
+	repo := initTestRepo(t)
+	run(t, repo, "git", "branch", "wt-branch")
+
+	wtDir := t.TempDir()
+	wtDir, _ = filepath.EvalSymlinks(wtDir)
+	wtPath := filepath.Join(wtDir, "wt-branch")
+
+	run(t, repo, "git", "worktree", "add", wtPath, "wt-branch")
+	defer func() {
+		cmd := exec.Command("git", "worktree", "remove", "--force", wtPath)
+		cmd.Dir = repo
+		_ = cmd.Run()
+	}()
+
+	got := CurrentBranch(wtPath)
+	if got != "wt-branch" {
+		t.Errorf("expected wt-branch, got %q", got)
+	}
+
+	gotMain := CurrentBranch(repo)
+	if gotMain != "main" {
+		t.Errorf("expected main repo still on main, got %q", gotMain)
+	}
+}
+
+func TestHasUncommittedChanges_Clean(t *testing.T) {
+	repo := initTestRepo(t)
+	if HasUncommittedChanges(repo) {
+		t.Error("expected no uncommitted changes on clean repo")
+	}
+}
+
+func TestHasUncommittedChanges_UnstagedChanges(t *testing.T) {
+	repo := initTestRepo(t)
+	file := filepath.Join(repo, "dirty.txt")
+	if err := os.WriteFile(file, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, repo, "git", "add", "dirty.txt")
+	run(t, repo, "git", "commit", "-m", "add file")
+
+	if err := os.WriteFile(file, []byte("modified"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !HasUncommittedChanges(repo) {
+		t.Error("expected uncommitted changes with unstaged modification")
+	}
+}
+
+func TestHasUncommittedChanges_StagedChanges(t *testing.T) {
+	repo := initTestRepo(t)
+	file := filepath.Join(repo, "staged.txt")
+	if err := os.WriteFile(file, []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, repo, "git", "add", "staged.txt")
+
+	if !HasUncommittedChanges(repo) {
+		t.Error("expected uncommitted changes with staged file")
+	}
+}
+
+func TestHasUncommittedChanges_AfterCommit(t *testing.T) {
+	repo := initTestRepo(t)
+	file := filepath.Join(repo, "committed.txt")
+	if err := os.WriteFile(file, []byte("content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, repo, "git", "add", "committed.txt")
+	run(t, repo, "git", "commit", "-m", "commit file")
+
+	if HasUncommittedChanges(repo) {
+		t.Error("expected no uncommitted changes after commit")
+	}
+}
+
+func TestRemove_Worktree(t *testing.T) {
+	repo := initTestRepo(t)
+	run(t, repo, "git", "branch", "remove-test")
+
+	wtDir := t.TempDir()
+	wtDir, _ = filepath.EvalSymlinks(wtDir)
+	wtPath := filepath.Join(wtDir, "remove-test")
+
+	run(t, repo, "git", "worktree", "add", wtPath, "remove-test")
+
+	err := Remove(wtPath, false)
+	if err != nil {
+		t.Fatalf("Remove worktree failed: %v", err)
+	}
+
+	if _, statErr := os.Stat(wtPath); !os.IsNotExist(statErr) {
+		t.Error("expected worktree directory to be removed")
+	}
+}
+
+func TestRemove_MainWorktree(t *testing.T) {
+	repo := initTestRepo(t)
+
+	err := Remove(repo, false)
+	if err == nil {
+		t.Fatal("expected error when removing main worktree")
+	}
+	if !strings.Contains(err.Error(), "cannot remove the main worktree") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestRemove_Force_DirtyWorktree(t *testing.T) {
+	repo := initTestRepo(t)
+	run(t, repo, "git", "branch", "dirty-wt")
+
+	wtDir := t.TempDir()
+	wtDir, _ = filepath.EvalSymlinks(wtDir)
+	wtPath := filepath.Join(wtDir, "dirty-wt")
+
+	run(t, repo, "git", "worktree", "add", wtPath, "dirty-wt")
+
+	file := filepath.Join(wtPath, "uncommitted.txt")
+	if err := os.WriteFile(file, []byte("dirty"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, wtPath, "git", "add", "uncommitted.txt")
+
+	err := Remove(wtPath, false)
+	if err == nil {
+		t.Fatal("expected error removing dirty worktree without force")
+	}
+
+	err = Remove(wtPath, true)
+	if err != nil {
+		t.Fatalf("force remove failed: %v", err)
+	}
+
+	if _, statErr := os.Stat(wtPath); !os.IsNotExist(statErr) {
+		t.Error("expected worktree directory to be removed after force")
+	}
+}
+
+func TestFetch_Success(t *testing.T) {
+	repo := initTestRepo(t)
+
+	remoteDir := t.TempDir()
+	remoteDir, _ = filepath.EvalSymlinks(remoteDir)
+	run(t, remoteDir, "git", "init", "--bare")
+
+	run(t, repo, "git", "remote", "add", "origin", remoteDir)
+	run(t, repo, "git", "push", "origin", "main")
+
+	orig, _ := os.Getwd()
+	_ = os.Chdir(repo)
+	defer func() { _ = os.Chdir(orig) }()
+
+	err := Fetch("origin", "main")
+	if err != nil {
+		t.Fatalf("Fetch failed: %v", err)
+	}
+}
+
+func TestFetch_NonexistentRemote(t *testing.T) {
+	repo := initTestRepo(t)
+
+	orig, _ := os.Getwd()
+	_ = os.Chdir(repo)
+	defer func() { _ = os.Chdir(orig) }()
+
+	err := Fetch("nonexistent-remote", "main")
+	if err == nil {
+		t.Error("expected error for non-existent remote")
+	}
+}
+
+func TestFetch_NonexistentBranch(t *testing.T) {
+	repo := initTestRepo(t)
+
+	remoteDir := t.TempDir()
+	remoteDir, _ = filepath.EvalSymlinks(remoteDir)
+	run(t, remoteDir, "git", "init", "--bare")
+
+	run(t, repo, "git", "remote", "add", "origin", remoteDir)
+	run(t, repo, "git", "push", "origin", "main")
+
+	orig, _ := os.Getwd()
+	_ = os.Chdir(repo)
+	defer func() { _ = os.Chdir(orig) }()
+
+	err := Fetch("origin", "nonexistent-branch-xyz")
+	if err == nil {
+		t.Error("expected error for non-existent branch")
+	}
+}
