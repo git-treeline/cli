@@ -9,6 +9,7 @@ import (
 
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/envparse"
+	"github.com/git-treeline/git-treeline/internal/format"
 	"github.com/git-treeline/git-treeline/internal/proxy"
 	"github.com/git-treeline/git-treeline/internal/resolve"
 	"github.com/git-treeline/git-treeline/internal/service"
@@ -41,8 +42,8 @@ func handleResolve(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallT
 		return mcplib.NewToolResultError(err.Error()), nil
 	}
 
-	// If the HTTPS router is running, return the router URL instead.
-	if service.IsRunning() {
+	svcRunning := service.IsRunning()
+	if svcRunning {
 		targetBranch := explicitBranch
 		if targetBranch == "" {
 			if links := reg.GetLinks(absPath); links != nil {
@@ -59,14 +60,8 @@ func handleResolve(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallT
 			allocProject, _ := targetAlloc["project"].(string)
 			allocBranch, _ := targetAlloc["branch"].(string)
 			if allocProject != "" && allocBranch != "" {
-				routeKey := proxy.RouteKey(allocProject, allocBranch)
 				uc := config.LoadUserConfig("")
-				domain := uc.RouterDomain()
-				if service.IsPortForwardConfigured() {
-					url = fmt.Sprintf("https://%s.%s", routeKey, domain)
-				} else {
-					url = fmt.Sprintf("https://%s.%s:%d", routeKey, domain, uc.RouterPort())
-				}
+				url = proxy.BuildRouterURL(0, allocProject, allocBranch, uc.RouterDomain(), uc.RouterPort(), svcRunning, service.IsPortForwardConfigured())
 			}
 		}
 	}
@@ -206,3 +201,55 @@ func handleWhere(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToo
 
 	return jsonResult(matches[0])
 }
+
+func handleRoutes(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+	absPath := resolvePath(req)
+
+	reg := newRegistry()
+	entry := reg.Find(absPath)
+	if entry == nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("No allocation found for %s. Run `gtl setup` first.", absPath)), nil
+	}
+
+	fa := format.Allocation(entry)
+	ports := format.GetPorts(fa)
+	if len(ports) == 0 {
+		return mcplib.NewToolResultError(fmt.Sprintf("Allocation for %s has no ports.", absPath)), nil
+	}
+
+	pc := config.LoadProjectConfig(absPath)
+	uc := config.LoadUserConfig("")
+
+	project := pc.Project()
+	branch := format.GetStr(fa, "branch")
+	domain := uc.RouterDomain()
+	routerPort := uc.RouterPort()
+	svcRunning := service.IsRunning()
+	pfConfigured := service.IsPortForwardConfigured()
+
+	type routeEntry struct {
+		Port int    `json:"port"`
+		URL  string `json:"url"`
+	}
+
+	routes := make([]routeEntry, len(ports))
+	for i, p := range ports {
+		routes[i] = routeEntry{
+			Port: p,
+			URL:  proxy.BuildRouterURL(p, project, branch, domain, routerPort, svcRunning, pfConfigured),
+		}
+	}
+
+	out := map[string]any{
+		"project": project,
+		"branch":  branch,
+		"routes":  routes,
+	}
+
+	if tunnelDomain := uc.TunnelDomain(""); tunnelDomain != "" && branch != "" {
+		out["tunnel"] = "https://" + proxy.RouteKey(project, branch) + "." + tunnelDomain
+	}
+
+	return jsonResult(out)
+}
+

@@ -1,3 +1,11 @@
+## [0.37.0]
+
+- **`gtl routes` command** — shows routing URLs for the current worktree. Prints the HTTPS router URL (or localhost fallback) for every allocated port, plus tunnel URL when configured. Supports `--json` for scripting and MCP consumption.
+- **MCP write operations** — the MCP server now supports `setup`, `new`, `link`, `unlink`, `config_set`, and `env_sync` tools. Read tools expanded with `resolve`, `env`, `where`, and `routes`. Tool descriptions improved for AI agent consumption.
+- **Shared `proxy.BuildRouterURL`** — router URL construction extracted from three call sites into a single testable function. Eliminates duplication across `open`, `resolve`, `routes`, and MCP tools.
+- **`internal/envparse` package** — env file parsing extracted from `cmd/env.go` into a shared package with its own test suite. Used by both the CLI and MCP tools.
+- **Hardened test coverage** — added tests for database adapters (PostgreSQL, SQLite), service health checks, setup orchestration, worktree operations, tunnel cert management, doctor checks, release safety, and framework detection. +3,500 lines of test code.
+
 ## [0.36.0]
 
 - **Start hooks** — `.treeline.yml` now supports named hooks with `pre_start` and `post_stop` commands, activated via `gtl start --with <name>`. Hooks with `auto: true` run on every fresh `gtl start` without needing `--with`. Both `pre_start` and `post_stop` accept a single string or an array of strings for multi-step hooks. Hooks are for quick environment setup/teardown (registering aliases, seeding data, setting debug flags), not for managing long-running processes. `pre_start` hooks abort on failure. `post_stop` hooks run in reverse order on supervisor exit (Ctrl+C) and log errors without blocking. Hooks support `{port}` interpolation and are not re-fired on `gtl restart` or resume.

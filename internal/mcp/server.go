@@ -132,6 +132,13 @@ func registerTools(s *mcpserver.MCPServer) {
 		),
 	), handleEnvSync)
 
+	s.AddTool(mcplib.NewTool("routes",
+		mcplib.WithDescription("Show the routing URLs for a worktree — one per allocated port. When the HTTPS router is running, returns https:// URLs via prt.dev; otherwise falls back to http://localhost. Also includes the tunnel URL if configured. Use this to find the URL(s) for the current worktree."),
+		mcplib.WithString("path",
+			mcplib.Description("Absolute path to the worktree directory (defaults to cwd)"),
+		),
+	), handleRoutes)
+
 	s.AddTool(mcplib.NewTool("where",
 		mcplib.WithDescription("Find the filesystem path of a worktree by branch name. If the branch exists in multiple projects, use 'project/branch' format to disambiguate. Returns the absolute path to the worktree directory."),
 		mcplib.WithString("branch",

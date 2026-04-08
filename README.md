@@ -230,7 +230,16 @@ gtl open
 
 Opens the current worktree in your default browser. Prefers `https://{project}-{branch}.prt.dev` when `gtl serve` is running; falls back to `http://localhost:{port}`.
 
-### 9. Check project health
+### 9. Show routing URLs
+
+```bash
+gtl routes              # human-readable
+gtl routes --json       # structured output
+```
+
+Shows the routing URLs for the current worktree — one per allocated port. When `gtl serve` is running, shows `https://` URLs via `prt.dev`; otherwise falls back to `http://localhost`. Also shows the tunnel URL if configured.
+
+### 10. Check project health
 
 ```bash
 gtl doctor
@@ -238,7 +247,7 @@ gtl doctor
 
 Checks config, allocation, runtime, and diagnostics in one view — whether `.treeline.yml` exists, env file is on disk, ports are allocated and listening, supervisor is running, and framework-specific guidance.
 
-### 10. Check what's allocated
+### 11. Check what's allocated
 
 ```bash
 gtl status
@@ -255,7 +264,7 @@ api-service:
 
 Use `--check` to probe ports and show which services are running. Use `--watch` for a live-updating dashboard.
 
-### 11. Inspect the environment
+### 12. Inspect the environment
 
 ```bash
 gtl env                   # print env file, annotate Treeline-managed keys
@@ -265,7 +274,7 @@ gtl env --template        # show unresolved interpolation tokens
 
 Prints the current worktree's env file contents. Keys that Treeline manages (defined in the `env:` block of `.treeline.yml`) are annotated with `[treeline]`. Use `--template` to see the raw tokens before interpolation.
 
-### 12. Release when done
+### 13. Release when done
 
 ```bash
 gtl release ../myapp-feature-auth --drop-db --remove-worktree
@@ -282,7 +291,7 @@ git worktree remove ../myapp-feature-auth
 
 For bulk cleanup: `gtl release --project myapp --drop-db` or `gtl release --all --drop-db`.
 
-### 13. Refresh after config changes
+### 14. Refresh after config changes
 
 ```bash
 gtl refresh --dry-run    # preview what would change
@@ -291,7 +300,7 @@ gtl refresh              # apply changes, restart supervised servers
 
 After adding or changing port reservations (or `port_count`), `gtl refresh` walks every allocation and re-resolves ports. Supervised servers (`gtl start`) are restarted automatically. Servers you started manually are flagged so you know which ones to bounce.
 
-### 14. Prune stale allocations
+### 15. Prune stale allocations
 
 ```bash
 gtl prune --stale
@@ -300,7 +309,7 @@ gtl prune --merged --drop-db
 
 `--stale` removes allocations for worktrees that no longer exist on disk. `--merged` targets branches already merged into the merge target branch. Treeline auto-detects the merge target via git (works with any remote host), but you can set `merge_target` in `.treeline.yml` if your repo uses something other than `main`/`master` (e.g. `develop`, `staging`).
 
-### 15. Manage worktree databases
+### 16. Manage worktree databases
 
 ```bash
 gtl db name                          # print the worktree's database name
@@ -314,7 +323,7 @@ gtl db drop                          # just drop the database
 
 `db restore` auto-detects the dump format (pg_dump custom format vs plain SQL) and uses `pg_restore` or `psql` accordingly.
 
-### 16. Resolve cross-worktree services
+### 17. Resolve cross-worktree services
 
 ```bash
 gtl resolve api                  # URL for api project on same branch
@@ -347,7 +356,7 @@ env:
 
 Tokens are resolved at setup time. `{resolve:api}` checks link overrides first, then falls back to same-branch matching. `{resolve:api/main}` always resolves to the `main` branch.
 
-### 17. Manage user config
+### 18. Manage user config
 
 ```bash
 gtl config list                      # dump all settings
@@ -357,7 +366,7 @@ gtl config path                      # print the config file location
 gtl config edit                      # open in $EDITOR
 ```
 
-### 18. AI agent integration (MCP)
+### 19. AI agent integration (MCP)
 
 git-treeline speaks [MCP](https://modelcontextprotocol.io/) natively. Add this to your editor config and agents automatically get access to your worktree allocations, ports, databases, and dev server controls.
 
@@ -766,6 +775,7 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl clone <url>` | (passthrough to git) | Clone + detect framework + init + setup in one step |
 | `gtl env` / `gtl env show` | `--json` `--template` | Print env file with Treeline-managed key annotations |
 | `gtl env sync` | | Re-sync env file and editor settings from `.treeline.yml` |
+| `gtl routes` | `--json` | Show routing URLs for the current worktree (all ports + tunnel) |
 | `gtl resolve <project> [branch]` | `--json` | Look up another project's allocated URL |
 | `gtl link <project> <branch>` | `--restart` `--json` | Override resolve target for a project |
 | `gtl unlink <project>` | | Revert resolve override to same-branch default |
