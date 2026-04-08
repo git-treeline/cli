@@ -3,14 +3,12 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
 
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/proxy"
 	"github.com/git-treeline/git-treeline/internal/service"
 	"github.com/git-treeline/git-treeline/internal/style"
+	"github.com/git-treeline/git-treeline/internal/worktree"
 )
 
 // errServeNotInstalled is the shared error returned when commands require
@@ -50,40 +48,15 @@ func printRouterAndTunnel(uc *config.UserConfig, project, branch string) {
 	}
 }
 
-// ensureGitignored checks whether a worktree path that lives inside the repo
-// root is gitignored. If not, it appends the directory to .gitignore.
-// Paths outside the repo root (the default sibling layout) are a no-op.
+// ensureGitignored delegates to worktree.EnsureGitignored and prints
+// a message if a pattern was added.
 func ensureGitignored(mainRepo, wtPath string) error {
-	absRepo, _ := filepath.Abs(mainRepo)
-	absWT, _ := filepath.Abs(wtPath)
-
-	rel, err := filepath.Rel(absRepo, absWT)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return nil
+	pattern, err := worktree.EnsureGitignored(mainRepo, wtPath)
+	if err != nil {
+		return err
 	}
-
-	cmd := exec.Command("git", "check-ignore", "-q", absWT)
-	cmd.Dir = mainRepo
-	if cmd.Run() == nil {
-		return nil
+	if pattern != "" {
+		fmt.Println(style.Actionf("Added %s to .gitignore", pattern))
 	}
-
-	topLevel := strings.SplitN(rel, string(filepath.Separator), 2)[0]
-	pattern := "/" + topLevel + "/"
-
-	gitignorePath := filepath.Join(absRepo, ".gitignore")
-	existing, _ := os.ReadFile(gitignorePath)
-	if strings.Contains(string(existing), pattern) {
-		return nil
-	}
-
-	entry := pattern + "\n"
-	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
-		entry = "\n" + entry
-	}
-	if err := os.WriteFile(gitignorePath, append(existing, []byte(entry)...), 0o644); err != nil {
-		return fmt.Errorf("updating .gitignore: %w", err)
-	}
-	fmt.Println(style.Actionf("Added %s to .gitignore", pattern))
 	return nil
 }
