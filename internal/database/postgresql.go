@@ -108,6 +108,9 @@ func (pg *PostgreSQL) Clone(template, target string) error {
 }
 
 func (pg *PostgreSQL) Drop(target string) error {
+	if !dbIdentifierRe.MatchString(target) {
+		return fmt.Errorf("invalid database identifier: %q", target)
+	}
 	return pg.runSilent("dropdb", "--if-exists", target)
 }
 

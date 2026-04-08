@@ -1,6 +1,7 @@
 package database
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -116,15 +117,19 @@ func TestSQLite_Restore_Success(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "restored.db")
 	dumpFile := filepath.Join(dir, "dump.sql")
-	_ = os.WriteFile(dumpFile, []byte("CREATE TABLE foo (id INTEGER);"), 0o644)
+	dumpContent := "CREATE TABLE foo (id INTEGER);"
+	_ = os.WriteFile(dumpFile, []byte(dumpContent), 0o644)
 
+	// Use "cat" as a fake sqlite3 — it reads stdin and writes to stdout.
+	// We redirect stdout to a capture file to verify stdin was piped.
+	stdinCapture := filepath.Join(dir, "stdin_capture")
 	var calledName string
 	var calledArgs []string
 	s := &SQLite{
 		newCommand: func(name string, args ...string) *exec.Cmd {
 			calledName = name
 			calledArgs = args
-			return exec.Command("true")
+			return exec.Command("sh", "-c", fmt.Sprintf("cat > %s", stdinCapture))
 		},
 	}
 
@@ -138,6 +143,15 @@ func TestSQLite_Restore_Success(t *testing.T) {
 	}
 	if len(calledArgs) != 1 || calledArgs[0] != target {
 		t.Errorf("expected args [%s], got %v", target, calledArgs)
+	}
+
+	// Verify dump file contents were actually piped to the command's stdin
+	captured, err := os.ReadFile(stdinCapture)
+	if err != nil {
+		t.Fatalf("stdin capture file not written: %v", err)
+	}
+	if string(captured) != dumpContent {
+		t.Errorf("stdin received %q, want %q", string(captured), dumpContent)
 	}
 }
 

@@ -60,9 +60,21 @@ func TestCheckHealthWith_AllBroken(t *testing.T) {
 
 	checks := checkHealthWith(d, 8443, "1.0.0")
 
+	expected := map[string]string{
+		"service":         "error",
+		"binary":          "warn",
+		"router_version":  "warn",
+		"router_port":     "error",
+		"port_forwarding": "warn",
+	}
 	for _, c := range checks {
-		if c.Status == "ok" {
-			t.Errorf("check %q: expected non-ok status, got ok", c.Name)
+		want, ok := expected[c.Name]
+		if !ok {
+			t.Errorf("unexpected check %q", c.Name)
+			continue
+		}
+		if c.Status != want {
+			t.Errorf("check %q: got %s, want %s", c.Name, c.Status, want)
 		}
 	}
 }

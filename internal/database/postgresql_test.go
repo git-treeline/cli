@@ -272,6 +272,18 @@ func TestPostgreSQL_Drop_Failure(t *testing.T) {
 	}
 }
 
+func TestPostgreSQL_Drop_InvalidIdentifier(t *testing.T) {
+	pg, calls := testPg(t, "", "")
+
+	err := pg.Drop("bad;name")
+	if err == nil {
+		t.Fatal("expected error for invalid identifier")
+	}
+	if len(*calls) != 0 {
+		t.Error("should not execute commands with invalid identifier")
+	}
+}
+
 // --- PostgreSQL.Restore tests ---
 
 func TestPostgreSQL_Restore_PlainSQL(t *testing.T) {
@@ -320,7 +332,7 @@ func TestPostgreSQL_Restore_CustomFormat(t *testing.T) {
 		t.Errorf("second call should be pg_restore for custom format, got %s", (*calls)[1].name)
 	}
 	args := (*calls)[1].args
-	if len(args) != 5 || args[0] != "--no-owner" || args[1] != "--no-acl" {
+	if len(args) != 5 || args[0] != "--no-owner" || args[1] != "--no-acl" || args[2] != "-d" || args[3] != "myapp_feat" || args[4] != dumpFile {
 		t.Errorf("pg_restore args = %v, want [--no-owner --no-acl -d myapp_feat %s]", args, dumpFile)
 	}
 }
@@ -361,11 +373,9 @@ func TestPostgreSQL_Restore_RestoreCommandFailure(t *testing.T) {
 	dumpFile := filepath.Join(dir, "dump.sql")
 	_ = os.WriteFile(dumpFile, []byte("CREATE TABLE foo;"), 0o644)
 
-	callCount := 0
 	pg := &PostgreSQL{
 		execRun: func(name string, args ...string) error {
-			callCount++
-			if callCount == 2 {
+			if name == "psql" && len(args) > 0 && args[0] == "-d" {
 				return fmt.Errorf("mock: restore failed")
 			}
 			return nil
