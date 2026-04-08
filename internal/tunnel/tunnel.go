@@ -244,6 +244,16 @@ func LoginForDomain(domain string) error {
 		return err
 	}
 
+	return loginForDomainWith(domain, func() error {
+		cmd := exec.Command(cfPath, "tunnel", "login")
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	})
+}
+
+func loginForDomainWith(domain string, runLogin func() error) error {
 	defaultCertPath := filepath.Join(ConfigDir(), "cert.pem")
 
 	var backupPath string
@@ -254,12 +264,7 @@ func LoginForDomain(domain string) error {
 		}
 	}
 
-	cmd := exec.Command(cfPath, "tunnel", "login")
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		// Restore backup on failure
+	if err := runLogin(); err != nil {
 		if backupPath != "" {
 			_ = os.Rename(backupPath, defaultCertPath)
 		}
@@ -325,10 +330,14 @@ func TunnelExists(name string) bool {
 	if err != nil {
 		return false
 	}
+	return parseTunnelListHasName(out, name)
+}
+
+func parseTunnelListHasName(data []byte, name string) bool {
 	var tunnels []struct {
 		Name string `json:"name"`
 	}
-	if json.Unmarshal(out, &tunnels) != nil {
+	if json.Unmarshal(data, &tunnels) != nil {
 		return false
 	}
 	for _, t := range tunnels {
@@ -378,13 +387,17 @@ func RouteDNSWithCert(tunnelName, hostname, certPath string) error {
 // VerifyDNS checks if a hostname resolves (has DNS records).
 // Returns true if the hostname resolves within the timeout.
 func VerifyDNS(hostname string, timeout time.Duration) bool {
+	return verifyDNSWith(hostname, timeout, net.LookupHost, 2*time.Second)
+}
+
+func verifyDNSWith(hostname string, timeout time.Duration, lookup func(string) ([]string, error), interval time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		_, err := net.LookupHost(hostname)
+		_, err := lookup(hostname)
 		if err == nil {
 			return true
 		}
-		time.Sleep(2 * time.Second)
+		time.Sleep(interval)
 	}
 	return false
 }
@@ -441,15 +454,19 @@ func lookupTunnelID(tunnelName string) string {
 	if err != nil {
 		return ""
 	}
+	return parseTunnelListID(out, tunnelName)
+}
+
+func parseTunnelListID(data []byte, name string) string {
 	var tunnels []struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
 	}
-	if json.Unmarshal(out, &tunnels) != nil {
+	if json.Unmarshal(data, &tunnels) != nil {
 		return ""
 	}
 	for _, t := range tunnels {
-		if strings.EqualFold(t.Name, tunnelName) {
+		if strings.EqualFold(t.Name, name) {
 			return t.ID
 		}
 	}

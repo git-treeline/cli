@@ -1,11 +1,13 @@
 package tunnel
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestResolveCloudflared_ErrorWhenMissing(t *testing.T) {
@@ -208,5 +210,246 @@ func TestIsLoggedInForDomain(t *testing.T) {
 
 	if !IsLoggedInForDomain("example.com") {
 		t.Error("expected true when domain cert exists")
+	}
+}
+
+// --- loginForDomainWith tests ---
+
+func TestLoginForDomain_Success_NoPriorCert(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	cfDir := filepath.Join(dir, ".cloudflared")
+	_ = os.MkdirAll(cfDir, 0o700)
+
+	certPath := filepath.Join(cfDir, "cert.pem")
+
+	err := loginForDomainWith("example.com", func() error {
+		// Simulate cloudflared writing cert.pem
+		return os.WriteFile(certPath, []byte("new-cert"), 0o600)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// cert.pem should be moved to cert-example.com.pem
+	domainCert := filepath.Join(cfDir, "cert-example.com.pem")
+	data, err := os.ReadFile(domainCert)
+	if err != nil {
+		t.Fatal("expected domain cert to exist")
+	}
+	if string(data) != "new-cert" {
+		t.Errorf("domain cert content = %q, want %q", string(data), "new-cert")
+	}
+
+	// Original cert.pem should not exist (no prior cert to restore)
+	if _, err := os.Stat(certPath); err == nil {
+		t.Error("cert.pem should not exist when there was no prior cert")
+	}
+}
+
+func TestLoginForDomain_Success_WithPriorCert(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	cfDir := filepath.Join(dir, ".cloudflared")
+	_ = os.MkdirAll(cfDir, 0o700)
+
+	certPath := filepath.Join(cfDir, "cert.pem")
+	_ = os.WriteFile(certPath, []byte("original-cert"), 0o600)
+
+	err := loginForDomainWith("example.com", func() error {
+		// Simulate cloudflared writing new cert.pem
+		return os.WriteFile(certPath, []byte("new-domain-cert"), 0o600)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Domain cert should have the new content
+	domainCert := filepath.Join(cfDir, "cert-example.com.pem")
+	data, _ := os.ReadFile(domainCert)
+	if string(data) != "new-domain-cert" {
+		t.Errorf("domain cert = %q, want %q", string(data), "new-domain-cert")
+	}
+
+	// Original cert.pem should be restored from backup
+	data, err = os.ReadFile(certPath)
+	if err != nil {
+		t.Fatal("expected original cert.pem to be restored")
+	}
+	if string(data) != "original-cert" {
+		t.Errorf("restored cert = %q, want %q", string(data), "original-cert")
+	}
+
+	// Backup should be cleaned up
+	if _, err := os.Stat(certPath + ".backup"); err == nil {
+		t.Error("backup file should not exist after successful login")
+	}
+}
+
+func TestLoginForDomain_Failure_RestoresBackup(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	cfDir := filepath.Join(dir, ".cloudflared")
+	_ = os.MkdirAll(cfDir, 0o700)
+
+	certPath := filepath.Join(cfDir, "cert.pem")
+	_ = os.WriteFile(certPath, []byte("original-cert"), 0o600)
+
+	err := loginForDomainWith("example.com", func() error {
+		return fmt.Errorf("login cancelled")
+	})
+	if err == nil {
+		t.Fatal("expected error from failed login")
+	}
+
+	// Original cert.pem should be restored
+	data, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatal("expected cert.pem to be restored after failure")
+	}
+	if string(data) != "original-cert" {
+		t.Errorf("restored cert = %q, want %q", string(data), "original-cert")
+	}
+
+	// No domain cert should exist
+	domainCert := filepath.Join(cfDir, "cert-example.com.pem")
+	if _, err := os.Stat(domainCert); err == nil {
+		t.Error("domain cert should not exist after failed login")
+	}
+}
+
+func TestLoginForDomain_Failure_NoPriorCert(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	cfDir := filepath.Join(dir, ".cloudflared")
+	_ = os.MkdirAll(cfDir, 0o700)
+
+	err := loginForDomainWith("example.com", func() error {
+		return fmt.Errorf("login cancelled")
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	// No files should exist
+	if _, err := os.Stat(filepath.Join(cfDir, "cert.pem")); err == nil {
+		t.Error("no cert.pem should exist")
+	}
+	if _, err := os.Stat(filepath.Join(cfDir, "cert-example.com.pem")); err == nil {
+		t.Error("no domain cert should exist")
+	}
+}
+
+// --- verifyDNSWith tests ---
+
+func TestVerifyDNS_ImmediateSuccess(t *testing.T) {
+	ok := verifyDNSWith("example.com", 5*time.Second, func(host string) ([]string, error) {
+		return []string{"1.2.3.4"}, nil
+	}, time.Millisecond)
+	if !ok {
+		t.Error("expected true for immediate DNS resolution")
+	}
+}
+
+func TestVerifyDNS_Timeout(t *testing.T) {
+	ok := verifyDNSWith("example.com", 50*time.Millisecond, func(host string) ([]string, error) {
+		return nil, fmt.Errorf("NXDOMAIN")
+	}, 10*time.Millisecond)
+	if ok {
+		t.Error("expected false when DNS never resolves")
+	}
+}
+
+func TestVerifyDNS_RetryThenSucceed(t *testing.T) {
+	attempts := 0
+	ok := verifyDNSWith("example.com", 500*time.Millisecond, func(host string) ([]string, error) {
+		attempts++
+		if attempts >= 3 {
+			return []string{"1.2.3.4"}, nil
+		}
+		return nil, fmt.Errorf("NXDOMAIN")
+	}, 10*time.Millisecond)
+	if !ok {
+		t.Error("expected true after retries succeed")
+	}
+	if attempts < 3 {
+		t.Errorf("expected at least 3 attempts, got %d", attempts)
+	}
+}
+
+// --- parseTunnelListHasName tests ---
+
+func TestParseTunnelListHasName(t *testing.T) {
+	jsonData := []byte(`[
+		{"name": "gtl", "id": "abc-123"},
+		{"name": "staging", "id": "def-456"}
+	]`)
+
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"gtl", true},
+		{"GTL", true},
+		{"staging", true},
+		{"production", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseTunnelListHasName(jsonData, tt.name)
+			if got != tt.want {
+				t.Errorf("parseTunnelListHasName(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseTunnelListHasName_InvalidJSON(t *testing.T) {
+	if parseTunnelListHasName([]byte("not json"), "gtl") {
+		t.Error("expected false for invalid JSON")
+	}
+}
+
+func TestParseTunnelListHasName_EmptyList(t *testing.T) {
+	if parseTunnelListHasName([]byte("[]"), "gtl") {
+		t.Error("expected false for empty list")
+	}
+}
+
+// --- parseTunnelListID tests ---
+
+func TestParseTunnelListID(t *testing.T) {
+	jsonData := []byte(`[
+		{"name": "gtl", "id": "abc-123"},
+		{"name": "staging", "id": "def-456"}
+	]`)
+
+	tests := []struct {
+		name string
+		want string
+	}{
+		{"gtl", "abc-123"},
+		{"GTL", "abc-123"},
+		{"staging", "def-456"},
+		{"missing", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseTunnelListID(jsonData, tt.name)
+			if got != tt.want {
+				t.Errorf("parseTunnelListID(%q) = %q, want %q", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseTunnelListID_InvalidJSON(t *testing.T) {
+	if parseTunnelListID([]byte("garbage"), "gtl") != "" {
+		t.Error("expected empty string for invalid JSON")
 	}
 }
