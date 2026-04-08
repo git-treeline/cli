@@ -33,6 +33,11 @@ type Options struct {
 	RefreshOnly bool
 }
 
+// RegistryPath overrides the default registry location. Empty uses the
+// standard path. Exposed so tests (and the MCP server) can inject a
+// temporary registry without affecting global state at runtime.
+var RegistryPath string
+
 // Setup orchestrates worktree provisioning. It combines allocation, database
 // cloning, environment file generation, and setup command execution.
 type Setup struct {
@@ -63,7 +68,7 @@ func New(worktreePath string, mainRepo string, uc *config.UserConfig) *Setup {
 	}
 
 	pc := config.LoadProjectConfig(absPath)
-	reg := registry.New("")
+	reg := registry.New(RegistryPath)
 	al := allocator.New(uc, pc, reg)
 
 	return &Setup{
@@ -285,7 +290,7 @@ func RegenerateEnvFile(worktreePath string, uc *config.UserConfig) error {
 	absPath, _ := filepath.Abs(worktreePath)
 	// Load from worktree (not mainRepo) so branch-specific config is respected
 	pc := config.LoadProjectConfig(absPath)
-	reg := registry.New("")
+	reg := registry.New(RegistryPath)
 
 	allocMap := reg.Find(absPath)
 	if allocMap == nil {
