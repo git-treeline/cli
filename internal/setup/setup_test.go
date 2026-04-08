@@ -3,6 +3,7 @@ package setup
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -620,5 +621,340 @@ env:
 	}
 	if !strings.Contains(plain, "Port:") || !strings.Contains(plain, "Redis:") {
 		t.Error("expected Port: and Redis: in summary output")
+	}
+}
+
+// --- BuildEnvVars tests ---
+
+func TestBuildEnvVars_BasicTokenInterpolation(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(`
+project: myapp
+env:
+  PORT: "{port}"
+  DATABASE_URL: "postgres://localhost/{database}"
+  REDIS_URL: "{redis_url}"
+`), 0o644)
+	pc := config.LoadProjectConfig(dir)
+
+	alloc := interpolation.Allocation{
+		"port":     float64(3010),
+		"database": "myapp_worktree",
+	}
+
+	result := BuildEnvVars(pc, alloc, "redis://localhost:6379/1")
+
+	tests := []struct {
+		key  string
+		want string
+	}{
+		{"PORT", "3010"},
+		{"DATABASE_URL", "postgres://localhost/myapp_worktree"},
+		{"REDIS_URL", "redis://localhost:6379/1"},
+	}
+	for _, tt := range tests {
+		if got := result[tt.key]; got != tt.want {
+			t.Errorf("%s = %q, want %q", tt.key, got, tt.want)
+		}
+	}
+}
+
+func TestBuildEnvVars_MultiPortReferences(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(`
+project: myapp
+env:
+  WEB_PORT: "{port_1}"
+  WORKER_PORT: "{port_2}"
+  PRIMARY_PORT: "{port}"
+`), 0o644)
+	pc := config.LoadProjectConfig(dir)
+
+	alloc := interpolation.Allocation{
+		"port":  float64(3010),
+		"ports": []any{float64(3010), float64(3011)},
+	}
+
+	result := BuildEnvVars(pc, alloc, "redis://localhost:6379")
+
+	tests := []struct {
+		key  string
+		want string
+	}{
+		{"WEB_PORT", "3010"},
+		{"WORKER_PORT", "3011"},
+		{"PRIMARY_PORT", "3010"},
+	}
+	for _, tt := range tests {
+		if got := result[tt.key]; got != tt.want {
+			t.Errorf("%s = %q, want %q", tt.key, got, tt.want)
+		}
+	}
+}
+
+func TestBuildEnvVars_EmptyEnvTemplate(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(`
+project: myapp
+`), 0o644)
+	pc := config.LoadProjectConfig(dir)
+
+	alloc := interpolation.Allocation{"port": float64(3010)}
+	result := BuildEnvVars(pc, alloc, "redis://localhost:6379")
+
+	if len(result) != 0 {
+		t.Errorf("expected empty map for empty env template, got %d entries", len(result))
+	}
+}
+
+func TestBuildEnvVars_MultipleVarsResolved(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(`
+project: myapp
+env:
+  PORT: "{port}"
+  APP_URL: "http://localhost:{port}"
+  DB: "{database}"
+  REDIS: "{redis_url}"
+  PROJECT: "{project}"
+`), 0o644)
+	pc := config.LoadProjectConfig(dir)
+
+	alloc := interpolation.Allocation{
+		"port":     float64(4000),
+		"database": "myapp_test",
+	}
+
+	result := BuildEnvVars(pc, alloc, "redis://localhost:6379/2")
+
+	expected := map[string]string{
+		"PORT":    "4000",
+		"APP_URL": "http://localhost:4000",
+		"DB":      "myapp_test",
+		"REDIS":   "redis://localhost:6379/2",
+		"PROJECT": "myapp",
+	}
+	for k, want := range expected {
+		if got := result[k]; got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+}
+
+// --- BuildEnvVarsWithResolver tests ---
+
+func TestBuildEnvVarsWithResolver_MockResolver(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(`
+project: myapp
+env:
+  PORT: "{port}"
+  API_URL: "{resolve:api}"
+`), 0o644)
+	pc := config.LoadProjectConfig(dir)
+
+	alloc := interpolation.Allocation{"port": float64(3010)}
+	resolver := func(project string, branch ...string) (string, error) {
+		if project == "api" {
+			return "http://localhost:3020", nil
+		}
+		return "", fmt.Errorf("unknown project: %s", project)
+	}
+
+	result, err := BuildEnvVarsWithResolver(pc, alloc, "redis://localhost:6379", resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := result["PORT"]; got != "3010" {
+		t.Errorf("PORT = %q, want %q", got, "3010")
+	}
+	if got := result["API_URL"]; got != "http://localhost:3020" {
+		t.Errorf("API_URL = %q, want %q", got, "http://localhost:3020")
+	}
+}
+
+func TestBuildEnvVarsWithResolver_ErrorPropagates(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(`
+project: myapp
+env:
+  API_URL: "{resolve:missing}"
+`), 0o644)
+	pc := config.LoadProjectConfig(dir)
+
+	alloc := interpolation.Allocation{"port": float64(3010)}
+	resolver := func(project string, branch ...string) (string, error) {
+		return "", fmt.Errorf("not found: %s", project)
+	}
+
+	_, err := BuildEnvVarsWithResolver(pc, alloc, "redis://localhost:6379", resolver)
+	if err == nil {
+		t.Fatal("expected error from resolver, got nil")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' in error, got: %v", err)
+	}
+}
+
+func TestBuildEnvVarsWithResolver_NilResolverLeavesTokens(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(`
+project: myapp
+env:
+  PORT: "{port}"
+  API_URL: "{resolve:api}"
+`), 0o644)
+	pc := config.LoadProjectConfig(dir)
+
+	alloc := interpolation.Allocation{"port": float64(3010)}
+
+	result, err := BuildEnvVarsWithResolver(pc, alloc, "redis://localhost:6379", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := result["PORT"]; got != "3010" {
+		t.Errorf("PORT = %q, want %q", got, "3010")
+	}
+	if got := result["API_URL"]; got != "{resolve:api}" {
+		t.Errorf("API_URL = %q, want %q (nil resolver should leave resolve tokens)", got, "{resolve:api}")
+	}
+}
+
+func TestBuildEnvVarsWithResolver_MixedTokens(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(`
+project: myapp
+env:
+  PORT: "{port}"
+  REDIS: "{redis_url}"
+  DB: "{database}"
+  API_URL: "{resolve:api}"
+  AUTH_URL: "{resolve:auth/main}"
+`), 0o644)
+	pc := config.LoadProjectConfig(dir)
+
+	alloc := interpolation.Allocation{
+		"port":     float64(3010),
+		"database": "myapp_wt",
+	}
+	resolver := func(project string, branch ...string) (string, error) {
+		urls := map[string]string{
+			"api":  "http://localhost:4000",
+			"auth": "http://localhost:5000",
+		}
+		if url, ok := urls[project]; ok {
+			return url, nil
+		}
+		return "", fmt.Errorf("unknown: %s", project)
+	}
+
+	result, err := BuildEnvVarsWithResolver(pc, alloc, "redis://localhost:6379/3", resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expected := map[string]string{
+		"PORT":     "3010",
+		"REDIS":    "redis://localhost:6379/3",
+		"DB":       "myapp_wt",
+		"API_URL":  "http://localhost:4000",
+		"AUTH_URL": "http://localhost:5000",
+	}
+	for k, want := range expected {
+		if got := result[k]; got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+}
+
+// --- RunHookCommands tests ---
+
+func TestRunHookCommands_MultipleSuccessful(t *testing.T) {
+	dir := t.TempDir()
+	cmds := []string{
+		"touch first",
+		"touch second",
+	}
+
+	err := RunHookCommands("test", cmds, dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"first", "second"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("expected %s to exist after hook commands", name)
+		}
+	}
+}
+
+func TestRunHookCommands_FirstFailureStopsExecution(t *testing.T) {
+	dir := t.TempDir()
+	cmds := []string{
+		"exit 1",
+		"touch should_not_exist",
+	}
+
+	err := RunHookCommands("test", cmds, dir, nil)
+	if err == nil {
+		t.Fatal("expected error from failing command")
+	}
+	if !strings.Contains(err.Error(), "hook test failed") {
+		t.Errorf("expected 'hook test failed' in error, got: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "should_not_exist")); err == nil {
+		t.Error("second command should not have run after first failed")
+	}
+}
+
+func TestRunHookCommands_EmptyCommandList(t *testing.T) {
+	err := RunHookCommands("test", []string{}, t.TempDir(), nil)
+	if err != nil {
+		t.Errorf("expected nil error for empty command list, got: %v", err)
+	}
+}
+
+func TestRunHookCommands_LogReceivesMessages(t *testing.T) {
+	dir := t.TempDir()
+	cmds := []string{"true", "true"}
+
+	var logged []string
+	logFn := func(f string, a ...any) {
+		logged = append(logged, fmt.Sprintf(f, a...))
+	}
+
+	err := RunHookCommands("setup", cmds, dir, logFn)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(logged) != 2 {
+		t.Fatalf("expected 2 log messages, got %d", len(logged))
+	}
+	for i, msg := range logged {
+		if !strings.Contains(msg, "Hook [setup]") {
+			t.Errorf("log[%d] = %q, expected to contain 'Hook [setup]'", i, msg)
+		}
+	}
+}
+
+func TestRunHookCommands_RunsInSpecifiedDirectory(t *testing.T) {
+	dir := t.TempDir()
+	sentinel := filepath.Join(dir, "proof")
+
+	cmds := []string{
+		fmt.Sprintf("test \"$(pwd)\" = \"%s\" && touch proof", dir),
+	}
+
+	err := RunHookCommands("test", cmds, dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Error("expected proof file to exist, command did not run in specified directory")
 	}
 }

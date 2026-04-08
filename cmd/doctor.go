@@ -192,18 +192,32 @@ func doctorConfig(pc *config.ProjectConfig, det *detect.Result, absPath string) 
 	}
 }
 
+// classifyPortConfig checks whether a port base conflicts with the router port
+// or is a well-known framework default that should stay free.
+// Returns "conflict", "common_dev_port", or "" (ok).
+func classifyPortConfig(base, routerPort int) string {
+	if base == routerPort {
+		return "conflict"
+	}
+	if allocator.IsCommonDevPort(base) {
+		return "common_dev_port"
+	}
+	return ""
+}
+
 func doctorPortConfig() {
 	uc := config.LoadUserConfig("")
 	base := uc.PortBase()
 	routerPort := uc.RouterPort()
 
-	if base == routerPort {
+	switch classifyPortConfig(base, routerPort) {
+	case "conflict":
 		fmt.Println("\nPort config")
 		doctorLine("port.base", fmt.Sprintf("✗ %d conflicts with router.port", base))
 		fmt.Println("  The router listens on this port to proxy traffic to your worktrees.")
 		fmt.Println("  Allocating worktrees here will prevent the router from starting.")
 		fmt.Printf("  Fix: gtl config set port.base %d\n", routerPort+1)
-	} else if allocator.IsCommonDevPort(base) {
+	case "common_dev_port":
 		fmt.Println("\nPort config")
 		doctorLine("port.base", fmt.Sprintf("⚠ %d is a common framework default", base))
 		fmt.Println()

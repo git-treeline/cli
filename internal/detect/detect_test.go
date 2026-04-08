@@ -326,3 +326,28 @@ func TestDetect_NoJSBundler(t *testing.T) {
 		t.Error("expected HasJSBundler=false with importmap-rails")
 	}
 }
+
+func TestIsServerFramework(t *testing.T) {
+	cases := []struct {
+		framework string
+		expected  bool
+	}{
+		{"rails", true},
+		{"nextjs", true},
+		{"vite", true},
+		{"node", true},
+		{"django", true},
+		{"python", true},
+		{"go", false},
+		{"rust", false},
+		{"unknown", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.framework, func(t *testing.T) {
+			r := &Result{Framework: tc.framework}
+			if got := r.IsServerFramework(); got != tc.expected {
+				t.Errorf("IsServerFramework()=%v for %s, want %v", got, tc.framework, tc.expected)
+			}
+		})
+	}
+}

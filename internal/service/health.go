@@ -18,21 +18,47 @@ type HealthCheck struct {
 	Fix    string `json:"fix,omitempty"`
 }
 
+type healthDeps struct {
+	isRunning               func() bool
+	installedBinaryPath     func() string
+	runningRouterVersion    func() string
+	isPortForwardConfigured func() bool
+	dialTimeout             func(network, address string, timeout time.Duration) (net.Conn, error)
+	executable              func() (string, error)
+	processOnPort           func(port int) string
+}
+
+func defaultHealthDeps() healthDeps {
+	return healthDeps{
+		isRunning:               IsRunning,
+		installedBinaryPath:     InstalledBinaryPath,
+		runningRouterVersion:    RunningRouterVersion,
+		isPortForwardConfigured: IsPortForwardConfigured,
+		dialTimeout:             net.DialTimeout,
+		executable:              os.Executable,
+		processOnPort:           processOnPort,
+	}
+}
+
 // CheckHealth runs all serve-related health checks and returns the results.
 func CheckHealth(routerPort int, cliVersion string) []HealthCheck {
+	return checkHealthWith(defaultHealthDeps(), routerPort, cliVersion)
+}
+
+func checkHealthWith(d healthDeps, routerPort int, cliVersion string) []HealthCheck {
 	var checks []HealthCheck
 
-	checks = append(checks, checkServiceRegistered())
-	checks = append(checks, checkBinaryMatch())
-	checks = append(checks, checkRouterVersion(cliVersion))
-	checks = append(checks, checkRouterListening(routerPort))
-	checks = append(checks, checkPortForward(routerPort))
+	checks = append(checks, checkServiceRegistered(d))
+	checks = append(checks, checkBinaryMatch(d))
+	checks = append(checks, checkRouterVersion(d, cliVersion))
+	checks = append(checks, checkRouterListening(d, routerPort))
+	checks = append(checks, checkPortForward(d, routerPort))
 
 	return checks
 }
 
-func checkServiceRegistered() HealthCheck {
-	if IsRunning() {
+func checkServiceRegistered(d healthDeps) HealthCheck {
+	if d.isRunning() {
 		return HealthCheck{
 			Name:   "service",
 			Status: "ok",
@@ -47,8 +73,8 @@ func checkServiceRegistered() HealthCheck {
 	}
 }
 
-func checkBinaryMatch() HealthCheck {
-	installed := InstalledBinaryPath()
+func checkBinaryMatch(d healthDeps) HealthCheck {
+	installed := d.installedBinaryPath()
 	if installed == "" {
 		return HealthCheck{
 			Name:   "binary",
@@ -58,7 +84,7 @@ func checkBinaryMatch() HealthCheck {
 		}
 	}
 
-	current, err := os.Executable()
+	current, err := d.executable()
 	if err != nil {
 		return HealthCheck{
 			Name:   "binary",
@@ -83,8 +109,8 @@ func checkBinaryMatch() HealthCheck {
 	}
 }
 
-func checkRouterVersion(cliVersion string) HealthCheck {
-	running := RunningRouterVersion()
+func checkRouterVersion(d healthDeps, cliVersion string) HealthCheck {
+	running := d.runningRouterVersion()
 	if running == "" {
 		return HealthCheck{
 			Name:   "router_version",
@@ -108,10 +134,10 @@ func checkRouterVersion(cliVersion string) HealthCheck {
 	}
 }
 
-func checkRouterListening(port int) HealthCheck {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
+func checkRouterListening(d healthDeps, port int) HealthCheck {
+	conn, err := d.dialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
-		if IsRunning() {
+		if d.isRunning() {
 			return HealthCheck{
 				Name:   "router_port",
 				Status: "error",
@@ -128,7 +154,7 @@ func checkRouterListening(port int) HealthCheck {
 	}
 	_ = conn.Close()
 
-	proc := processOnPort(port)
+	proc := d.processOnPort(port)
 	if proc != "" && !strings.Contains(proc, "gtl") {
 		return HealthCheck{
 			Name:   "router_port",
@@ -145,8 +171,8 @@ func checkRouterListening(port int) HealthCheck {
 	}
 }
 
-func checkPortForward(routerPort int) HealthCheck {
-	if !IsPortForwardConfigured() {
+func checkPortForward(d healthDeps, routerPort int) HealthCheck {
+	if !d.isPortForwardConfigured() {
 		return HealthCheck{
 			Name:   "port_forwarding",
 			Status: "warn",
@@ -155,7 +181,7 @@ func checkPortForward(routerPort int) HealthCheck {
 		}
 	}
 
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:443", 2*time.Second)
+	conn, err := d.dialTimeout("tcp", "127.0.0.1:443", 2*time.Second)
 	if err != nil {
 		return HealthCheck{
 			Name:   "port_forwarding",

@@ -156,6 +156,20 @@ type dbInfo struct {
 	adapter  database.Adapter
 }
 
+// resolveDBPaths returns the resolved target and template paths for a database
+// adapter. SQLite paths are made absolute; PostgreSQL names pass through as-is.
+func resolveDBPaths(adapterName, absPath, mainRepo, dbName, template string) (target, tmpl string) {
+	target = dbName
+	if adapterName == "sqlite" {
+		target = filepath.Join(absPath, dbName)
+	}
+	tmpl = template
+	if adapterName == "sqlite" && template != "" {
+		tmpl = filepath.Join(mainRepo, template)
+	}
+	return target, tmpl
+}
+
 func resolveDB() (*dbInfo, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -183,19 +197,12 @@ func resolveDB() (*dbInfo, error) {
 		return nil, err
 	}
 
-	target := dbName
-	if adapterName == "sqlite" {
-		target = filepath.Join(absPath, dbName)
-	}
-
 	template := pc.DatabaseTemplate()
-	if adapterName == "sqlite" && template != "" {
-		template = filepath.Join(mainRepo, template)
-	}
+	target, tmpl := resolveDBPaths(adapterName, absPath, mainRepo, dbName, template)
 
 	return &dbInfo{
 		target:   target,
-		template: template,
+		template: tmpl,
 		adapter:  adapter,
 	}, nil
 }

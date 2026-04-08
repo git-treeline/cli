@@ -22,14 +22,41 @@ var templateLocks sync.Map
 
 // PostgreSQL implements the Adapter interface for PostgreSQL databases.
 // Clone uses createdb --template, Drop uses dropdb --if-exists.
-type PostgreSQL struct{}
+type PostgreSQL struct {
+	execRun    func(name string, args ...string) error
+	execOutput func(name string, args ...string) ([]byte, error)
+}
+
+func (pg *PostgreSQL) run(name string, args ...string) error {
+	if pg.execRun != nil {
+		return pg.execRun(name, args...)
+	}
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func (pg *PostgreSQL) runSilent(name string, args ...string) error {
+	if pg.execRun != nil {
+		return pg.execRun(name, args...)
+	}
+	return exec.Command(name, args...).Run()
+}
+
+func (pg *PostgreSQL) output(name string, args ...string) ([]byte, error) {
+	if pg.execOutput != nil {
+		return pg.execOutput(name, args...)
+	}
+	return exec.Command(name, args...).Output()
+}
 
 func (pg *PostgreSQL) Exists(name string) (bool, error) {
 	if !dbIdentifierRe.MatchString(name) {
 		return false, fmt.Errorf("invalid database identifier: %q", name)
 	}
 
-	out, err := exec.Command("psql", "-lqt").Output()
+	out, err := pg.output("psql", "-lqt")
 	if err != nil {
 		return false, fmt.Errorf("failed to list databases: %w", err)
 	}
@@ -71,12 +98,9 @@ func (pg *PostgreSQL) Clone(template, target string) error {
 		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s' AND pid <> pg_backend_pid();",
 		template,
 	)
-	_ = exec.Command("psql", "-d", "postgres", "-c", terminateSQL).Run()
+	_ = pg.runSilent("psql", "-d", "postgres", "-c", terminateSQL)
 
-	cmd := exec.Command("createdb", target, "--template", template)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := pg.run("createdb", target, "--template", template); err != nil {
 		return fmt.Errorf("failed to clone database %s -> %s: %w", template, target, err)
 	}
 
@@ -84,7 +108,10 @@ func (pg *PostgreSQL) Clone(template, target string) error {
 }
 
 func (pg *PostgreSQL) Drop(target string) error {
-	return exec.Command("dropdb", "--if-exists", target).Run()
+	if !dbIdentifierRe.MatchString(target) {
+		return fmt.Errorf("invalid database identifier: %q", target)
+	}
+	return pg.runSilent("dropdb", "--if-exists", target)
 }
 
 func (pg *PostgreSQL) Restore(target, dumpFile string) error {
@@ -92,21 +119,17 @@ func (pg *PostgreSQL) Restore(target, dumpFile string) error {
 		return fmt.Errorf("invalid database identifier: %q", target)
 	}
 
-	cmd := exec.Command("createdb", target)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := pg.run("createdb", target); err != nil {
 		return fmt.Errorf("creating database %s: %w", target, err)
 	}
 
+	var err error
 	if isCustomFormat(dumpFile) {
-		cmd = exec.Command("pg_restore", "--no-owner", "--no-acl", "-d", target, dumpFile)
+		err = pg.run("pg_restore", "--no-owner", "--no-acl", "-d", target, dumpFile)
 	} else {
-		cmd = exec.Command("psql", "-d", target, "-f", dumpFile)
+		err = pg.run("psql", "-d", target, "-f", dumpFile)
 	}
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err != nil {
 		return fmt.Errorf("restoring %s into %s: %w", dumpFile, target, err)
 	}
 	return nil

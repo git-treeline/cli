@@ -8,7 +8,16 @@ import (
 	"path/filepath"
 )
 
-type SQLite struct{}
+type SQLite struct {
+	newCommand func(name string, args ...string) *exec.Cmd
+}
+
+func (s *SQLite) command(name string, args ...string) *exec.Cmd {
+	if s.newCommand != nil {
+		return s.newCommand(name, args...)
+	}
+	return exec.Command(name, args...)
+}
 
 func (s *SQLite) Exists(name string) (bool, error) {
 	_, err := os.Stat(name)
@@ -65,7 +74,7 @@ func (s *SQLite) Restore(target, dumpFile string) error {
 	}
 	defer func() { _ = dump.Close() }()
 
-	cmd := exec.Command("sqlite3", target)
+	cmd := s.command("sqlite3", target)
 	cmd.Stdin = dump
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

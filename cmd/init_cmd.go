@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/git-treeline/git-treeline/internal/allocator"
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/confirm"
 	"github.com/git-treeline/git-treeline/internal/detect"
@@ -133,11 +132,12 @@ var initCmd = &cobra.Command{
 
 		base := uc.PortBase()
 		routerPort := uc.RouterPort()
-		if base == routerPort {
+		switch classifyPortConfig(base, routerPort) {
+		case "conflict":
 			fmt.Println()
 			fmt.Println(style.Warnf("port.base (%d) conflicts with router.port (%d).", base, routerPort))
 			fmt.Println(style.Dimf("  The router needs its own port. Fix: gtl config set port.base %d", routerPort+1))
-		} else if allocator.IsCommonDevPort(base) {
+		case "common_dev_port":
 			fmt.Println()
 			fmt.Println(style.Warnf("port.base is %d — a common framework default.", base))
 			fmt.Println(style.Dimf("  Port 3000 should stay free for the proxy so third-party services"))

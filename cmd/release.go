@@ -258,6 +258,11 @@ func runReleaseBatch(project string, all bool) error {
 	return nil
 }
 
+// isInsideDir reports whether cwd is equal to or a child of dir.
+func isInsideDir(cwd, dir string) bool {
+	return cwd == dir || strings.HasPrefix(cwd+string(os.PathSeparator), dir+string(os.PathSeparator))
+}
+
 func removeWorktreeDir(absPath string, force bool) {
 	if _, err := os.Stat(absPath); err != nil {
 		return
@@ -265,7 +270,7 @@ func removeWorktreeDir(absPath string, force bool) {
 
 	cwd, _ := os.Getwd()
 	cwdAbs, _ := filepath.Abs(cwd)
-	insideWorktree := cwdAbs == absPath || strings.HasPrefix(cwdAbs+string(os.PathSeparator), absPath+string(os.PathSeparator))
+	insideWorktree := isInsideDir(cwdAbs, absPath)
 
 	if insideWorktree {
 		mainRepo := worktree.DetectMainRepo(absPath)
