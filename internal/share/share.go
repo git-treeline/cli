@@ -69,7 +69,7 @@ func NewTokenHandler(token string, appPort int) http.Handler {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)
-			r.Out.Host = r.In.Host
+			r.Out.Header.Set("X-Forwarded-Host", r.In.Host)
 		},
 	}
 

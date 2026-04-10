@@ -207,7 +207,7 @@ func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, targetPort in
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(target)
-			pr.Out.Host = pr.In.Host
+			pr.Out.Header.Set("X-Forwarded-Host", pr.In.Host)
 			pr.Out.Header.Set("X-Gtl-Hops", strconv.Itoa(hops+1))
 			if pr.In.TLS != nil {
 				pr.Out.Header.Set("X-Forwarded-Proto", "https")

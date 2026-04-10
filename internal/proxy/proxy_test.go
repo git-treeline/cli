@@ -55,10 +55,11 @@ func TestProxyPreservesHostHeader(t *testing.T) {
 	targetPort := freePort(t)
 	listenPort := freePort(t)
 
-	var receivedHost string
+	var receivedHost, receivedFwdHost string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		receivedHost = r.Host
+		receivedFwdHost = r.Header.Get("X-Forwarded-Host")
 		w.WriteHeader(http.StatusOK)
 	})
 	target := &http.Server{Addr: fmt.Sprintf(":%d", targetPort), Handler: mux}
@@ -79,8 +80,12 @@ func TestProxyPreservesHostHeader(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 
-	if receivedHost != "myapp.localhost" {
-		t.Errorf("expected host 'myapp.localhost', got %q", receivedHost)
+	if receivedFwdHost != "myapp.localhost" {
+		t.Errorf("expected X-Forwarded-Host 'myapp.localhost', got %q", receivedFwdHost)
+	}
+	wantHost := fmt.Sprintf("127.0.0.1:%d", targetPort)
+	if receivedHost != wantHost {
+		t.Errorf("expected backend Host %q, got %q", wantHost, receivedHost)
 	}
 }
 
