@@ -51,7 +51,7 @@ func TestProxyForwardsHTTP(t *testing.T) {
 	}
 }
 
-func TestProxyPreservesHostHeader(t *testing.T) {
+func TestProxyForwardsHostViaXForwardedHost(t *testing.T) {
 	targetPort := freePort(t)
 	listenPort := freePort(t)
 

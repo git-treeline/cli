@@ -602,37 +602,11 @@ func dialWebSocket(t *testing.T, tsURL, host, path string) string {
 }
 
 func TestRouterWebSocketUpgrade(t *testing.T) {
-	targetPort := freePort(t)
-	var gotUpgrade, gotConn string
-	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		gotUpgrade = r.Header.Get("Upgrade")
-		gotConn = r.Header.Get("Connection")
-		if !strings.EqualFold(gotUpgrade, "websocket") {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		hj, ok := w.(http.Hijacker)
-		if !ok {
-			http.Error(w, "hijack not supported", http.StatusInternalServerError)
-			return
-		}
-		accept := wsAcceptKey(r.Header.Get("Sec-WebSocket-Key"))
-		conn, buf, err := hj.Hijack()
-		if err != nil {
-			return
-		}
-		defer func() { _ = conn.Close() }()
-		_, _ = fmt.Fprintf(buf, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", accept)
-		_ = buf.Flush()
-		frame := make([]byte, 256)
-		n, _ := conn.Read(frame)
-		_, _ = conn.Write(frame[:n])
-	})
-	srv := &http.Server{Addr: fmt.Sprintf(":%d", targetPort), Handler: mux}
-	go func() { _ = srv.ListenAndServe() }()
-	defer func() { _ = srv.Close() }()
-	waitForPort(t, targetPort)
+	// End-to-end: WebSocket upgrade through the router to a host-validating
+	// backend (mimicking Next.js/Vite). Proves the router rewrites Host to
+	// localhost so the backend accepts, while the external hostname travels
+	// via X-Forwarded-Host.
+	targetPort := newWSBackend(t, "/ws")
 
 	reg := testRegistry(t, []registry.Allocation{
 		{"project": "myapp", "branch": "main", "port": float64(targetPort), "ports": []any{float64(targetPort)}, "worktree": "/tmp/myapp"},
@@ -643,17 +617,16 @@ func TestRouterWebSocketUpgrade(t *testing.T) {
 
 	status := dialWebSocket(t, ts.URL, "myapp-main.prt.dev", "/ws")
 	if !strings.Contains(status, "101") {
-		t.Fatalf("expected 101 Switching Protocols, got: %s (Upgrade=%q Connection=%q)", status, gotUpgrade, gotConn)
+		t.Fatalf("expected 101 Switching Protocols, got: %s", status)
 	}
 }
 
 func TestRouterWebSocketBlockedWithoutForwardedHost(t *testing.T) {
-	// Verify that the host-validating backend would reject the request
-	// if the external hostname were passed through as Host (the old behavior).
-	targetPort := newWSBackend(t, "/_next/webpack-hmr")
+	// Proves the host-validating backend rejects the external hostname
+	// directly — this is the failure mode the fix addresses.
+	targetPort := newWSBackend(t, "/ws")
 
-	// Talk directly to the backend with an external Host header.
-	status := dialWebSocket(t, fmt.Sprintf("http://127.0.0.1:%d", targetPort), "myapp-main.prt.dev", "/_next/webpack-hmr")
+	status := dialWebSocket(t, fmt.Sprintf("http://127.0.0.1:%d", targetPort), "myapp-main.prt.dev", "/ws")
 	if !strings.Contains(status, "403") {
 		t.Fatalf("expected backend to reject external Host with 403, got: %s", status)
 	}

@@ -83,7 +83,10 @@ func TestTokenHandler_TokenPath_SetsCookieAndRedirects(t *testing.T) {
 }
 
 func TestTokenHandler_ValidCookie_Proxies(t *testing.T) {
+	var receivedHost, receivedFwdHost string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHost = r.Host
+		receivedFwdHost = r.Header.Get("X-Forwarded-Host")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok from backend"))
 	}))
@@ -96,6 +99,7 @@ func TestTokenHandler_ValidCookie_Proxies(t *testing.T) {
 	h := NewTokenHandler(token, port)
 
 	req := httptest.NewRequest(http.MethodGet, "/some/path", nil)
+	req.Host = "myapp.share.example.com"
 	req.AddCookie(&http.Cookie{Name: cookieName, Value: cookieValue(token)})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -105,6 +109,12 @@ func TestTokenHandler_ValidCookie_Proxies(t *testing.T) {
 	}
 	if body := rec.Body.String(); body != "ok from backend" {
 		t.Errorf("unexpected body: %q", body)
+	}
+	if receivedFwdHost != "myapp.share.example.com" {
+		t.Errorf("expected X-Forwarded-Host 'myapp.share.example.com', got %q", receivedFwdHost)
+	}
+	if receivedHost == "myapp.share.example.com" {
+		t.Errorf("backend Host should be localhost, not the external hostname; got %q", receivedHost)
 	}
 }
 
