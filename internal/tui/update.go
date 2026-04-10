@@ -2,13 +2,15 @@ package tui
 
 import (
 	"fmt"
-	"os/exec"
-	"runtime"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
-	"github.com/git-treeline/git-treeline/internal/supervisor"
 )
+
+type envSyncResultMsg struct{ err error }
+type newWorktreeResultMsg struct{ err error }
+type releaseResultMsg struct{ err error }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -27,10 +29,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
+		m.statusMsg = ""
 		m.polling = true
 		return m, tea.Batch(doPoll(), doTick())
 
 	case supervisorResultMsg:
+		m.polling = true
+		return m, doPoll()
+
+	case releaseResultMsg:
+		if msg.err != nil {
+			m.statusMsg = "release failed: " + msg.err.Error()
+		} else {
+			m.statusMsg = "worktree released"
+		}
+		m.polling = true
+		return m, doPoll()
+
+	case envSyncResultMsg:
+		if msg.err != nil {
+			m.statusMsg = "env sync failed: " + msg.err.Error()
+		} else {
+			m.statusMsg = "env synced"
+		}
+		m.polling = true
+		return m, doPoll()
+
+	case newWorktreeResultMsg:
+		if msg.err != nil {
+			m.statusMsg = "create failed: " + msg.err.Error()
+		} else {
+			m.statusMsg = "worktree created"
+		}
 		m.polling = true
 		return m, doPoll()
 
@@ -40,6 +70,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyPressMsg:
+		if m.inputMode != "" {
+			return m.updateInput(msg)
+		}
 		if m.filterMode {
 			return m.updateFilter(msg)
 		}
@@ -90,6 +123,14 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.selectedWorktree() != nil {
 			m.confirmKind = "release"
 		}
+
+	case "e":
+		return m, m.syncEnv()
+
+	case "n":
+		m.inputMode = "new_worktree"
+		m.inputText = ""
+		return m, nil
 
 	case "/":
 		m.filterMode = true
@@ -269,13 +310,14 @@ func (m *Model) toggleSupervisor() tea.Cmd {
 	if wt == nil {
 		return nil
 	}
-	sockPath := supervisor.SocketPath(wt.WorktreePath)
+	sockPath := m.deps.supervisorSock(wt.WorktreePath)
 	command := "start"
 	if wt.Supervisor == "running" {
 		command = "stop"
 	}
+	send := m.deps.supervisorSend
 	return func() tea.Msg {
-		_, _ = supervisor.Send(sockPath, command)
+		_, _ = send(sockPath, command)
 		return supervisorResultMsg{}
 	}
 }
@@ -285,10 +327,62 @@ func (m *Model) restartSupervisor() tea.Cmd {
 	if wt == nil {
 		return nil
 	}
-	sockPath := supervisor.SocketPath(wt.WorktreePath)
+	sockPath := m.deps.supervisorSock(wt.WorktreePath)
+	send := m.deps.supervisorSend
 	return func() tea.Msg {
-		_, _ = supervisor.Send(sockPath, "restart")
+		_, _ = send(sockPath, "restart")
 		return supervisorResultMsg{}
+	}
+}
+
+func (m Model) updateInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		branch := strings.TrimSpace(m.inputText)
+		m.inputMode = ""
+		m.inputText = ""
+		if branch == "" {
+			return m, nil
+		}
+		return m, m.createWorktree(branch)
+	case "escape", "esc":
+		m.inputMode = ""
+		m.inputText = ""
+		return m, nil
+	case "backspace":
+		if len(m.inputText) > 0 {
+			m.inputText = m.inputText[:len(m.inputText)-1]
+		}
+	default:
+		ch := msg.Key().Text
+		if ch != "" && !strings.ContainsAny(ch, " \t\n\r") {
+			m.inputText += ch
+		}
+	}
+	return m, nil
+}
+
+func (m *Model) syncEnv() tea.Cmd {
+	wt := m.selectedWorktree()
+	if wt == nil || wt.WorktreePath == "" {
+		return nil
+	}
+	wtPath := wt.WorktreePath
+	fn := m.deps.syncEnv
+	return func() tea.Msg {
+		return envSyncResultMsg{err: fn(wtPath)}
+	}
+}
+
+func (m *Model) createWorktree(branch string) tea.Cmd {
+	wt := m.selectedWorktree()
+	if wt == nil || wt.WorktreePath == "" {
+		return nil
+	}
+	existingPath := wt.WorktreePath
+	fn := m.deps.createWorktree
+	return func() tea.Msg {
+		return newWorktreeResultMsg{err: fn(existingPath, branch)}
 	}
 }
 
@@ -297,21 +391,11 @@ func (m *Model) openInBrowser() {
 	if wt == nil || len(wt.Ports) == 0 {
 		return
 	}
-	url := fmt.Sprintf("http://localhost:%d", wt.Ports[0])
-	openURL(url)
-}
-
-func openURL(url string) {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", url)
-	case "linux":
-		cmd = exec.Command("xdg-open", url)
-	default:
-		return
+	url := wt.RouterURL
+	if url == "" {
+		url = fmt.Sprintf("http://localhost:%d", wt.Ports[0])
 	}
-	_ = cmd.Start()
+	m.deps.openURL(url)
 }
 
 func (m *Model) releaseWorktree() tea.Cmd {
@@ -320,9 +404,8 @@ func (m *Model) releaseWorktree() tea.Cmd {
 		return nil
 	}
 	wtPath := wt.WorktreePath
+	fn := m.deps.releaseWorktree
 	return func() tea.Msg {
-		cmd := exec.Command("git-treeline", "release", "--force", wtPath)
-		_ = cmd.Run()
-		return supervisorResultMsg{}
+		return releaseResultMsg{err: fn(wtPath)}
 	}
 }

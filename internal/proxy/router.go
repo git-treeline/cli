@@ -410,6 +410,15 @@ func BuildRouterURL(port int, project, branch, domain string, routerPort int, sv
 	return fmt.Sprintf("http://localhost:%d", port)
 }
 
+// BuildTunnelURL returns the tunnel URL for a given project/branch when
+// a tunnel domain is configured, or an empty string if not applicable.
+func BuildTunnelURL(project, branch, tunnelDomain string) string {
+	if tunnelDomain == "" || branch == "" {
+		return ""
+	}
+	return "https://" + RouteKey(project, branch) + "." + tunnelDomain
+}
+
 const maxDNSLabel = 63
 
 func truncateDNSLabel(label string) string {

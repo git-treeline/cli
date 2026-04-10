@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -61,10 +62,13 @@ func (m Model) View() tea.View {
 	content := lipgloss.JoinVertical(lipgloss.Left, panels, bar)
 
 	if m.showHelp {
-		content = m.renderHelpOverlay(content)
+		content = m.renderHelpOverlay()
 	}
 	if m.confirmKind != "" {
-		content = m.renderConfirmOverlay(content)
+		content = m.renderConfirmOverlay()
+	}
+	if m.inputMode != "" {
+		content = m.renderInputOverlay()
 	}
 
 	v := tea.NewView(content)
@@ -153,13 +157,20 @@ func (m *Model) renderDetailPanel(width, height int) string {
 
 	rows := []struct{ label, value string }{
 		{"Port", portsString(wt.Ports)},
-		{"Database", valueOrDash(wt.Database)},
-		{"Redis", redisDisplay(wt)},
-		{"Supervisor", supervisorDisplay(wt)},
-		{"Listening", boolDisplay(wt.Listening)},
+	}
+
+	if wt.RouterURL != "" {
+		rows = append(rows, struct{ label, value string }{"URL", truncate(wt.RouterURL, width-16)})
+	}
+	if wt.TunnelURL != "" {
+		rows = append(rows, struct{ label, value string }{"Tunnel", truncate(wt.TunnelURL, width-16)})
 	}
 
 	rows = append(rows,
+		struct{ label, value string }{"Database", valueOrDash(wt.Database)},
+		struct{ label, value string }{"Redis", redisDisplay(wt)},
+		struct{ label, value string }{"Supervisor", supervisorDisplay(wt)},
+		struct{ label, value string }{"Listening", boolDisplay(wt.Listening)},
 		struct{ label, value string }{"Env file", valueOrDash(wt.EnvFile)},
 		struct{ label, value string }{"Worktree", truncate(wt.WorktreePath, width-16)},
 	)
@@ -174,12 +185,17 @@ func (m *Model) renderDetailPanel(width, height int) string {
 	if len(wt.Links) > 0 {
 		b.WriteString("\n")
 		b.WriteString("  ")
-		b.WriteString(detailLabel.Render("Links"))
+		b.WriteString(detailLabel.Render("Overrides"))
 		b.WriteString("\n")
-		for k, v := range wt.Links {
+		linkKeys := make([]string, 0, len(wt.Links))
+		for k := range wt.Links {
+			linkKeys = append(linkKeys, k)
+		}
+		sort.Strings(linkKeys)
+		for _, k := range linkKeys {
 			b.WriteString("    ")
 			b.WriteString(linkIndicatorStyle.Render("⇄ "+k))
-			b.WriteString(detailValue.Render(" → "+v))
+			b.WriteString(detailValue.Render(" → "+wt.Links[k]))
 			b.WriteString("\n")
 		}
 	}
@@ -256,10 +272,20 @@ func (m *Model) renderStatusBar(width int) string {
 	stats := fmt.Sprintf("%s%d projects · %d worktrees · %d running · serve: %s",
 		pollIndicator, len(m.snapshot.Projects), len(m.snapshot.Worktrees), running, serveStr)
 
+	if m.snapshot.TunnelDomain != "" {
+		stats += " · tunnel: " + m.snapshot.TunnelDomain
+	}
+
+	if m.statusMsg != "" {
+		stats += " · " + m.statusMsg
+	}
+
 	keys := []struct{ key, desc string }{
 		{"s", "start/stop"},
 		{"o", "open"},
 		{"r", "restart"},
+		{"e", "env sync"},
+		{"n", "new"},
 		{"d", "release"},
 		{"/", "filter"},
 		{"?", "help"},
@@ -282,7 +308,7 @@ func (m *Model) renderStatusBar(width int) string {
 
 // --- Help overlay ---
 
-func (m *Model) renderHelpOverlay(_ string) string {
+func (m *Model) renderHelpOverlay() string {
 	help := `
   gtl dashboard — Keyboard Shortcuts
 
@@ -292,6 +318,8 @@ func (m *Model) renderHelpOverlay(_ string) string {
   s             Start/stop supervisor
   o             Open in browser
   r             Restart supervisor
+  e             Sync env file
+  n             New worktree
   d             Release worktree (confirm)
   /             Filter worktrees
   Esc           Clear filter
@@ -310,7 +338,7 @@ func (m *Model) renderHelpOverlay(_ string) string {
 
 // --- Confirm overlay ---
 
-func (m *Model) renderConfirmOverlay(_ string) string {
+func (m *Model) renderConfirmOverlay() string {
 	wt := m.selectedWorktree()
 	if wt == nil {
 		return ""
@@ -319,6 +347,18 @@ func (m *Model) renderConfirmOverlay(_ string) string {
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(danger).
+		Padding(1, 2).
+		Render(prompt)
+
+	return lipgloss.Place(m.width, m.height-statusBarHeight,
+		lipgloss.Center, lipgloss.Center, box)
+}
+
+func (m *Model) renderInputOverlay() string {
+	prompt := fmt.Sprintf("New worktree — branch name:\n\n  %s▌\n\n  Enter = create   Esc = cancel", m.inputText)
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(highlight).
 		Padding(1, 2).
 		Render(prompt)
 

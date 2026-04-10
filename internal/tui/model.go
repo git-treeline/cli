@@ -1,12 +1,19 @@
 package tui
 
 import (
+	"fmt"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/lipgloss/v2"
+	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/git-treeline/internal/setup"
+	"github.com/git-treeline/git-treeline/internal/supervisor"
+	"github.com/git-treeline/git-treeline/internal/worktree"
 )
 
 const pollInterval = 2 * time.Second
@@ -18,6 +25,17 @@ const (
 	paneList focusPane = iota
 	paneDetail
 )
+
+// actionDeps holds injectable functions for side-effectful operations.
+// Production code sets these to real implementations; tests use stubs.
+type actionDeps struct {
+	supervisorSend  func(sockPath, command string) (string, error)
+	supervisorSock  func(worktreePath string) string
+	openURL         func(url string)
+	releaseWorktree func(worktreePath string) error
+	syncEnv         func(worktreePath string) error
+	createWorktree  func(existingWorktreePath, branch string) error
+}
 
 // Model is the root Bubble Tea model for the gtl dashboard.
 type Model struct {
@@ -36,6 +54,10 @@ type Model struct {
 	showHelp     bool
 	confirmKind  string // "release" or ""
 	quitting     bool
+	inputMode    string // "" or "new_worktree"
+	inputText    string
+	statusMsg    string // transient status message
+	deps         actionDeps
 }
 
 // flatEntry is a denormalized row in the worktree list.
@@ -61,13 +83,71 @@ func doPoll() tea.Cmd {
 	}
 }
 
+func defaultDeps() actionDeps {
+	return actionDeps{
+		supervisorSend: supervisor.Send,
+		supervisorSock: supervisor.SocketPath,
+		openURL:        openURLDefault,
+		releaseWorktree: func(wtPath string) error {
+			return exec.Command("git-treeline", "release", "--force", wtPath).Run()
+		},
+		syncEnv: func(wtPath string) error {
+			uc := config.LoadUserConfig("")
+			return setup.RegenerateEnvFile(wtPath, uc)
+		},
+		createWorktree: func(existingWorktreePath, branch string) error {
+			mainRepo := worktree.DetectMainRepo(existingWorktreePath)
+			if mainRepo == "" {
+				return fmt.Errorf("cannot detect main repo from %s", existingWorktreePath)
+			}
+			uc := config.LoadUserConfig("")
+			pc := config.LoadProjectConfig(mainRepo)
+			projectName := pc.Project()
+
+			wtPath := uc.ResolveWorktreePath(mainRepo, projectName, branch)
+			if wtPath == "" {
+				wtPath = mainRepo + "-" + branch
+			}
+
+			if worktree.BranchExists(branch) {
+				_ = worktree.Fetch("origin", branch)
+				if err := worktree.Create(wtPath, branch, false, ""); err != nil {
+					return err
+				}
+			} else {
+				base := worktree.DetectDefaultBranch(mainRepo)
+				if err := worktree.Create(wtPath, branch, true, base); err != nil {
+					return err
+				}
+			}
+
+			s := setup.New(wtPath, mainRepo, uc)
+			_, err := s.Run()
+			return err
+		},
+	}
+}
+
+func openURLDefault(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	default:
+		return
+	}
+	_ = cmd.Start()
+}
+
 // NewModel creates the initial dashboard model.
 func NewModel() Model {
 	s := spinner.New(
 		spinner.WithSpinner(spinner.MiniDot),
 		spinner.WithStyle(lipgloss.NewStyle().Foreground(highlight)),
 	)
-	return Model{spinner: s, polling: true}
+	return Model{spinner: s, polling: true, deps: defaultDeps()}
 }
 
 func (m Model) Init() tea.Cmd {
