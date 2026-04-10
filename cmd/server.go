@@ -27,12 +27,14 @@ import (
 var startAwait bool
 var startAwaitTimeout int
 var startWith string
+var stopKill bool
 
 func init() {
 	startCmd.Flags().BoolVar(&startAwait, "await", false, "Block until the server is accepting connections, then exit 0")
 	startCmd.Flags().IntVar(&startAwaitTimeout, "await-timeout", 60, "Timeout in seconds for --await")
 	startCmd.Flags().StringVar(&startWith, "with", "", "Comma-separated hooks to activate (defined in .treeline.yml hooks:)")
 	rootCmd.AddCommand(startCmd)
+	stopCmd.Flags().BoolVar(&stopKill, "kill", false, "Shut down the supervisor entirely instead of keeping it alive")
 	rootCmd.AddCommand(stopCmd)
 	rootCmd.AddCommand(restartCmd)
 }
@@ -173,14 +175,20 @@ var stopCmd = &cobra.Command{
 	Use:   "stop",
 	Short: "Stop the dev server (supervisor stays alive for resume)",
 	Long: `Stop the running dev server process. The supervisor remains alive so
-the server can be resumed with 'gtl start'. Use Ctrl+C in the original
-terminal to fully exit the supervisor.`,
+the server can be resumed with 'gtl start'. Use --kill to shut down the
+supervisor entirely.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		sockPath, err := resolveSocket()
 		if err != nil {
 			return err
 		}
-		resp, err := supervisor.Send(sockPath, "stop")
+
+		command := "stop"
+		if stopKill {
+			command = "shutdown"
+		}
+
+		resp, err := supervisor.Send(sockPath, command)
 		if err != nil {
 			return err
 		}
@@ -190,7 +198,12 @@ terminal to fully exit the supervisor.`,
 				Hint:    "The supervisor may be in an unexpected state. Check 'gtl start' output.",
 			}
 		}
-		fmt.Println("Server stopped. Supervisor still running — 'gtl start' to resume.")
+
+		if stopKill {
+			fmt.Println("Supervisor shut down.")
+		} else {
+			fmt.Println("Server stopped. Supervisor still running — 'gtl start' to resume.")
+		}
 		return nil
 	},
 }

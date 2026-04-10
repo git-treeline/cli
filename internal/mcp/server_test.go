@@ -282,6 +282,20 @@ func TestHandleStop_NotRunning(t *testing.T) {
 	}
 }
 
+func TestHandleStop_KillNotRunning(t *testing.T) {
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "stop"
+	req.Params.Arguments = map[string]any{"path": "/tmp/nonexistent-wt-for-test", "kill": true}
+
+	result, err := handleStop(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Error("expected error when supervisor is not running")
+	}
+}
+
 func TestHandleRestart_NotRunning(t *testing.T) {
 	req := mcplib.CallToolRequest{}
 	req.Params.Name = "restart"

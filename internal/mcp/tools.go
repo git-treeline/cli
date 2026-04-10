@@ -243,7 +243,15 @@ func handleStop(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallTool
 	absPath := resolvePath(req)
 	sockPath := supervisor.SocketPath(absPath)
 
-	resp, err := supervisor.Send(sockPath, "stop")
+	args := req.GetArguments()
+	kill, _ := args["kill"].(bool)
+
+	command := "stop"
+	if kill {
+		command = "shutdown"
+	}
+
+	resp, err := supervisor.Send(sockPath, command)
 	if err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("Supervisor not running: %v", err)), nil
 	}
@@ -251,6 +259,9 @@ func handleStop(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallTool
 		return mcplib.NewToolResultError(resp), nil
 	}
 
+	if kill {
+		return mcplib.NewToolResultText("Supervisor shut down."), nil
+	}
 	return mcplib.NewToolResultText("Server stopped. Supervisor still running — use `start` to resume."), nil
 }
 

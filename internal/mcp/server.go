@@ -74,9 +74,12 @@ func registerTools(s *mcpserver.MCPServer) {
 	), handleStart)
 
 	s.AddTool(mcplib.NewTool("stop",
-		mcplib.WithDescription("Stop the dev server process but keep the supervisor alive. The server can be quickly resumed with start without re-initializing. Use this to free up resources while keeping the worktree ready."),
+		mcplib.WithDescription("Stop the dev server process but keep the supervisor alive. The server can be quickly resumed with start without re-initializing. Use this to free up resources while keeping the worktree ready. Set kill=true to shut down the supervisor entirely (useful when the supervisor is stuck or needs a full restart)."),
 		mcplib.WithString("path",
 			mcplib.Description("Absolute path to the worktree directory (defaults to cwd if omitted)"),
+		),
+		mcplib.WithBoolean("kill",
+			mcplib.Description("If true, shut down the supervisor entirely instead of keeping it alive for resume. Default: false"),
 		),
 	), handleStop)
 
