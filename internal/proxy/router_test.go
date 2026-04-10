@@ -1,15 +1,20 @@
 package proxy
 
 import (
+	"bufio"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/git-treeline/git-treeline/internal/registry"
 )
@@ -433,10 +438,10 @@ func TestRouterRegistryOverridesAlias(t *testing.T) {
 
 func TestRouterWildcardFallback(t *testing.T) {
 	targetPort := freePort(t)
-	var receivedHost string
+	var receivedFwdHost string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		receivedHost = r.Host
+		receivedFwdHost = r.Header.Get("X-Forwarded-Host")
 		_, _ = fmt.Fprint(w, "wildcard ok")
 	})
 	target := &http.Server{Addr: fmt.Sprintf(":%d", targetPort), Handler: mux}
@@ -463,8 +468,8 @@ func TestRouterWildcardFallback(t *testing.T) {
 	if string(body) != "wildcard ok" {
 		t.Errorf("expected wildcard routing to work, got %q (status %d)", string(body), resp.StatusCode)
 	}
-	if !strings.Contains(receivedHost, "tenant1") {
-		t.Errorf("expected original Host header with tenant prefix, got %q", receivedHost)
+	if !strings.Contains(receivedFwdHost, "tenant1") {
+		t.Errorf("expected X-Forwarded-Host with tenant prefix, got %q", receivedFwdHost)
 	}
 }
 
@@ -517,6 +522,113 @@ func TestRouterRefreshPicksUpNewAllocations(t *testing.T) {
 	routes := router.Routes()
 	if routes["salt-main"] != 3001 {
 		t.Errorf("expected salt-main → 3001 after refresh, got %v", routes)
+	}
+}
+
+// wsAcceptKey computes the Sec-WebSocket-Accept value for a given key.
+func wsAcceptKey(key string) string {
+	h := sha1.New()
+	h.Write([]byte(key + "258EAFA5-E914-47DA-95CA-5AB5DF35BC65"))
+	return base64.StdEncoding.EncodeToString(h.Sum(nil))
+}
+
+// newWSBackend starts an HTTP server that accepts WebSocket upgrades on path,
+// rejecting requests whose Host header doesn't look like localhost (mimicking
+// Next.js / Vite dev-server host validation). Returns the port.
+func newWSBackend(t *testing.T, path string) int {
+	t.Helper()
+	port := freePort(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+		// Reject non-localhost Host — same check Next.js/Vite do.
+		host := r.Host
+		if i := strings.LastIndex(host, ":"); i != -1 {
+			host = host[:i]
+		}
+		if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+			http.Error(w, "forbidden: invalid Host header", http.StatusForbidden)
+			return
+		}
+		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			http.Error(w, "expected websocket upgrade", http.StatusBadRequest)
+			return
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "hijack not supported", http.StatusInternalServerError)
+			return
+		}
+		accept := wsAcceptKey(r.Header.Get("Sec-WebSocket-Key"))
+		conn, buf, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = fmt.Fprintf(buf, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", accept)
+		_ = buf.Flush()
+		frame := make([]byte, 256)
+		n, _ := conn.Read(frame)
+		_, _ = conn.Write(frame[:n])
+	})
+	srv := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: mux}
+	go func() { _ = srv.ListenAndServe() }()
+	t.Cleanup(func() { _ = srv.Close() })
+	waitForPort(t, port)
+	return port
+}
+
+// dialWebSocket sends a WebSocket upgrade request through the test server and
+// returns the HTTP status line.
+func dialWebSocket(t *testing.T, tsURL, host, path string) string {
+	t.Helper()
+	addr := strings.TrimPrefix(tsURL, "http://")
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	key := base64.StdEncoding.EncodeToString([]byte("test-websocket-key!!"))
+	_, _ = fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n",
+		path, host, key)
+
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	reader := bufio.NewReader(conn)
+	statusLine, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	return statusLine
+}
+
+func TestRouterWebSocketUpgrade(t *testing.T) {
+	// End-to-end: WebSocket upgrade through the router to a host-validating
+	// backend (mimicking Next.js/Vite). Proves the router rewrites Host to
+	// localhost so the backend accepts, while the external hostname travels
+	// via X-Forwarded-Host.
+	targetPort := newWSBackend(t, "/ws")
+
+	reg := testRegistry(t, []registry.Allocation{
+		{"project": "myapp", "branch": "main", "port": float64(targetPort), "ports": []any{float64(targetPort)}, "worktree": "/tmp/myapp"},
+	})
+	router := NewRouter(0, reg).WithBaseDomain("prt.dev")
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+
+	status := dialWebSocket(t, ts.URL, "myapp-main.prt.dev", "/ws")
+	if !strings.Contains(status, "101") {
+		t.Fatalf("expected 101 Switching Protocols, got: %s", status)
+	}
+}
+
+func TestRouterWebSocketBlockedWithoutForwardedHost(t *testing.T) {
+	// Proves the host-validating backend rejects the external hostname
+	// directly — this is the failure mode the fix addresses.
+	targetPort := newWSBackend(t, "/ws")
+
+	status := dialWebSocket(t, fmt.Sprintf("http://127.0.0.1:%d", targetPort), "myapp-main.prt.dev", "/ws")
+	if !strings.Contains(status, "403") {
+		t.Fatalf("expected backend to reject external Host with 403, got: %s", status)
 	}
 }
 
