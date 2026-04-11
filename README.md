@@ -119,6 +119,7 @@ gtl start
 
 ```bash
 gtl stop       # stops the server — supervisor stays alive, ready to resume
+gtl stop --kill # shuts down the supervisor entirely
 gtl start      # resumes the server in your original terminal
 gtl restart    # bounces the server in one step — logs keep flowing
 ```
@@ -777,7 +778,7 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl where <branch>` | | Print path to a worktree by branch name (use `project/branch` to disambiguate) |
 | `gtl prune` | `--stale` `--merged` `--drop-db` `--remove-worktree` `--force` | Remove orphaned allocations |
 | `gtl start` | `--await` `--await-timeout` | Run `commands.start` under supervisor (or resume). `--await` blocks until TCP-ready. |
-| `gtl stop` | | Stop the server process (supervisor stays alive) |
+| `gtl stop` | `--kill` | Stop the server process (supervisor stays alive). `--kill` shuts down the supervisor entirely. |
 | `gtl restart` | | Restart the server process in the original terminal |
 | `gtl open` | | Open current worktree in browser (prefers serve HTTPS URL) |
 | `gtl clone <url>` | (passthrough to git) | Clone + detect framework + init + setup in one step |

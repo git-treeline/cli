@@ -767,6 +767,27 @@ func TestSetProject_NoExistingKey(t *testing.T) {
 	}
 }
 
+func TestSetProject_IgnoresNestedKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".treeline.yml")
+	yml := "project: original\ndatabase:\n  project: nested-value\n"
+	_ = os.WriteFile(path, []byte(yml), 0o644)
+
+	pc := LoadProjectConfig(dir)
+	if err := pc.SetProject("renamed"); err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := os.ReadFile(path)
+	content := string(data)
+	if !strings.Contains(content, "project: renamed") {
+		t.Errorf("expected top-level project renamed, got:\n%s", content)
+	}
+	if !strings.Contains(content, "  project: nested-value") {
+		t.Errorf("expected nested project preserved, got:\n%s", content)
+	}
+}
+
 func TestSetProject_Idempotent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".treeline.yml")

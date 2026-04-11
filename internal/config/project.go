@@ -339,8 +339,7 @@ func (pc *ProjectConfig) SetProject(name string) error {
 	lines := strings.Split(content, "\n")
 	found := false
 	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "project:") {
+		if strings.HasPrefix(line, "project:") {
 			lines[i] = newLine
 			found = true
 			break

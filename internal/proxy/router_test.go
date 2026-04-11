@@ -689,3 +689,22 @@ func TestBuildRouterURL(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildTunnelURL(t *testing.T) {
+	tests := []struct {
+		name, project, branch, tunnelDomain, want string
+	}{
+		{"normal", "myapp", "feature-x", "gtltunnel.dev", "https://myapp-feature-x.gtltunnel.dev"},
+		{"empty domain", "myapp", "feature-x", "", ""},
+		{"empty branch", "myapp", "", "gtltunnel.dev", ""},
+		{"main branch", "salt", "main", "team.dev", "https://salt-main.team.dev"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BuildTunnelURL(tt.project, tt.branch, tt.tunnelDomain)
+			if got != tt.want {
+				t.Errorf("BuildTunnelURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

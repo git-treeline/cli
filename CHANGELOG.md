@@ -1,11 +1,18 @@
-## [0.37.0]
+## [0.38.0]
 
 - **Project name drift detection** — `gtl start`, `gtl setup`, and `gtl env sync` now detect when the `project` field in `.treeline.yml` doesn't match the registry allocation. On drift, the user is prompted to revert `.treeline.yml` to the registry name (default: yes). Declining aborts with a hint to release all worktrees first, then re-setup. `gtl doctor` reports drift diagnostically (text and `--json`).
+- **Worktree-aware `review` and `new`** — `gtl review` from inside a worktree now prompts to switch the current worktree to the PR branch instead of blocking. `gtl new` from a worktree warns about the target path and asks for confirmation; `--force`/`-f` skips the prompt. The old `worktreeGuard` hard error is removed.
+- **TUI dashboard expansion** — the interactive dashboard now shows router URLs, tunnel URLs, and supports env sync, worktree creation, and release actions directly from the TUI.
+- **`gtl stop --kill`** — shuts down the supervisor entirely instead of keeping it alive for resume. Also exposed as `kill: true` in the MCP `stop` tool.
+- **Fix WebSocket forwarding** — the router and proxy now forward the original `Host` as `X-Forwarded-Host` instead of rewriting `Host`, fixing WebSocket upgrades and static asset serving behind the HTTPS router.
+- **Cleaner CLI errors** — domain and state errors no longer print the full usage block. Only flag/argument errors show usage.
+
+## [0.37.0]
+
 - **`gtl routes` command** — shows routing URLs for the current worktree. Prints the HTTPS router URL (or localhost fallback) for every allocated port, plus tunnel URL when configured. Supports `--json` for scripting and MCP consumption.
 - **MCP write operations** — the MCP server now supports `setup`, `new`, `link`, `unlink`, `config_set`, and `env_sync` tools. Read tools expanded with `resolve`, `env`, `where`, and `routes`. Tool descriptions improved for AI agent consumption.
 - **Shared `proxy.BuildRouterURL`** — router URL construction extracted from three call sites into a single testable function. Eliminates duplication across `open`, `resolve`, `routes`, and MCP tools.
 - **`internal/envparse` package** — env file parsing extracted from `cmd/env.go` into a shared package with its own test suite. Used by both the CLI and MCP tools.
-- **Worktree-aware `review` and `new`** — `gtl review` from inside a worktree now prompts to switch the current worktree to the PR branch instead of blocking. `gtl new` from a worktree warns about the target path and asks for confirmation; `--force`/`-f` skips the prompt. The old `worktreeGuard` hard error is removed.
 - **Hardened test coverage** — added tests for database adapters (PostgreSQL, SQLite), service health checks, setup orchestration, worktree operations, tunnel cert management, doctor checks, release safety, and framework detection. +3,500 lines of test code.
 
 ## [0.36.0]
