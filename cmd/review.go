@@ -13,6 +13,7 @@ import (
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/git-treeline/git-treeline/internal/service"
 	"github.com/git-treeline/git-treeline/internal/setup"
+	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
 )
@@ -77,7 +78,7 @@ resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 			}
 			fmt.Println()
 			if err := switchWorktreeBranch(absPath, mainRepo, branch, false); err != nil {
-				return err
+				return cliErr(cmd, err)
 			}
 
 			pc := config.LoadProjectConfig(absPath)
@@ -87,22 +88,23 @@ resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 
 			if reviewOpen {
 				reg := registry.New("")
-				alloc := reg.Find(absPath)
-				ports := format.GetPorts(format.Allocation(alloc))
-				if len(ports) > 0 {
-					url := buildOpenURL(ports[0], projectName, branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
-					fmt.Printf("Opening %s\n", url)
-					_ = openBrowser(url)
+				if alloc := reg.Find(absPath); alloc != nil {
+					ports := format.GetPorts(format.Allocation(alloc))
+					if len(ports) > 0 {
+						url := buildOpenURL(ports[0], projectName, branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
+						fmt.Printf("Opening %s\n", url)
+						_ = openBrowser(url)
+					}
 				}
 			}
 
 			if reviewStart {
 				startCmd := pc.StartCommand()
 				if startCmd == "" {
-					fmt.Println("Warning: --start passed but no commands.start configured in .treeline.yml")
+					fmt.Println(style.Warnf("--start passed but no commands.start configured in .treeline.yml"))
 					return nil
 				}
-				fmt.Printf("==> Starting: %s\n", startCmd)
+				fmt.Println(style.Actionf("Starting: %s", startCmd))
 				return execInWorktree(absPath, startCmd)
 			}
 

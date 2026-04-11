@@ -54,10 +54,10 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		}
 		absPath, _ := filepath.Abs(cwd)
 		mainRepo := worktree.DetectMainRepo(absPath)
+		pc := config.LoadProjectConfig(mainRepo)
+		uc := config.LoadUserConfig("")
 
 		if isInWorktree(absPath, mainRepo) && !newForce && !newDryRun {
-			pc := config.LoadProjectConfig(mainRepo)
-			uc := config.LoadUserConfig("")
 			wtPath := resolveNewWorktreePath(mainRepo, pc.Project(), branch, uc)
 
 			fmt.Println()
@@ -69,9 +69,6 @@ Otherwise a new branch is created from --base (or the current branch).`,
 			}
 			fmt.Println()
 		}
-
-		pc := config.LoadProjectConfig(mainRepo)
-		uc := config.LoadUserConfig("")
 
 		// Zero-config: if no .treeline.yml, check if this is a server project
 		if !pc.Exists() {

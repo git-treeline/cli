@@ -69,7 +69,7 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 
 		activeHooks, err := resolveStartHooks(pc, startWith)
 		if err != nil {
-			return err
+			return cliErr(cmd, err)
 		}
 
 		sockPath := supervisor.SocketPath(absPath)
@@ -85,7 +85,7 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 			}
 			if resp == "running" {
 				if startAwait {
-					return awaitReady(sockPath)
+					return cliErr(cmd, awaitReady(sockPath))
 				}
 				return cliErr(cmd, errServerAlreadyRunning())
 			}

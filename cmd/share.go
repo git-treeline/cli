@@ -45,7 +45,7 @@ Related commands:
 	RunE: func(cmd *cobra.Command, args []string) error {
 		port, _, err := resolveTunnelTarget(args)
 		if err != nil {
-			return err
+			return cliErr(cmd, err)
 		}
 
 		if shareTailscale {

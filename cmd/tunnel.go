@@ -58,7 +58,7 @@ Related commands:
 		uc := config.LoadUserConfig("")
 		port, entry, err := resolveTunnelTarget(args)
 		if err != nil {
-			return err
+			return cliErr(cmd, err)
 		}
 
 		domain := tunnelDomain
