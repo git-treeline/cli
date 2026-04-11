@@ -220,7 +220,7 @@ gtl review 42 --start
 
 Fetches the PR branch via `gh`, creates a worktree, allocates resources, runs setup, and boots the app. Requires the [gh CLI](https://cli.github.com).
 
-`review` and `new` must be run from the main repo, not from inside a worktree. If you're in a worktree and want to change branches, use `gtl switch`.
+When run from inside a worktree, `review` prompts to switch the current worktree to the PR branch (same as `gtl switch`). `new` warns that the worktree will be created elsewhere and asks for confirmation; pass `--force` / `-f` to skip the prompt. From the main repo, both commands behave as before.
 
 ### 8. Open a worktree in the browser
 
@@ -756,7 +756,7 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | Command | Flags | Description |
 |---|---|---|
 | `gtl init` | `--project` `--template-db` `--skip-agent-config` | Generate `.treeline.yml` (auto-detects framework, writes `AGENTS.md` section) |
-| `gtl new <branch>` | `--base` `--path` `--start` `--open` `--dry-run` | Create worktree + allocate + setup in one step |
+| `gtl new <branch>` | `--base` `--path` `--start` `--open` `--dry-run` `--force`/`-f` | Create worktree + allocate + setup in one step |
 | `gtl review <PR#>` | `--path` `--start` `--open` | Check out a GitHub PR into a worktree with full setup (requires `gh`) |
 | `gtl switch <branch-or-PR#>` | `--setup` `--restart` | Switch worktree to a different branch or PR — fetches, checks out, refreshes env |
 | `gtl setup [PATH]` | `--main-repo` `--dry-run` | Allocate resources and configure a worktree (idempotent) |

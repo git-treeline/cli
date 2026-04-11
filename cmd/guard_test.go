@@ -175,8 +175,21 @@ func TestGuard_CliErrorUsesCliErr(t *testing.T) {
 	}
 }
 
-// isBareCLIError returns true if the expression is a direct &CliError{} or
-// errXxx() call that's not wrapped in cliErr().
+// cliErrHelpers are functions that can return *CliError indirectly. Calls to
+// these inside RunE must be wrapped with cliErr(cmd, ...) just like direct
+// &CliError{} literals and errXxx() constructors.
+var cliErrHelpers = map[string]bool{
+	"awaitReady":           true,
+	"resolveTunnelTarget":  true,
+	"resolveStartHooks":    true,
+	"validateTunnelPrereqs": true,
+	"requireServeInstalled": true,
+	"switchWorktreeBranch":  true,
+}
+
+// isBareCLIError returns true if the expression is a direct &CliError{},
+// errXxx() call, or known CliError-producing helper that's not wrapped in
+// cliErr().
 func isBareCLIError(expr ast.Expr) bool {
 	// Check for &CliError{...}
 	if unary, ok := expr.(*ast.UnaryExpr); ok {
@@ -187,11 +200,14 @@ func isBareCLIError(expr ast.Expr) bool {
 		}
 	}
 
-	// Check for errXxx() calls that aren't wrapped in cliErr()
 	if call, ok := expr.(*ast.CallExpr); ok {
 		if ident, ok := call.Fun.(*ast.Ident); ok {
 			// errXxx constructors should be wrapped
 			if strings.HasPrefix(ident.Name, "err") && ident.Name != "err" {
+				return true
+			}
+			// Known helpers that return *CliError
+			if cliErrHelpers[ident.Name] {
 				return true
 			}
 		}

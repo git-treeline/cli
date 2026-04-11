@@ -57,6 +57,44 @@ func TestSortedRouteKeys_Single(t *testing.T) {
 	}
 }
 
+func TestIsInWorktree_SamePath(t *testing.T) {
+	dir := t.TempDir()
+	if isInWorktree(dir, dir) {
+		t.Error("same path should not be detected as worktree")
+	}
+}
+
+func TestIsInWorktree_DifferentPath(t *testing.T) {
+	a := t.TempDir()
+	b := t.TempDir()
+	if !isInWorktree(a, b) {
+		t.Error("different paths should be detected as worktree")
+	}
+}
+
+func TestIsInWorktree_SymlinkResolution(t *testing.T) {
+	real := t.TempDir()
+	parent := t.TempDir()
+	link := filepath.Join(parent, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("symlinks not supported:", err)
+	}
+	if isInWorktree(link, real) {
+		t.Error("symlinked path pointing to same dir should not be detected as worktree")
+	}
+}
+
+func TestIsInWorktree_NonexistentPathFallback(t *testing.T) {
+	a := "/nonexistent/path/a"
+	b := "/nonexistent/path/b"
+	if !isInWorktree(a, b) {
+		t.Error("different nonexistent paths should fall back to clean comparison")
+	}
+	if isInWorktree(a, a) {
+		t.Error("same nonexistent path should not be detected as worktree")
+	}
+}
+
 func initGitRepo(t *testing.T, dir string) {
 	t.Helper()
 	cmd := exec.Command("git", "init", "--initial-branch=main")

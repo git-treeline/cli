@@ -45,9 +45,7 @@ Must be run from inside a worktree (not the main repo).`,
 		absPath, _ := filepath.Abs(cwd)
 		mainRepo := worktree.DetectMainRepo(absPath)
 
-		resolvedAbs, _ := filepath.EvalSymlinks(absPath)
-		resolvedMain, _ := filepath.EvalSymlinks(mainRepo)
-		if resolvedAbs == resolvedMain {
+		if !isInWorktree(absPath, mainRepo) {
 			return cliErr(cmd, errNotInWorktree())
 		}
 
@@ -62,34 +60,8 @@ Must be run from inside a worktree (not the main repo).`,
 			fmt.Println(style.Actionf("PR #%d → branch '%s'", prNum, branch))
 		}
 
-		fmt.Println(style.Actionf("Fetching origin/%s...", branch))
-		if err := worktree.Fetch("origin", branch); err != nil {
-			fmt.Fprintln(os.Stderr, style.Warnf("fetch failed (%s), trying local checkout", err))
-		}
-
-		fmt.Println(style.Actionf("Checking out '%s'...", branch))
-		if err := worktree.Checkout(branch); err != nil {
+		if err := switchWorktreeBranch(absPath, mainRepo, branch, switchRunSetup); err != nil {
 			return err
-		}
-
-		reg := registry.New("")
-		if err := reg.UpdateField(absPath, "branch", branch); err != nil {
-			fmt.Fprintln(os.Stderr, style.Warnf("could not update branch in registry: %v", err))
-		}
-
-		uc := config.LoadUserConfig("")
-		s := setup.New(absPath, mainRepo, uc)
-		s.Options.RefreshOnly = !switchRunSetup
-		alloc, err := s.Run()
-		if err != nil {
-			return fmt.Errorf("refresh failed: %w", err)
-		}
-
-		fmt.Println()
-		fmt.Printf("Switched to %s\n", branch)
-		fmt.Printf("  Path: %s\n", absPath)
-		if alloc != nil && alloc.Port > 0 {
-			fmt.Printf("  URL:  http://localhost:%d\n", alloc.Port)
 		}
 
 		if switchRestart {
@@ -103,6 +75,43 @@ Must be run from inside a worktree (not the main repo).`,
 
 		return nil
 	},
+}
+
+// switchWorktreeBranch fetches a branch, checks it out in the current worktree,
+// updates the registry, and refreshes the environment. Shared by gtl switch
+// and gtl review (when switching in place).
+func switchWorktreeBranch(absPath, mainRepo, branch string, runSetup bool) error {
+	fmt.Println(style.Actionf("Fetching origin/%s...", branch))
+	if err := worktree.Fetch("origin", branch); err != nil {
+		fmt.Fprintln(os.Stderr, style.Warnf("fetch failed (%s), trying local checkout", err))
+	}
+
+	fmt.Println(style.Actionf("Checking out '%s'...", branch))
+	if err := worktree.Checkout(branch); err != nil {
+		return err
+	}
+
+	reg := registry.New("")
+	if err := reg.UpdateField(absPath, "branch", branch); err != nil {
+		fmt.Fprintln(os.Stderr, style.Warnf("could not update branch in registry: %v", err))
+	}
+
+	uc := config.LoadUserConfig("")
+	s := setup.New(absPath, mainRepo, uc)
+	s.Options.RefreshOnly = !runSetup
+	alloc, err := s.Run()
+	if err != nil {
+		return fmt.Errorf("refresh failed: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Printf("Switched to %s\n", branch)
+	fmt.Printf("  Path: %s\n", absPath)
+	if alloc != nil && alloc.Port > 0 {
+		fmt.Printf("  URL:  http://localhost:%d\n", alloc.Port)
+	}
+
+	return nil
 }
 
 func completeBranchesAndPRs(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {

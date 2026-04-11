@@ -4,6 +4,7 @@
 - **MCP write operations** — the MCP server now supports `setup`, `new`, `link`, `unlink`, `config_set`, and `env_sync` tools. Read tools expanded with `resolve`, `env`, `where`, and `routes`. Tool descriptions improved for AI agent consumption.
 - **Shared `proxy.BuildRouterURL`** — router URL construction extracted from three call sites into a single testable function. Eliminates duplication across `open`, `resolve`, `routes`, and MCP tools.
 - **`internal/envparse` package** — env file parsing extracted from `cmd/env.go` into a shared package with its own test suite. Used by both the CLI and MCP tools.
+- **Worktree-aware `review` and `new`** — `gtl review` from inside a worktree now prompts to switch the current worktree to the PR branch instead of blocking. `gtl new` from a worktree warns about the target path and asks for confirmation; `--force`/`-f` skips the prompt. The old `worktreeGuard` hard error is removed.
 - **Hardened test coverage** — added tests for database adapters (PostgreSQL, SQLite), service health checks, setup orchestration, worktree operations, tunnel cert management, doctor checks, release safety, and framework detection. +3,500 lines of test code.
 
 ## [0.36.0]
@@ -157,7 +158,7 @@
 - **`gtl doctor`** — check project config, allocation, runtime, and diagnostics in one view. Reports on `.treeline.yml` presence, env file status, port allocation, supervisor state, and framework-specific guidance.
 - **Tab completion** — `gtl new`, `gtl review`, and `gtl switch` now provide shell completions for branch names and PR numbers.
 - **`gtl release` confirmation** — single-worktree releases now show what will be released and prompt for confirmation. Use `--force` to skip.
-- **Worktree guard** — `gtl new` and `gtl review` now error if run from inside a worktree (which would create confusing sibling worktrees). Suggests `gtl switch` or navigating to the main repo instead.
+- **Worktree guard** — `gtl new` and `gtl review` now error if run from inside a worktree (which would create confusing sibling worktrees). Suggests `gtl switch` or navigating to the main repo instead. _(Superseded in 0.37.0 — both commands now work from worktrees with interactive prompts.)_
 
 ### Changed
 
