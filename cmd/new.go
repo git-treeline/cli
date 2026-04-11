@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/confirm"
@@ -24,6 +23,7 @@ var newPath string
 var newStart bool
 var newOpen bool
 var newDryRun bool
+var newForce bool
 
 func init() {
 	newCmd.Flags().StringVar(&newBase, "base", "", "Base branch for the new worktree (default: current branch)")
@@ -31,6 +31,7 @@ func init() {
 	newCmd.Flags().BoolVar(&newStart, "start", false, "Run commands.start after setup")
 	newCmd.Flags().BoolVar(&newOpen, "open", false, "Open the worktree in the browser after setup")
 	newCmd.Flags().BoolVar(&newDryRun, "dry-run", false, "Print what would happen without making changes")
+	newCmd.Flags().BoolVarP(&newForce, "force", "f", false, "Skip confirmation when creating from inside a worktree")
 	newCmd.ValidArgsFunction = completeBranches
 	rootCmd.AddCommand(newCmd)
 }
@@ -45,17 +46,30 @@ If the branch already exists locally or on origin, it is checked out.
 Otherwise a new branch is created from --base (or the current branch).`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := worktreeGuard(cmd, args); err != nil {
-			return cliErr(cmd, err)
-		}
-
 		branch := args[0]
 
 		cwd, err := os.Getwd()
 		if err != nil {
 			return fmt.Errorf("getting working directory: %w", err)
 		}
-		mainRepo := worktree.DetectMainRepo(cwd)
+		absPath, _ := filepath.Abs(cwd)
+		mainRepo := worktree.DetectMainRepo(absPath)
+
+		if isInWorktree(absPath, mainRepo) && !newForce && !newDryRun {
+			pc := config.LoadProjectConfig(mainRepo)
+			uc := config.LoadUserConfig("")
+			wtPath := resolveNewWorktreePath(mainRepo, pc.Project(), branch, uc)
+
+			fmt.Println()
+			fmt.Printf("You're in worktree '%s'. The new worktree will be created at:\n", filepath.Base(absPath))
+			fmt.Printf("  %s\n\n", wtPath)
+			fmt.Println("You'll need to open it separately in your editor.")
+			if !confirm.Prompt("Continue?", false, nil) {
+				return nil
+			}
+			fmt.Println()
+		}
+
 		pc := config.LoadProjectConfig(mainRepo)
 		uc := config.LoadUserConfig("")
 
@@ -87,14 +101,7 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		}
 
 		projectName := pc.Project()
-
-		wtPath := newPath
-		if wtPath == "" {
-			wtPath = uc.ResolveWorktreePath(mainRepo, projectName, branch)
-		}
-		if wtPath == "" {
-			wtPath = filepath.Join(filepath.Dir(mainRepo), fmt.Sprintf("%s-%s", projectName, branch))
-		}
+		wtPath := resolveNewWorktreePath(mainRepo, projectName, branch, uc)
 
 		if err := ensureGitignored(mainRepo, wtPath); err != nil {
 			return err
@@ -220,30 +227,6 @@ Otherwise a new branch is created from --base (or the current branch).`,
 	},
 }
 
-
-// worktreeGuard returns an error if the cwd is inside a worktree rather than
-// the main repo. Prevents gtl new / gtl review from creating sibling worktrees.
-func worktreeGuard(cmd *cobra.Command, args []string) error {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("getting working directory: %w", err)
-	}
-	absPath, _ := filepath.Abs(cwd)
-	mainRepo := worktree.DetectMainRepo(absPath)
-
-	resolvedAbs, _ := filepath.EvalSymlinks(absPath)
-	resolvedMain, _ := filepath.EvalSymlinks(mainRepo)
-	if resolvedAbs != resolvedMain {
-		return &CliError{
-			Message: fmt.Sprintf("You're inside worktree '%s', not the main repo.", filepath.Base(absPath)),
-			Hint: fmt.Sprintf("To switch this worktree: gtl switch <branch-or-PR#>\n"+
-				"  To create from main repo:  cd %s && gtl %s %s",
-				mainRepo, cmd.Name(), strings.Join(args, " ")),
-		}
-	}
-	return nil
-}
-
 func execInWorktree(dir, command string) error {
 	cmd := exec.Command("sh", "-c", command)
 	cmd.Dir = dir
@@ -263,14 +246,7 @@ func completeBranches(cmd *cobra.Command, args []string, toComplete string) ([]s
 // createWorktreeOnly creates a worktree without any port/database allocation.
 // Used for non-server projects or when user declines full setup.
 func createWorktreeOnly(mainRepo, branch string, uc *config.UserConfig, pc *config.ProjectConfig) error {
-	projectName := pc.Project()
-	wtPath := newPath
-	if wtPath == "" {
-		wtPath = uc.ResolveWorktreePath(mainRepo, projectName, branch)
-	}
-	if wtPath == "" {
-		wtPath = filepath.Join(filepath.Dir(mainRepo), fmt.Sprintf("%s-%s", projectName, branch))
-	}
+	wtPath := resolveNewWorktreePath(mainRepo, pc.Project(), branch, uc)
 
 	if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
 		fmt.Println(style.Actionf("Branch '%s' already checked out at %s", branch, existingWT))
@@ -324,6 +300,18 @@ func createWorktreeOnly(mainRepo, branch string, uc *config.UserConfig, pc *conf
 	fmt.Println()
 	fmt.Printf("  cd %s\n", wtPath)
 	return nil
+}
+
+// resolveNewWorktreePath returns the target path for a new worktree, applying
+// --path override, user config template, or the default sibling layout.
+func resolveNewWorktreePath(mainRepo, projectName, branch string, uc *config.UserConfig) string {
+	if newPath != "" {
+		return newPath
+	}
+	if p := uc.ResolveWorktreePath(mainRepo, projectName, branch); p != "" {
+		return p
+	}
+	return filepath.Join(filepath.Dir(mainRepo), fmt.Sprintf("%s-%s", projectName, branch))
 }
 
 // runInitInteractive runs the init flow to create .treeline.yml.

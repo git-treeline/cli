@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/git-treeline/internal/confirm"
 	"github.com/git-treeline/git-treeline/internal/format"
 	"github.com/git-treeline/git-treeline/internal/github"
 	"github.com/git-treeline/git-treeline/internal/registry"
@@ -35,10 +36,6 @@ var reviewCmd = &cobra.Command{
 resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := worktreeGuard(cmd, args); err != nil {
-			return cliErr(cmd, err)
-		}
-
 		if err := requireServeInstalled(); err != nil {
 			return cliErr(cmd, err)
 		}
@@ -64,7 +61,54 @@ resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 		if err != nil {
 			return fmt.Errorf("getting working directory: %w", err)
 		}
-		mainRepo := worktree.DetectMainRepo(cwd)
+		absPath, _ := filepath.Abs(cwd)
+		mainRepo := worktree.DetectMainRepo(absPath)
+
+		if isInWorktree(absPath, mainRepo) {
+			currentBranch := worktree.CurrentBranch(absPath)
+			branchLabel := currentBranch
+			if branchLabel == "" {
+				branchLabel = "(detached)"
+			}
+			fmt.Println()
+			fmt.Printf("You're in worktree '%s' (branch: %s).\n", filepath.Base(absPath), branchLabel)
+			if !confirm.Prompt(fmt.Sprintf("Switch to PR #%d (branch: %s)?", prNumber, branch), false, nil) {
+				return nil
+			}
+			fmt.Println()
+			if err := switchWorktreeBranch(absPath, mainRepo, branch, false); err != nil {
+				return err
+			}
+
+			pc := config.LoadProjectConfig(absPath)
+			uc := config.LoadUserConfig("")
+			projectName := pc.Project()
+			printRouterAndTunnel(uc, projectName, branch)
+
+			if reviewOpen {
+				reg := registry.New("")
+				alloc := reg.Find(absPath)
+				ports := format.GetPorts(format.Allocation(alloc))
+				if len(ports) > 0 {
+					url := buildOpenURL(ports[0], projectName, branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
+					fmt.Printf("Opening %s\n", url)
+					_ = openBrowser(url)
+				}
+			}
+
+			if reviewStart {
+				startCmd := pc.StartCommand()
+				if startCmd == "" {
+					fmt.Println("Warning: --start passed but no commands.start configured in .treeline.yml")
+					return nil
+				}
+				fmt.Printf("==> Starting: %s\n", startCmd)
+				return execInWorktree(absPath, startCmd)
+			}
+
+			return nil
+		}
+
 		pc := config.LoadProjectConfig(mainRepo)
 		uc := config.LoadUserConfig("")
 		projectName := pc.Project()

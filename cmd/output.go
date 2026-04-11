@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/proxy"
@@ -42,6 +43,18 @@ func printRouterAndTunnel(uc *config.UserConfig, project, branch string) {
 	if tunnelDomain := uc.TunnelDomain(""); tunnelDomain != "" {
 		fmt.Println(style.Actionf("Tunnel: run %s → %s", style.Cmd("gtl tunnel"), style.Link("https://"+routeKey+"."+tunnelDomain)))
 	}
+}
+
+// isInWorktree reports whether absPath differs from mainRepo after resolving
+// symlinks. Falls back to filepath.Clean comparison when EvalSymlinks fails,
+// avoiding false equality from two empty-string errors.
+func isInWorktree(absPath, mainRepo string) bool {
+	resolvedAbs, errAbs := filepath.EvalSymlinks(absPath)
+	resolvedMain, errMain := filepath.EvalSymlinks(mainRepo)
+	if errAbs != nil || errMain != nil {
+		return filepath.Clean(absPath) != filepath.Clean(mainRepo)
+	}
+	return resolvedAbs != resolvedMain
 }
 
 // ensureGitignored delegates to worktree.EnsureGitignored and prints
