@@ -5,7 +5,9 @@
 - **TUI dashboard expansion** — the interactive dashboard now shows router URLs, tunnel URLs, and supports env sync, worktree creation, and release actions directly from the TUI.
 - **`gtl stop --kill`** — shuts down the supervisor entirely instead of keeping it alive for resume. Also exposed as `kill: true` in the MCP `stop` tool.
 - **Fix WebSocket forwarding** — the router and proxy now forward the original `Host` as `X-Forwarded-Host` instead of rewriting `Host`, fixing WebSocket upgrades and static asset serving behind the HTTPS router.
+- **`{tunnel_host}` env token** — the `env:` block now supports `{tunnel_host}`, which resolves to the bare tunnel domain (e.g. `gtltunnel.dev`). Use it for cookie domains, CORS wildcard patterns, or any config that needs the tunnel base domain without the project-branch subdomain.
 - **Cleaner CLI errors** — domain and state errors no longer print the full usage block. Only flag/argument errors show usage.
+- **Fix router service surviving Homebrew upgrades** — `gtl serve install` now stores the stable symlink path (e.g. `/opt/homebrew/bin/gtl`) in the launchd plist instead of the versioned Cellar path. Previously, `brew upgrade` would remove the old version directory and break the router on reboot. The health check binary comparison also resolves symlinks before comparing.
 
 ## [0.37.0]
 

@@ -17,6 +17,56 @@ import (
 	"github.com/git-treeline/git-treeline/internal/platform"
 )
 
+// StableExecutablePath returns a path suitable for embedding in a service
+// definition (launchd plist, systemd unit). On Homebrew installs,
+// os.Executable() resolves symlinks and returns a versioned Cellar path
+// (e.g. /opt/homebrew/Cellar/git-treeline/0.38.0/bin/gtl) that breaks
+// after `brew upgrade`. This function detects that case and returns the
+// stable symlink path instead (e.g. /opt/homebrew/bin/gtl).
+func StableExecutablePath() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return resolveStablePath(exe), nil
+}
+
+// resolveStablePath checks if the binary lives inside a Homebrew Cellar
+// or similar versioned directory, and returns the symlink in the
+// corresponding bin directory if one exists pointing to the same binary
+// name. Otherwise returns the original path unchanged.
+func resolveStablePath(exe string) string {
+	dir := filepath.Dir(exe)
+	base := filepath.Base(exe)
+
+	// Walk up looking for a "Cellar" component — indicates Homebrew.
+	// Structure: <prefix>/Cellar/<formula>/<version>/bin/<binary>
+	// Stable symlink: <prefix>/bin/<binary>
+	parts := strings.Split(dir, string(filepath.Separator))
+	for i, part := range parts {
+		if part != "Cellar" {
+			continue
+		}
+		prefix := string(filepath.Separator) + filepath.Join(parts[1:i]...)
+		candidate := filepath.Join(prefix, "bin", base)
+		if _, err := os.Readlink(candidate); err != nil {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err != nil {
+			continue
+		}
+		resolvedExe, err := filepath.EvalSymlinks(exe)
+		if err != nil {
+			continue
+		}
+		if resolved == resolvedExe {
+			return candidate
+		}
+	}
+	return exe
+}
+
 const baseLaunchLabel = "dev.treeline.router"
 const baseSystemdUnit = "git-treeline-router"
 

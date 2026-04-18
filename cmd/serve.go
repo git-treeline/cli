@@ -82,7 +82,7 @@ After install, access worktrees at https://{project}-{branch}.{domain}`,
 			})
 		}
 
-		gtlPath, err := os.Executable()
+		gtlPath, err := service.StableExecutablePath()
 		if err != nil {
 			return fmt.Errorf("could not resolve executable path: %w", err)
 		}

@@ -579,23 +579,29 @@ env:
 
 func TestInjectRouterTokens(t *testing.T) {
 	alloc := interpolation.Allocation{"port": float64(3010)}
-	InjectRouterTokens(alloc, "salt", "feature", "prt.dev")
+	InjectRouterTokens(alloc, "salt", "feature", "prt.dev", "gtltunnel.dev")
 	if got := alloc["router_url"].(string); got != "https://salt-feature.prt.dev" {
 		t.Errorf("router_url: expected https://salt-feature.prt.dev, got %q", got)
 	}
 	if got := alloc["router_domain"].(string); got != "prt.dev" {
 		t.Errorf("router_domain: expected prt.dev, got %q", got)
 	}
+	if got := alloc["tunnel_host"].(string); got != "gtltunnel.dev" {
+		t.Errorf("tunnel_host: expected gtltunnel.dev, got %q", got)
+	}
 }
 
 func TestInjectRouterTokens_EmptyBranch(t *testing.T) {
 	alloc := interpolation.Allocation{"port": float64(3010)}
-	InjectRouterTokens(alloc, "salt", "", "localhost")
+	InjectRouterTokens(alloc, "salt", "", "localhost", "")
 	if got := alloc["router_url"].(string); got != "https://salt.localhost" {
 		t.Errorf("router_url: expected https://salt.localhost, got %q", got)
 	}
 	if got := alloc["router_domain"].(string); got != "localhost" {
 		t.Errorf("router_domain: expected localhost, got %q", got)
+	}
+	if _, ok := alloc["tunnel_host"]; ok {
+		t.Error("tunnel_host should not be set when tunnel domain is empty")
 	}
 }
 

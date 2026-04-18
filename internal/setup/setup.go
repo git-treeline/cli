@@ -241,19 +241,22 @@ func (s *Setup) copyFiles() {
 
 func (s *Setup) buildEnvVars(alloc interpolation.Allocation, redisURL string) (map[string]string, error) {
 	branch, _ := alloc["branch"].(string)
-	InjectRouterTokens(alloc, s.ProjectConfig.Project(), branch, s.UserConfig.RouterDomain())
+	InjectRouterTokens(alloc, s.ProjectConfig.Project(), branch, s.UserConfig.RouterDomain(), s.UserConfig.TunnelDomain(""))
 	if s.Resolver != nil {
 		return BuildEnvVarsWithResolver(s.ProjectConfig, alloc, redisURL, s.Resolver)
 	}
 	return BuildEnvVars(s.ProjectConfig, alloc, redisURL), nil
 }
 
-// InjectRouterTokens adds router_url and router_domain to an allocation map
-// so the {router_url} and {router_domain} env tokens can be resolved.
-func InjectRouterTokens(alloc interpolation.Allocation, project, branch, routerDomain string) {
+// InjectRouterTokens adds router_url, router_domain, and tunnel_host to an
+// allocation map so the corresponding env tokens can be resolved.
+func InjectRouterTokens(alloc interpolation.Allocation, project, branch, routerDomain, tunnelDomain string) {
 	routeKey := proxy.RouteKey(project, branch)
 	alloc["router_url"] = fmt.Sprintf("https://%s.%s", routeKey, routerDomain)
 	alloc["router_domain"] = routerDomain
+	if tunnelDomain != "" {
+		alloc["tunnel_host"] = tunnelDomain
+	}
 }
 
 // BuildEnvVars resolves the env template from a project config against an
@@ -300,7 +303,7 @@ func RegenerateEnvFile(worktreePath string, uc *config.UserConfig) error {
 	interpAlloc := interpolation.Allocation(allocMap)
 	branch, _ := allocMap["branch"].(string)
 
-	InjectRouterTokens(interpAlloc, pc.Project(), branch, uc.RouterDomain())
+	InjectRouterTokens(interpAlloc, pc.Project(), branch, uc.RouterDomain(), uc.TunnelDomain(""))
 
 	redisURL := interpolation.BuildRedisURL(uc.RedisURL(), interpAlloc)
 

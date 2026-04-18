@@ -293,7 +293,7 @@ func resolveEnvVars(pc *config.ProjectConfig, absPath string) map[string]string 
 	uc := config.LoadUserConfig("")
 	interpAlloc := interpolation.Allocation(alloc)
 	branch := worktree.CurrentBranch(absPath)
-	setup.InjectRouterTokens(interpAlloc, pc.Project(), branch, uc.RouterDomain())
+	setup.InjectRouterTokens(interpAlloc, pc.Project(), branch, uc.RouterDomain(), uc.TunnelDomain(""))
 	redisURL := interpolation.BuildRedisURL(uc.RedisURL(), interpAlloc)
 	r := resolve.New(reg, absPath, branch)
 	result, err := setup.BuildEnvVarsWithResolver(pc, interpAlloc, redisURL, r.Resolve)

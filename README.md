@@ -674,6 +674,7 @@ Available in `env` values:
 | `{worktree}` | Worktree name |
 | `{router_url}` | HTTPS router URL (e.g. `https://salt-feature.prt.dev`) — see note below |
 | `{router_domain}` | Router base domain (e.g. `prt.dev` or `localhost`) |
+| `{tunnel_host}` | Tunnel base domain (e.g. `gtltunnel.dev`) — empty if no tunnel configured |
 | `{resolve:project}` | URL of another project's allocation (same-branch default, checks link overrides) |
 | `{resolve:project/branch}` | URL of another project's allocation on a specific branch |
 

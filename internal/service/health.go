@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -93,7 +94,14 @@ func checkBinaryMatch(d healthDeps) HealthCheck {
 		}
 	}
 
-	if current == installed {
+	currentCmp, installedCmp := current, installed
+	if r, err := filepath.EvalSymlinks(current); err == nil {
+		currentCmp = r
+	}
+	if r, err := filepath.EvalSymlinks(installed); err == nil {
+		installedCmp = r
+	}
+	if currentCmp == installedCmp {
 		return HealthCheck{
 			Name:   "binary",
 			Status: "ok",
