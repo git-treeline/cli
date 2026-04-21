@@ -1,3 +1,7 @@
+## [Unreleased]
+
+- **`gtl serve alias` auto-detects port** — running `gtl serve alias <name>` from a worktree directory now looks up the allocated port automatically. If the allocation has multiple ports, an interactive selector is shown. Explicit `gtl serve alias <name> <port>` still works as before.
+
 ## [0.38.0]
 
 - **Project name drift detection** — `gtl start`, `gtl setup`, and `gtl env sync` now detect when the `project` field in `.treeline.yml` doesn't match the registry allocation. On drift, the user is prompted to revert `.treeline.yml` to the registry name (default: yes). Declining aborts with a hint to release all worktrees first, then re-setup. `gtl doctor` reports drift diagnostically (text and `--json`).
