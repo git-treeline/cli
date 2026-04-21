@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.38.1]
 
 - **`gtl serve alias` auto-detects port** — running `gtl serve alias <name>` from a worktree directory now looks up the allocated port automatically. If the allocation has multiple ports, an interactive selector is shown. Explicit `gtl serve alias <name> <port>` still works as before.
 
