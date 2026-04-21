@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"runtime"
 	"sort"
 	"strconv"
 
 	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/git-treeline/internal/confirm"
 	"github.com/git-treeline/git-treeline/internal/proxy"
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/git-treeline/git-treeline/internal/service"
@@ -320,6 +322,7 @@ var serveAliasCmd = &cobra.Command{
 
 Aliases let you route non-gtl services through the router:
   gtl serve alias redis-ui 8081    → redis-ui.{domain}:8081
+  gtl serve alias redis-ui         → detect port from current directory
   gtl serve alias --remove redis-ui
   gtl serve alias                  → list all aliases`,
 	Args: cobra.MaximumNArgs(2),
@@ -368,16 +371,19 @@ Aliases let you route non-gtl services through the router:
 			return nil
 		}
 
-		if len(args) < 2 {
-			return cliErr(cmd, &CliError{
-				Message: "Missing port for alias.",
-				Hint:    "Usage: gtl serve alias <name> <port>",
-			})
-		}
-
-		port, err := strconv.Atoi(args[1])
-		if err != nil || port < 1 || port > 65535 {
-			return cliErr(cmd, errInvalidPort(args[1]))
+		var port int
+		if len(args) >= 2 {
+			var err error
+			port, err = strconv.Atoi(args[1])
+			if err != nil || port < 1 || port > 65535 {
+				return cliErr(cmd, errInvalidPort(args[1]))
+			}
+		} else {
+			detected, err := detectAliasPort()
+			if err != nil {
+				return cliErr(cmd, err)
+			}
+			port = detected
 		}
 
 		uc.Set("router.aliases."+name, float64(port))
@@ -388,6 +394,50 @@ Aliases let you route non-gtl services through the router:
 		fmt.Println("The router will pick this up on next refresh (~5s).")
 		return nil
 	},
+}
+
+// detectAliasPort resolves the port for the current directory's allocation.
+// If the allocation has multiple ports, the user is prompted to choose.
+func detectAliasPort() (int, error) {
+	absPath, err := os.Getwd()
+	if err != nil {
+		return 0, &CliError{
+			Message: "Could not determine current directory.",
+			Hint:    "Usage: gtl serve alias <name> <port>",
+		}
+	}
+	return detectAliasPortFrom(absPath, registry.New(""), nil)
+}
+
+// detectAliasPortFrom is the testable core. reader overrides stdin for the
+// multi-port prompt; pass nil for real interactive use.
+func detectAliasPortFrom(absPath string, reg *registry.Registry, reader io.Reader) (int, error) {
+	alloc := reg.Find(absPath)
+	if alloc == nil {
+		return 0, &CliError{
+			Message: "No port found for this directory.",
+			Hint:    "Run 'gtl setup' to allocate a port, or specify one explicitly:\n  gtl serve alias <name> <port>",
+		}
+	}
+
+	ports := registry.ExtractPorts(alloc)
+	if len(ports) == 0 {
+		return 0, &CliError{
+			Message: "Allocation exists but has no ports assigned.",
+			Hint:    "Run 'gtl start' to assign a port, or specify one explicitly:\n  gtl serve alias <name> <port>",
+		}
+	}
+
+	if len(ports) == 1 {
+		return ports[0], nil
+	}
+
+	options := make([]string, len(ports))
+	for i, p := range ports {
+		options[i] = strconv.Itoa(p)
+	}
+	idx := confirm.Select("Multiple ports allocated — which one?", options, 0, reader)
+	return ports[idx], nil
 }
 
 var serveHostsCmd = &cobra.Command{

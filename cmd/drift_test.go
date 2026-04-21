@@ -13,8 +13,7 @@ func TestDetectProjectDrift_NoDrift(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: myapp\n"), 0o644)
 
-	regFile := filepath.Join(t.TempDir(), "registry.json")
-	reg := registry.New(regFile)
+	reg := newTestRegistry(t)
 	_ = reg.Allocate(registry.Allocation{
 		"worktree": dir,
 		"project":  "myapp",
@@ -31,8 +30,7 @@ func TestDetectProjectDrift_Drifted(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: new-name\n"), 0o644)
 
-	regFile := filepath.Join(t.TempDir(), "registry.json")
-	reg := registry.New(regFile)
+	reg := newTestRegistry(t)
 	_ = reg.Allocate(registry.Allocation{
 		"worktree": dir,
 		"project":  "old-name",
@@ -55,8 +53,7 @@ func TestDetectProjectDrift_NoAllocation(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: myapp\n"), 0o644)
 
-	regFile := filepath.Join(t.TempDir(), "registry.json")
-	reg := registry.New(regFile)
+	reg := newTestRegistry(t)
 
 	_, _, drifted := detectProjectDriftWith(dir, reg)
 	if drifted {
@@ -68,8 +65,7 @@ func TestDetectProjectDrift_EmptyRegistryProject(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: myapp\n"), 0o644)
 
-	regFile := filepath.Join(t.TempDir(), "registry.json")
-	reg := registry.New(regFile)
+	reg := newTestRegistry(t)
 	_ = reg.Allocate(registry.Allocation{
 		"worktree": dir,
 		"port":     3002,
@@ -85,8 +81,7 @@ func TestDoctorProjectDrift_NoDrift(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: myapp\n"), 0o644)
 
-	regFile := filepath.Join(t.TempDir(), "registry.json")
-	reg := registry.New(regFile)
+	reg := newTestRegistry(t)
 	_ = reg.Allocate(registry.Allocation{
 		"worktree": dir,
 		"project":  "myapp",
@@ -103,8 +98,7 @@ func TestDoctorProjectDrift_Drifted(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: renamed\n"), 0o644)
 
-	regFile := filepath.Join(t.TempDir(), "registry.json")
-	reg := registry.New(regFile)
+	reg := newTestRegistry(t)
 	_ = reg.Allocate(registry.Allocation{
 		"worktree": dir,
 		"project":  "original",
@@ -149,8 +143,7 @@ func TestDoctorProjectDriftWith_NoDrift(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: myapp\n"), 0o644)
 
-	regFile := filepath.Join(t.TempDir(), "registry.json")
-	reg := registry.New(regFile)
+	reg := newTestRegistry(t)
 	_ = reg.Allocate(registry.Allocation{
 		"worktree": dir,
 		"project":  "myapp",
@@ -166,8 +159,7 @@ func TestDoctorProjectDriftWith_Drifted(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: new\n"), 0o644)
 
-	regFile := filepath.Join(t.TempDir(), "registry.json")
-	reg := registry.New(regFile)
+	reg := newTestRegistry(t)
 	_ = reg.Allocate(registry.Allocation{
 		"worktree": dir,
 		"project":  "old",

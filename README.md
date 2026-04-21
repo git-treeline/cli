@@ -794,6 +794,7 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl serve install` | | One-time setup: CA trust, port forwarding, background service |
 | `gtl serve status` | | Show router routes and service health |
 | `gtl serve uninstall` | | Remove CA trust, port forwarding, and service |
+| `gtl serve alias [name] [port]` | `--remove` | Add/remove/list static subdomain aliases. Port auto-detected from current directory when omitted |
 | `gtl proxy <port> [target]` | `--tls` | Forward traffic from a stable port to a worktree port |
 | `gtl tunnel [port]` | `--domain` `--tunnel` | Expose a local port via Cloudflare tunnel (quick or named) |
 | `gtl tunnel setup` | | Interactive setup for named tunnels with BYO domain |
