@@ -44,6 +44,21 @@ func TestDeepMerge_OverrideReplacesNonMap(t *testing.T) {
 	}
 }
 
+func TestDeepMerge_DoesNotAliasBaseMaps(t *testing.T) {
+	base := map[string]any{
+		"router": map[string]any{"port": 3001},
+	}
+	result := DeepMerge(base, map[string]any{})
+
+	router := result["router"].(map[string]any)
+	router["mode"] = "disabled"
+
+	baseRouter := base["router"].(map[string]any)
+	if _, ok := baseRouter["mode"]; ok {
+		t.Fatal("expected base router map to remain unchanged")
+	}
+}
+
 func TestDig(t *testing.T) {
 	m := map[string]any{
 		"port": map[string]any{
@@ -124,7 +139,10 @@ func TestWarnUnknownKeys_NoSuggestionForDistantKey(t *testing.T) {
 }
 
 func TestLevenshtein(t *testing.T) {
-	tests := []struct{ a, b string; want int }{
+	tests := []struct {
+		a, b string
+		want int
+	}{
 		{"port", "port", 0},
 		{"port", "prot", 2},
 		{"port", "ports", 1},

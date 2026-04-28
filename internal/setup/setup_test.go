@@ -605,6 +605,20 @@ func TestInjectRouterTokens_EmptyBranch(t *testing.T) {
 	}
 }
 
+func TestInjectRouterTokens_DisabledRouter(t *testing.T) {
+	alloc := interpolation.Allocation{"port": float64(3010)}
+	InjectRouterTokens(alloc, "salt", "feature", "", "gtltunnel.dev")
+	if got := alloc["router_url"].(string); got != "" {
+		t.Errorf("router_url: expected empty string when router disabled, got %q", got)
+	}
+	if got := alloc["router_domain"].(string); got != "" {
+		t.Errorf("router_domain: expected empty string when router disabled, got %q", got)
+	}
+	if got := alloc["tunnel_host"].(string); got != "gtltunnel.dev" {
+		t.Errorf("tunnel_host: expected gtltunnel.dev, got %q", got)
+	}
+}
+
 func TestRun_SummaryBlockFormat(t *testing.T) {
 	s, mainRepo, _ := testSetup(t, `
 project: test
@@ -625,8 +639,8 @@ env:
 	if !strings.Contains(plain, "Done!") {
 		t.Error("expected Done! in summary output")
 	}
-	if !strings.Contains(plain, "Port:") || !strings.Contains(plain, "Redis:") {
-		t.Error("expected Port: and Redis: in summary output")
+	if !strings.Contains(plain, "Port:") || !strings.Contains(plain, "Redis:") || !strings.Contains(plain, "Local:") {
+		t.Error("expected Port:, Redis:, and Local: in summary output")
 	}
 }
 

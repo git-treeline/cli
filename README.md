@@ -46,52 +46,48 @@ Download the latest binary from [GitHub Releases](https://github.com/git-treelin
 
 ## First-time setup on your machine
 
-Two different “setups”: **once per computer** (CLI + local HTTPS stack on macOS/Linux), and **once per git repository** (`gtl init`, then worktrees).
-
-- You do **not** need `gtl serve` before **`gtl init`**—only the binary on your `PATH`.
-- On **macOS and Linux**, you **do** need to run **`gtl serve install`** (or have the same local CA already present) **before** your first **`gtl setup`**, **`gtl new`**, or **`gtl clone`**: the CLI checks for the generated CA. That install also sets up the router, trusted certs, port forwarding, and background service—the product experience assumes this stack. See **`GTL_HEADLESS=1`** only for automation (CI) where you intentionally skip that check.
-
 ### 1. Install the CLI
 
 Use [Homebrew](#homebrew), [Go](#from-source-requires-go-126), or a [release binary](#from-release-binary). Installing `gtl` does **not** require `sudo` and does **not** install certificates or background services by itself.
 
-### 2. Local HTTPS router — `gtl serve install` (macOS / Linux)
+### 2. Run `gtl install`
 
-Run **once per machine** before your first worktree allocation:
+Whether you're the first developer setting up the project or you're joining a repo that already has `.treeline.yml`:
 
 ```bash
-gtl serve install
+cd your-project
+gtl install
 ```
 
-The installer will ask for your **system password twice** (via `sudo`):
+This single command handles everything:
+1. **Creates `.treeline.yml`** if missing and detects your framework
+2. **Creates user config** if missing
+3. **Installs the post-checkout hook** so future worktrees auto-setup
+4. **Allocates ports and writes env** for the current worktree
+5. **Optionally enables local HTTPS routing** — prompted with a link to the [networking docs](https://git-treeline.dev/docs/networking/#the-https-router-gtl-serve); requires sudo for CA trust and port forwarding. Can be skipped and run later via `gtl serve install`. If you skip it once, `router.mode` stays `prompt` and Treeline may offer it again later. If you disable future offers, Treeline saves `router.mode: disabled` and stays on localhost-only workflows until you manually run `gtl serve install` or reset the mode.
 
-1. **Trust a local certificate authority** — Adds a dev CA to your login keychain (macOS) or equivalent so browsers accept `https://*.prt.dev` without certificate errors. This CA is what **`gtl setup` / `gtl new` require** on macOS/Linux.
-2. **Forward port 443** — Installs a rule so HTTPS on port 443 is forwarded to Treeline’s router (default listen port `3001`, configurable as `router.port`). That’s what makes `https://project-branch.prt.dev` work **without** `:3001` in the URL.
+The HTTPS router gives you `https://project-branch.prt.dev` URLs. Without it, worktrees are accessible at `http://localhost:{port}`. `gtl setup`, `gtl new`, `gtl clone`, and `gtl review` all work without the router. See **`gtl serve status`** and **`gtl serve uninstall`** to inspect or remove the HTTPS stack.
 
-What gets installed: the CA, per-host server certs, a **background service** (`launchd` on macOS, `systemd` on Linux) that starts the router on boot, and the port-forward rule. See **`gtl serve status`** and **`gtl serve uninstall`** to inspect or remove.
+**Safari on macOS** may not resolve custom domain subdomains without `/etc/hosts` entries. After you have routes, run **`gtl serve hosts sync`** (asks for `sudo`) to add a managed block to `/etc/hosts`, or use another browser.
 
-**Safari on macOS** may not resolve custom domain subdomains without `/etc/hosts` entries. After you have routes, run **`gtl serve hosts sync`** (asks for `sudo`) to add a managed block to `/etc/hosts`, or use another browser. The default domain `prt.dev` has wildcard DNS pointing to 127.0.0.1; change it via `gtl config set router.domain yourdomain.dev`.
-
-### 3. Per repository — `gtl init` and worktrees
-
-With the CLI on your `PATH`, go to your app repo and follow **[Quick start](#quick-start)** below (`gtl init` → `gtl new` / `gtl setup`). On macOS/Linux, complete **step 2** before **`gtl new` / `gtl setup`** (or run `gtl init` first—order between init and `serve install` is flexible as long as the CA exists before allocation).
+> **`GTL_HEADLESS=1`** skips HTTPS router prompts and warnings — use in CI or automation only.
 
 ---
 
 ## Quick start
 
-### 1. Initialize your project
+### 1. Install Treeline in the repo
 
 ```bash
 cd your-project
-gtl init
+gtl install
 ```
 
-`init` auto-detects your framework (Next.js, Vite, Rails, Express, Python, Rust, Go) and generates a tailored `.treeline.yml`. It also writes a treeline section to `AGENTS.md` (or `CLAUDE.md` if that exists) so AI agents know to use `gtl port` instead of assuming port 3000. This works with Cursor, Claude Code, and Codex.
+`install` auto-detects your framework when `.treeline.yml` is missing and generates a tailored config. It also creates user config if needed, installs the post-checkout hook, allocates resources for the current worktree, and optionally offers the HTTPS router.
 
-After generating the config, `init` runs framework-aware diagnostics and prints actionable warnings — for example, if your Vite project needs `vite.config.js` changes to read the allocated port, or if your Node project lacks a dotenv library. Commit the config so your team shares it.
+After generating the config, Treeline runs framework-aware diagnostics and prints actionable warnings — for example, if your Vite project needs `vite.config.js` changes to read the allocated port, or if your Node project lacks a dotenv library. Commit `.treeline.yml` so your team shares it.
 
-Use `--project myapp` to set the project name explicitly, or `--skip-agent-config` to skip agent context generation.
+Use `gtl init` directly only when you want to generate or regenerate `.treeline.yml` without running the rest of install.
 
 ### 2. Create and set up a worktree
 
@@ -765,6 +761,7 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 
 | Command | Flags | Description |
 |---|---|---|
+| `gtl install` | | Set up git-treeline for this project and machine (config, hook, setup, optional HTTPS) |
 | `gtl init` | `--project` `--template-db` `--skip-agent-config` | Generate `.treeline.yml` (auto-detects framework, writes `AGENTS.md` section) |
 | `gtl new <branch>` | `--base` `--path` `--start` `--open` `--dry-run` `--force`/`-f` | Create worktree + allocate + setup in one step |
 | `gtl review <PR#>` | `--path` `--start` `--open` | Check out a GitHub PR into a worktree with full setup (requires `gh`) |

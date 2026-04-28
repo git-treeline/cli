@@ -78,11 +78,11 @@ Otherwise a new branch is created from --base (or the current branch).`,
 				fmt.Println()
 				fmt.Println("This project doesn't have a .treeline.yml yet.")
 				if confirm.Prompt("Set up port allocation and server management?", true, nil) {
-				fmt.Println()
-				if err := runInitInteractive(mainRepo, det); err != nil {
-					return err
-				}
-				pc = config.LoadProjectConfig(mainRepo)
+					fmt.Println()
+					if err := runInitInteractive(mainRepo, det); err != nil {
+						return err
+					}
+					pc = config.LoadProjectConfig(mainRepo)
 				} else {
 					// User declined — create worktree only, no allocation
 					return createWorktreeOnly(mainRepo, branch, uc, pc)
@@ -93,9 +93,7 @@ Otherwise a new branch is created from --base (or the current branch).`,
 			}
 		}
 
-		if err := requireServeInstalled(); err != nil {
-			return cliErr(cmd, err)
-		}
+		warnServeNotInstalled()
 
 		projectName := pc.Project()
 		wtPath := resolveNewWorktreePath(mainRepo, projectName, branch, uc)
@@ -126,9 +124,8 @@ Otherwise a new branch is created from --base (or the current branch).`,
 				fmt.Printf("  Path:     %s\n", existingWT)
 				if len(ports) > 0 {
 					fmt.Printf("  Port:     %s\n", format.JoinInts(ports, ", "))
-					fmt.Printf("  URL:      http://localhost:%d\n", ports[0])
+					printLocalAndRouter(uc, projectName, branch, ports[0])
 				}
-				printRouterAndTunnel(uc, projectName, branch)
 
 				if newOpen && len(ports) > 0 {
 					url := buildOpenURL(ports[0], projectName, branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
@@ -200,8 +197,6 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		if err != nil {
 			return cliErr(cmd, errSetupFailed(err))
 		}
-
-		printRouterAndTunnel(uc, projectName, alloc.Branch)
 
 		if newOpen && alloc.Port > 0 {
 			url := buildOpenURL(alloc.Port, projectName, alloc.Branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())

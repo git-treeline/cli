@@ -17,13 +17,13 @@ func DeepMerge(base, override map[string]any) map[string]any {
 	result := make(map[string]any, len(base))
 
 	for k, v := range override {
-		result[k] = v
+		result[k] = cloneValue(v)
 	}
 
 	for k, baseVal := range base {
 		overrideVal, exists := result[k]
 		if !exists {
-			result[k] = baseVal
+			result[k] = cloneValue(baseVal)
 			continue
 		}
 
@@ -35,6 +35,25 @@ func DeepMerge(base, override map[string]any) map[string]any {
 	}
 
 	return result
+}
+
+func cloneValue(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		cloned := make(map[string]any, len(val))
+		for k, child := range val {
+			cloned[k] = cloneValue(child)
+		}
+		return cloned
+	case []any:
+		cloned := make([]any, len(val))
+		for i, child := range val {
+			cloned[i] = cloneValue(child)
+		}
+		return cloned
+	default:
+		return v
+	}
 }
 
 // Dig traverses nested maps by keys, returning nil if any step fails.

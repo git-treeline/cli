@@ -175,15 +175,28 @@ func TestGuard_CliErrorUsesCliErr(t *testing.T) {
 	}
 }
 
+func TestGuard_OnboardingCommandsDoNotRequireServeInstalled(t *testing.T) {
+	for _, file := range []string{"setup.go", "new.go", "clone.go", "review.go"} {
+		t.Run(file, func(t *testing.T) {
+			data, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "requireServeInstalled()") {
+				t.Fatalf("%s should not hard-require the HTTPS router; use warnServeNotInstalled instead", file)
+			}
+		})
+	}
+}
+
 // cliErrHelpers are functions that can return *CliError indirectly. Calls to
 // these inside RunE must be wrapped with cliErr(cmd, ...) just like direct
 // &CliError{} literals and errXxx() constructors.
 var cliErrHelpers = map[string]bool{
-	"awaitReady":           true,
-	"resolveTunnelTarget":  true,
-	"resolveStartHooks":    true,
+	"awaitReady":            true,
+	"resolveTunnelTarget":   true,
+	"resolveStartHooks":     true,
 	"validateTunnelPrereqs": true,
-	"requireServeInstalled": true,
 	"switchWorktreeBranch":  true,
 }
 

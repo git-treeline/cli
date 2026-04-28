@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/git-treeline/git-treeline/internal/config"
 	"github.com/git-treeline/git-treeline/internal/confirm"
@@ -84,64 +85,15 @@ After install, access worktrees at https://{project}-{branch}.{domain}`,
 			})
 		}
 
-		gtlPath, err := service.StableExecutablePath()
-		if err != nil {
-			return fmt.Errorf("could not resolve executable path: %w", err)
-		}
-
 		uc := config.LoadUserConfig("")
-		port := uc.RouterPort()
-
-		caCertFile, err := proxy.EnsureCA()
-		if err != nil {
-			return fmt.Errorf("CA generation failed: %w", err)
+		if err := runServeInstall(uc); err != nil {
+			return err
+		}
+		if issues := routerInstallIssues(); len(issues) > 0 {
+			return fmt.Errorf("HTTPS router install incomplete: missing %s", strings.Join(issues, ", "))
 		}
 
 		domain := uc.RouterDomain()
-
-		if !uc.HasExplicitRouterDomain() {
-			uc.Set("router.domain", domain)
-			if err := uc.Save(); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: could not persist router.domain: %s\n", err)
-			}
-		}
-
-		fmt.Println("System password needed for:")
-		fmt.Printf("  1. Trusting the CA (browsers accept *.%s)\n", domain)
-		fmt.Printf("  2. Port forwarding (443 → %d)\n", port)
-		fmt.Println()
-
-		if err := proxy.TrustCA(caCertFile); err != nil {
-			fmt.Fprintln(os.Stderr, style.Warnf("CA trust failed: %v", err))
-			fmt.Fprintln(os.Stderr, style.Dimf("  HTTPS will work but browsers will show a certificate warning."))
-		}
-
-		if err := service.InstallPortForward(port); err != nil {
-			fmt.Fprintln(os.Stderr, style.Warnf("port forwarding skipped: %v", err))
-			fmt.Fprintln(os.Stderr, style.Dimf("  URLs will require a port number: https://{branch}.%s:%d", domain, port))
-			fmt.Println()
-		}
-
-		if _, err := service.Install(gtlPath, port); err != nil {
-			return err
-		}
-
-		hostsRequired := domain != "localhost"
-		if runtime.GOOS == "darwin" || hostsRequired {
-			hostnames := routeHostnames(domain)
-			if len(hostnames) > 0 {
-				if err := service.SyncHosts(hostnames); err != nil {
-					fmt.Fprintln(os.Stderr, style.Warnf("hosts sync failed: %v", err))
-					if hostsRequired {
-						fmt.Fprintln(os.Stderr, style.Dimf("  Custom TLD .%s requires /etc/hosts entries.", domain))
-					} else {
-						fmt.Fprintln(os.Stderr, style.Dimf("  Safari may not resolve *.localhost subdomains."))
-					}
-					fmt.Fprintln(os.Stderr, style.Dimf("  Run 'gtl serve hosts sync' manually."))
-				}
-			}
-		}
-
 		fmt.Println()
 		fmt.Println(style.Actionf("Router running."))
 		fmt.Printf("  Status: %s\n", style.Cmd("gtl serve status"))
@@ -273,7 +225,7 @@ func runRouter() error {
 	router := proxy.NewRouter(port, reg).
 		WithBaseDomain(domain).
 		WithAliases(func() map[string]int { return config.LoadUserConfig("").RouterAliases() }).
-			WithAliases(projectAliases(reg))
+		WithAliases(projectAliases(reg))
 	if proxy.IsCAInstalled() {
 		router.WithTLS()
 	}

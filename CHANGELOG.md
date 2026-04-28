@@ -1,3 +1,10 @@
+## [Unreleased]
+
+- **`gtl install` command** — single command to set up git-treeline for a project and machine. Creates `.treeline.yml` if missing, creates user config, installs the post-checkout hook, allocates ports, and optionally enables the local HTTPS router (prompted with a docs link). Safe to run on first clone or any time after — every step is idempotent. Replaces the fragmented `gtl init` → `gtl setup` onboarding flow and works for both first-project setup and later joiners.
+- **Core worktree commands no longer require HTTPS router** — previously `gtl setup`, `gtl new`, `gtl clone`, and `gtl review` would hard-fail if `gtl serve install` hadn't been run. Now they print a warning and proceed, so developers can use localhost-only workflows without the HTTPS stack. The warning points to `gtl install` or `gtl serve install`.
+- **Explicit router intent** — `router.mode` now records whether HTTPS routing should be prompted, disabled, or repaired automatically. `warnings.router: false` still suppresses reminders, but no longer changes env interpolation or disables router URLs by itself.
+- **Cleaner start URLs** — `gtl start` now prints the localhost URL alongside the router URL and no longer prints the tunnel command hint in start output. Use `gtl routes` or `gtl tunnel` when you need tunnel URLs.
+
 ## [0.38.1]
 
 - **`gtl serve alias` auto-detects port** — running `gtl serve alias <name>` from a worktree directory now looks up the allocated port automatically. If the allocation has multiple ports, an interactive selector is shown. Explicit `gtl serve alias <name> <port>` still works as before.

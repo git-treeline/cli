@@ -55,6 +55,20 @@ func TestUserConfig_Init(t *testing.T) {
 	if !uc.Exists() {
 		t.Error("expected Exists() to be true after init")
 	}
+	if got := uc.RouterDomain(); got != "prt.dev" {
+		t.Errorf("expected init to pin prt.dev, got %s", got)
+	}
+	if !uc.HasExplicitRouterDomain() {
+		t.Error("expected init to write an explicit router.domain")
+	}
+
+	reloaded := LoadUserConfig(path)
+	if got := reloaded.RouterDomain(); got != "prt.dev" {
+		t.Errorf("expected reloaded init config to keep prt.dev, got %s", got)
+	}
+	if !reloaded.HasExplicitRouterDomain() {
+		t.Error("expected reloaded init config to keep explicit router.domain")
+	}
 }
 
 func TestRouterDomain_ExplicitValue(t *testing.T) {
@@ -100,6 +114,46 @@ func TestHasExplicitRouterDomain(t *testing.T) {
 	uc2 := LoadUserConfig(path2)
 	if uc2.HasExplicitRouterDomain() {
 		t.Error("expected false when domain is absent")
+	}
+}
+
+func TestRouterMode_DefaultPrompt(t *testing.T) {
+	uc := LoadUserConfig("/nonexistent/path/config.json")
+	if got := uc.RouterMode(); got != RouterModePrompt {
+		t.Fatalf("expected %q, got %q", RouterModePrompt, got)
+	}
+}
+
+func TestRouterMode_WarningsDoesNotChangeMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"warnings":{"router":false}}`), 0o644)
+
+	uc := LoadUserConfig(path)
+	if got := uc.RouterMode(); got != RouterModePrompt {
+		t.Fatalf("expected %q, got %q", RouterModePrompt, got)
+	}
+	if uc.RouterWarningsEnabled() {
+		t.Fatal("expected warnings.router=false to suppress prompts without changing mode")
+	}
+}
+
+func TestUserConfig_SetRouterMode(t *testing.T) {
+	uc := LoadUserConfig(filepath.Join(t.TempDir(), "config.json"))
+	uc.SetRouterMode(RouterModeEnabled)
+	if got := uc.RouterMode(); got != RouterModeEnabled {
+		t.Fatalf("expected %q, got %q", RouterModeEnabled, got)
+	}
+	if !uc.RouterWarningsEnabled() {
+		t.Fatal("expected router warnings enabled outside disabled mode")
+	}
+
+	uc.SetRouterMode(RouterModeDisabled)
+	if got := uc.RouterMode(); got != RouterModeDisabled {
+		t.Fatalf("expected %q, got %q", RouterModeDisabled, got)
+	}
+	if uc.RouterWarningsEnabled() {
+		t.Fatal("expected router warnings disabled in disabled mode")
 	}
 }
 
@@ -584,6 +638,23 @@ func TestUserConfig_RouterAliases(t *testing.T) {
 	}
 	if aliases["pgweb"] != 8082 {
 		t.Errorf("expected pgweb=8082, got %d", aliases["pgweb"])
+	}
+}
+
+func TestUserConfig_RouterWarningsEnabled_Default(t *testing.T) {
+	uc := LoadUserConfig(filepath.Join(t.TempDir(), "config.json"))
+	if !uc.RouterWarningsEnabled() {
+		t.Error("expected router warnings enabled by default")
+	}
+}
+
+func TestUserConfig_RouterWarningsEnabled_Disabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"warnings":{"router":false}}`), 0o644)
+	uc := LoadUserConfig(path)
+	if uc.RouterWarningsEnabled() {
+		t.Error("expected router warnings disabled")
 	}
 }
 

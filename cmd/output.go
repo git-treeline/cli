@@ -12,36 +12,42 @@ import (
 	"github.com/git-treeline/git-treeline/internal/worktree"
 )
 
-// errServeNotInstalled is the shared error returned when commands require
-// the HTTPS router but it hasn't been installed yet.
-var errServeNotInstalled error = &CliError{
-	Message: "HTTPS router not installed.",
-	Hint:    "Run 'gtl serve install' first (one-time setup).",
-	DocsURL: "https://git-treeline.dev/docs/#getting-started",
-}
-
-// requireServeInstalled returns errServeNotInstalled when the HTTPS CA is
-// absent and GTL_HEADLESS is not set. Call from commands that need the router.
-func requireServeInstalled() error {
-	if !proxy.IsCAInstalled() && os.Getenv("GTL_HEADLESS") == "" {
-		return errServeNotInstalled
+// warnServeNotInstalled prints a non-blocking warning when the HTTPS router
+// is not installed. Used by commands that benefit from but don't require it.
+func warnServeNotInstalled() {
+	if routerIsHealthy() || os.Getenv("GTL_HEADLESS") != "" {
+		return
 	}
-	return nil
+	uc := config.LoadUserConfig("")
+	if !uc.RouterWarningsEnabled() {
+		return
+	}
+	fmt.Fprintln(os.Stderr, style.Warnf("HTTPS router not installed — local URLs will use http://localhost:{port}."))
+	fmt.Fprintln(os.Stderr, style.Dimf("  Run 'gtl install' or 'gtl serve install' to enable HTTPS routing."))
+	fmt.Fprintln(os.Stderr)
 }
 
-// printRouterAndTunnel prints the Router URL and Tunnel hint after setup.
-// Called from setup, new, and clone to avoid duplication.
-func printRouterAndTunnel(uc *config.UserConfig, project, branch string) {
-	routeKey := proxy.RouteKey(project, branch)
+// printLocalAndRouter prints immediately usable URLs after start.
+// Tunnels are intentionally omitted here; use gtl routes or gtl tunnel for
+// public sharing URLs.
+func printLocalAndRouter(uc *config.UserConfig, project, branch string, port int) {
+	if port > 0 {
+		fmt.Println(style.Actionf("Local:  %s", style.Link(fmt.Sprintf("http://localhost:%d", port))))
+	}
+
+	printRouterURL(uc, project, branch)
+}
+
+// printRouterURL prints the local HTTPS router URL when the router is running.
+func printRouterURL(uc *config.UserConfig, project, branch string) {
+	if uc.RouterMode() == config.RouterModeDisabled {
+		return
+	}
 	domain := uc.RouterDomain()
 
 	if service.IsRunning() {
 		url := proxy.BuildRouterURL(0, project, branch, domain, uc.RouterPort(), true, service.IsPortForwardConfigured())
 		fmt.Println(style.Actionf("Router: %s", style.Link(url)))
-	}
-
-	if tunnelDomain := uc.TunnelDomain(""); tunnelDomain != "" {
-		fmt.Println(style.Actionf("Tunnel: run %s → %s", style.Cmd("gtl tunnel"), style.Link("https://"+routeKey+"."+tunnelDomain)))
 	}
 }
 

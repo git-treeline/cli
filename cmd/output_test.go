@@ -4,32 +4,112 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/git-treeline/git-treeline/internal/config"
 )
 
-func TestErrServeNotInstalled_ContainsGuidance(t *testing.T) {
-	ce, ok := errServeNotInstalled.(*CliError)
-	if !ok {
-		t.Fatal("expected *CliError")
+var ansiEscapeRE = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+func TestWarnServeNotInstalled_MentionsInstallCommands(t *testing.T) {
+	gtlHome := filepath.Join(t.TempDir(), "gtl-home")
+	t.Setenv("GTL_HOME", gtlHome)
+	t.Setenv("GTL_HEADLESS", "")
+	oldHealth := routerHealthChecker
+	routerHealthChecker = func() []string { return []string{"CA trust"} }
+	t.Cleanup(func() { routerHealthChecker = oldHealth })
+	if err := os.MkdirAll(gtlHome, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(ce.Message, "router") {
-		t.Errorf("expected 'router' in message, got: %s", ce.Message)
+	if err := os.WriteFile(filepath.Join(gtlHome, "config.json"), []byte(`{"router":{"mode":"prompt"}}`), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(ce.Hint, "gtl serve install") {
-		t.Errorf("expected 'gtl serve install' in hint, got: %s", ce.Hint)
+
+	out := captureStderr(t, warnServeNotInstalled)
+	if !strings.Contains(out, "gtl install") {
+		t.Errorf("expected gtl install in warning, got:\n%s", out)
 	}
-	if !strings.Contains(ce.DocsURL, "git-treeline.dev") {
-		t.Errorf("expected docs URL, got: %s", ce.DocsURL)
+	if !strings.Contains(out, "gtl serve install") {
+		t.Errorf("expected gtl serve install in warning, got:\n%s", out)
 	}
 }
 
+func TestWarnServeNotInstalled_HeadlessSilent(t *testing.T) {
+	gtlHome := filepath.Join(t.TempDir(), "gtl-home")
+	t.Setenv("GTL_HOME", gtlHome)
+	t.Setenv("GTL_HEADLESS", "1")
+	oldHealth := routerHealthChecker
+	routerHealthChecker = func() []string { return []string{"CA trust"} }
+	t.Cleanup(func() { routerHealthChecker = oldHealth })
+	if err := os.MkdirAll(gtlHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gtlHome, "config.json"), []byte(`{"router":{"mode":"prompt"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStderr(t, warnServeNotInstalled)
+	if out != "" {
+		t.Errorf("expected no warning in headless mode, got:\n%s", out)
+	}
+}
+
+func TestWarnServeNotInstalled_DisabledByUserConfig(t *testing.T) {
+	gtlHome := filepath.Join(t.TempDir(), "gtl-home")
+	t.Setenv("GTL_HOME", gtlHome)
+	t.Setenv("GTL_HEADLESS", "")
+	oldHealth := routerHealthChecker
+	routerHealthChecker = func() []string { return []string{"CA trust"} }
+	t.Cleanup(func() { routerHealthChecker = oldHealth })
+	if err := os.MkdirAll(gtlHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gtlHome, "config.json"), []byte(`{"warnings":{"router":false}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStderr(t, warnServeNotInstalled)
+	if out != "" {
+		t.Errorf("expected warning suppressed by user config, got:\n%s", out)
+	}
+}
+func TestPrintLocalAndRouter_PrintsLocalButNotTunnel(t *testing.T) {
+	uc := loadTestUserConfig(t)
+	uc.Set("tunnel.default", "personal")
+	uc.Set("tunnel.tunnels.personal.domain", "example.com")
+
+	out := captureStdout(t, func() {
+		printLocalAndRouter(uc, "myapp", "feature-x", 3010)
+	})
+	out = ansiEscapeRE.ReplaceAllString(out, "")
+	if !strings.Contains(out, "http://localhost:3010") {
+		t.Errorf("expected localhost URL, got:\n%s", out)
+	}
+	if strings.Contains(out, "Tunnel:") || strings.Contains(out, "gtl tunnel") || strings.Contains(out, "example.com") {
+		t.Errorf("expected no tunnel hint, got:\n%s", out)
+	}
+}
+
+func TestPrintRouterURL_DisabledRouterModeSilent(t *testing.T) {
+	uc := loadTestUserConfig(t)
+	uc.SetRouterMode(config.RouterModeDisabled)
+
+	out := captureStdout(t, func() {
+		printRouterURL(uc, "myapp", "feature-x")
+	})
+	out = ansiEscapeRE.ReplaceAllString(out, "")
+	if strings.Contains(out, "Router:") {
+		t.Errorf("expected no router output when router mode is disabled, got:\n%s", out)
+	}
+}
 func TestSortedRouteKeys(t *testing.T) {
 	routes := map[string]int{
-		"myapp-feature":  3010,
-		"myapp-main":     3000,
-		"other-dev":      3020,
-		"api-staging":    4000,
+		"myapp-feature": 3010,
+		"myapp-main":    3000,
+		"other-dev":     3020,
+		"api-staging":   4000,
 	}
 	keys := sortedRouteKeys(routes)
 	if len(keys) != 4 {

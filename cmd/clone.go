@@ -44,9 +44,7 @@ The server is NOT auto-started. Review the project, then run 'gtl start'.`,
 			}
 		}
 
-		if err := requireServeInstalled(); err != nil {
-			return cliErr(cmd, err)
-		}
+		warnServeNotInstalled()
 
 		if len(args) == 0 {
 			return cliErr(cmd, &CliError{
@@ -118,12 +116,9 @@ The server is NOT auto-started. Review the project, then run 'gtl start'.`,
 
 		fmt.Println(style.Actionf("Running setup..."))
 		s := setup.New(absPath, absPath, uc)
-		alloc, err := s.Run()
-		if err != nil {
+		if _, err := s.Run(); err != nil {
 			return cliErr(cmd, errSetupFailed(err))
 		}
-
-		printRouterAndTunnel(uc, s.ProjectConfig.Project(), alloc.Branch)
 
 		mainRepo := worktree.DetectMainRepo(absPath)
 		pc := config.LoadProjectConfig(mainRepo)

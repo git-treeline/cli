@@ -21,6 +21,7 @@ import (
 	"github.com/git-treeline/git-treeline/internal/proxy"
 	"github.com/git-treeline/git-treeline/internal/registry"
 	"github.com/git-treeline/git-treeline/internal/resolve"
+	"github.com/git-treeline/git-treeline/internal/service"
 	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/git-treeline/git-treeline/internal/worktree"
 )
@@ -146,7 +147,11 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 		_, _ = fmt.Fprintln(s.Log, style.Dimf("  Database: %s", alloc.Database))
 	}
 	_, _ = fmt.Fprintln(s.Log, style.Dimf("  Redis:    %s", redisURL))
-	_, _ = fmt.Fprintln(s.Log, style.Dimf("  URL:      http://localhost:%d", alloc.Port))
+	_, _ = fmt.Fprintln(s.Log, style.Dimf("  Local:    http://localhost:%d", alloc.Port))
+	if s.UserConfig.RouterMode() != config.RouterModeDisabled && service.IsRunning() {
+		routerURL := proxy.BuildRouterURL(0, s.ProjectConfig.Project(), branch, s.UserConfig.RouterDomain(), s.UserConfig.RouterPort(), true, service.IsPortForwardConfigured())
+		_, _ = fmt.Fprintln(s.Log, style.Dimf("  Router:   %s", routerURL))
+	}
 	_, _ = fmt.Fprintln(s.Log, style.Dimf("  Dir:      %s", s.WorktreePath))
 
 	return alloc, nil
@@ -241,7 +246,11 @@ func (s *Setup) copyFiles() {
 
 func (s *Setup) buildEnvVars(alloc interpolation.Allocation, redisURL string) (map[string]string, error) {
 	branch, _ := alloc["branch"].(string)
-	InjectRouterTokens(alloc, s.ProjectConfig.Project(), branch, s.UserConfig.RouterDomain(), s.UserConfig.TunnelDomain(""))
+	routerDomain := s.UserConfig.RouterDomain()
+	if s.UserConfig.RouterMode() == config.RouterModeDisabled {
+		routerDomain = ""
+	}
+	InjectRouterTokens(alloc, s.ProjectConfig.Project(), branch, routerDomain, s.UserConfig.TunnelDomain(""))
 	if s.Resolver != nil {
 		return BuildEnvVarsWithResolver(s.ProjectConfig, alloc, redisURL, s.Resolver)
 	}
@@ -251,6 +260,14 @@ func (s *Setup) buildEnvVars(alloc interpolation.Allocation, redisURL string) (m
 // InjectRouterTokens adds router_url, router_domain, and tunnel_host to an
 // allocation map so the corresponding env tokens can be resolved.
 func InjectRouterTokens(alloc interpolation.Allocation, project, branch, routerDomain, tunnelDomain string) {
+	if routerDomain == "" {
+		alloc["router_url"] = ""
+		alloc["router_domain"] = ""
+		if tunnelDomain != "" {
+			alloc["tunnel_host"] = tunnelDomain
+		}
+		return
+	}
 	routeKey := proxy.RouteKey(project, branch)
 	alloc["router_url"] = fmt.Sprintf("https://%s.%s", routeKey, routerDomain)
 	alloc["router_domain"] = routerDomain
@@ -490,14 +507,18 @@ func ConfigureEditor(worktreePath string, pc *config.ProjectConfig, uc *config.U
 
 	project := pc.Project()
 	routerDomain := uc.RouterDomain()
-	routeKey := proxy.RouteKey(project, branch)
+	routerURL := ""
+	if uc.RouterMode() != config.RouterModeDisabled {
+		routeKey := proxy.RouteKey(project, branch)
+		routerURL = fmt.Sprintf("https://%s.%s", routeKey, routerDomain)
+	}
 
 	replacer := strings.NewReplacer(
 		"{project}", project,
 		"{port}", fmt.Sprintf("%d", port),
 		"{branch}", branch,
 		"{url}", fmt.Sprintf("http://localhost:%d", port),
-		"{router_url}", fmt.Sprintf("https://%s.%s", routeKey, routerDomain),
+		"{router_url}", routerURL,
 	)
 
 	title := ""

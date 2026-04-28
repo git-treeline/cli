@@ -24,6 +24,12 @@ var UserDefaults = map[string]any{
 	"tunnel": map[string]any{},
 }
 
+const (
+	RouterModePrompt   = "prompt"
+	RouterModeDisabled = "disabled"
+	RouterModeEnabled  = "enabled"
+)
+
 type UserConfig struct {
 	Path string
 	Data map[string]any
@@ -137,10 +143,44 @@ func (uc *UserConfig) HasExplicitRouterDomain() bool {
 	return ok && v != ""
 }
 
+// RouterMode returns the user's intent for the optional HTTPS router.
+// prompt means offer setup during install, disabled means localhost-only,
+// and enabled means install/repair the router when needed.
+func (uc *UserConfig) RouterMode() string {
+	if v, ok := Dig(uc.Data, "router", "mode").(string); ok {
+		switch v {
+		case RouterModePrompt, RouterModeDisabled, RouterModeEnabled:
+			return v
+		}
+	}
+	return RouterModePrompt
+}
+
+// SetRouterMode stores the user's router intent. Call Save() to persist.
+func (uc *UserConfig) SetRouterMode(mode string) {
+	switch mode {
+	case RouterModePrompt, RouterModeDisabled, RouterModeEnabled:
+		uc.Set("router.mode", mode)
+		uc.Set("warnings.router", mode != RouterModeDisabled)
+	}
+}
+
 // SafariWarningsEnabled returns whether to show Safari/hosts sync warnings.
 // Default: true. Set warnings.safari: false to disable.
 func (uc *UserConfig) SafariWarningsEnabled() bool {
 	if v, ok := Dig(uc.Data, "warnings", "safari").(bool); ok {
+		return v
+	}
+	return true
+}
+
+// RouterWarningsEnabled returns whether to show reminders about the optional
+// local HTTPS router. Default: true. Set warnings.router: false to disable.
+func (uc *UserConfig) RouterWarningsEnabled() bool {
+	if uc.RouterMode() == RouterModeDisabled {
+		return false
+	}
+	if v, ok := Dig(uc.Data, "warnings", "router").(bool); ok {
 		return v
 	}
 	return true
@@ -333,15 +373,36 @@ func (uc *UserConfig) Exists() bool {
 	return err == nil
 }
 
+// initDefaults returns the config shape written for brand-new user configs.
+// Keep router.domain explicit here so new installs use the modern prt.dev
+// default, while older configs that never set the key still preserve their
+// legacy localhost behavior at load time.
+func initDefaults() map[string]any {
+	data := copyMap(UserDefaults)
+	router, ok := data["router"].(map[string]any)
+	if !ok {
+		router = make(map[string]any)
+		data["router"] = router
+	}
+	router["domain"] = "prt.dev"
+	router["mode"] = RouterModePrompt
+	return data
+}
+
 func (uc *UserConfig) Init() error {
 	if err := os.MkdirAll(filepath.Dir(uc.Path), platform.DirMode); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(UserDefaults, "", "  ")
+	initial := initDefaults()
+	data, err := json.MarshalIndent(initial, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(uc.Path, append(data, '\n'), platform.PrivateFileMode)
+	if err := os.WriteFile(uc.Path, append(data, '\n'), platform.PrivateFileMode); err != nil {
+		return err
+	}
+	uc.Data = initial
+	return nil
 }
 
 var userKnownKeys = map[string]bool{

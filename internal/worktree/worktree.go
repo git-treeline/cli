@@ -51,6 +51,16 @@ func gitCheck(dir string, args ...string) bool {
 	return cmd.Run() == nil
 }
 
+// DetectRepoRoot returns the top-level directory of the current git worktree.
+// Falls back to the given path if detection fails.
+func DetectRepoRoot(path string) string {
+	root := gitOutput(path, "rev-parse", "--show-toplevel")
+	if root == "" {
+		return path
+	}
+	return root
+}
+
 // Create adds a git worktree at path. If newBranch is true, it creates a new
 // branch from base. Otherwise it checks out an existing branch.
 func Create(path, branch string, newBranch bool, base string) error {

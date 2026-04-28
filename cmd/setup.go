@@ -11,7 +11,6 @@ import (
 	"github.com/git-treeline/git-treeline/internal/setup"
 	"github.com/git-treeline/git-treeline/internal/style"
 	"github.com/git-treeline/git-treeline/internal/templates"
-	"github.com/git-treeline/git-treeline/internal/worktree"
 	"github.com/spf13/cobra"
 )
 
@@ -53,9 +52,7 @@ var setupCmd = &cobra.Command{
 	Short: "Allocate resources and set up a worktree environment",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := requireServeInstalled(); err != nil {
-			return cliErr(cmd, err)
-		}
+		warnServeNotInstalled()
 
 		path := "."
 		if len(args) > 0 {
@@ -70,18 +67,12 @@ var setupCmd = &cobra.Command{
 		uc := config.LoadUserConfig("")
 		s := setup.New(path, setupMainRepo, uc)
 		s.Options.DryRun = setupDryRun
-		alloc, err := s.Run()
-		if err != nil {
+		if _, err := s.Run(); err != nil {
 			return err
 		}
 
-		if !setupDryRun {
-			printRouterAndTunnel(uc, s.ProjectConfig.Project(), alloc.Branch)
-		}
-
 		absPath, _ := filepath.Abs(path)
-		mainRepo := worktree.DetectMainRepo(absPath)
-		pc := config.LoadProjectConfig(mainRepo)
+		pc := config.LoadProjectConfig(absPath)
 		printSetupDiagnostics(absPath, pc)
 
 		return nil
