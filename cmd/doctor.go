@@ -189,6 +189,8 @@ func doctorConfig(pc *config.ProjectConfig, det *detect.Result, absPath string) 
 		switch det.Framework {
 		case "vite":
 			doctorLine("port wiring", "⚠ Vite ignores PORT env — add {port} to commands.start")
+		case "phoenix":
+			doctorLine("port wiring", "⚠ Phoenix needs PORT in the command — use PORT={port} mix phx.server")
 		case "django", "python":
 			if !strings.Contains(sc, "$PORT") && !strings.Contains(sc, "${PORT") {
 				doctorLine("port wiring", "⚠ Django needs the port in the command — use {port}")

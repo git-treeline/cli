@@ -105,6 +105,73 @@ func TestForDetection_Rails_SQLite(t *testing.T) {
 	assertNotContains(t, content, "DATABASE_NAME")
 }
 
+func TestForDetection_Phoenix_Postgres(t *testing.T) {
+	det := &detect.Result{
+		Framework:      "phoenix",
+		HasEnvFile:     true,
+		DBAdapter:      "postgresql",
+		PackageManager: "mix",
+		EnvFile:        ".env",
+	}
+	content := ForDetection("myapp", "myapp_dev", det)
+
+	assertValidYAML(t, content)
+	assertContains(t, content, "project: myapp")
+	assertContains(t, content, "adapter: postgresql")
+	assertContains(t, content, "template: myapp_dev")
+	assertContains(t, content, "DATABASE_URL")
+	assertContains(t, content, "mix deps.get")
+	assertContains(t, content, "mix ecto.migrate")
+	assertContains(t, content, "start: PORT={port} mix phx.server")
+	assertNotContains(t, content, "DATABASE_PATH")
+	assertNotContains(t, content, "config/master.key")
+}
+
+func TestForDetection_Phoenix_SQLite(t *testing.T) {
+	det := &detect.Result{
+		Framework:      "phoenix",
+		HasEnvFile:     true,
+		DBAdapter:      "sqlite",
+		PackageManager: "mix",
+		EnvFile:        ".env",
+	}
+	content := ForDetection("myapp", "", det)
+
+	assertValidYAML(t, content)
+	assertContains(t, content, "adapter: sqlite")
+	assertContains(t, content, "myapp_dev.db")
+	assertContains(t, content, "DATABASE_PATH")
+	assertNotContains(t, content, "DATABASE_URL")
+}
+
+func TestForDetection_Phoenix_NoEnvFile(t *testing.T) {
+	det := &detect.Result{
+		Framework:      "phoenix",
+		HasEnvFile:     false,
+		PackageManager: "mix",
+	}
+	content := ForDetection("myapp", "", det)
+
+	assertValidYAML(t, content)
+	assertContains(t, content, "adapter: postgresql")
+	assertContains(t, content, "template: myapp_dev")
+	assertContains(t, content, "start: PORT={port} mix phx.server")
+	assertNotContains(t, content, "env_file")
+	assertNotContains(t, content, "DATABASE_URL")
+}
+
+func TestForDetection_Phoenix_Umbrella(t *testing.T) {
+	det := &detect.Result{
+		Framework:      "phoenix",
+		IsUmbrella:     true,
+		PackageManager: "mix",
+	}
+	content := ForDetection("myapp", "", det)
+
+	assertValidYAML(t, content)
+	assertContains(t, content, "Umbrella project detected")
+}
+
 func TestForDetection_Node(t *testing.T) {
 	det := &detect.Result{
 		Framework:      "node",
@@ -399,6 +466,47 @@ func TestPortHint_Rails(t *testing.T) {
 	hint := PortHint(det)
 	if hint != "" {
 		t.Errorf("expected no hint for Rails, got: %s", hint)
+	}
+}
+
+func TestPortHint_Phoenix(t *testing.T) {
+	det := &detect.Result{Framework: "phoenix"}
+	hint := PortHint(det)
+	if !strings.Contains(hint, "config/dev.exs") {
+		t.Errorf("expected Phoenix port hint to mention config/dev.exs, got: %s", hint)
+	}
+	if !strings.Contains(hint, "System.get_env") {
+		t.Errorf("expected Phoenix port hint to mention System.get_env, got: %s", hint)
+	}
+}
+
+func TestDiagnose_Phoenix_Umbrella(t *testing.T) {
+	det := &detect.Result{Framework: "phoenix", IsUmbrella: true}
+	diags := Diagnose(det)
+
+	hasUmbrellaWarning := false
+	for _, d := range diags {
+		if d.Level == "warn" && strings.Contains(d.Message, "umbrella") {
+			hasUmbrellaWarning = true
+		}
+	}
+	if !hasUmbrellaWarning {
+		t.Error("expected umbrella warning for Phoenix umbrella project")
+	}
+}
+
+func TestDiagnose_Phoenix_PortHint(t *testing.T) {
+	det := &detect.Result{Framework: "phoenix"}
+	diags := Diagnose(det)
+
+	hasPortWarning := false
+	for _, d := range diags {
+		if strings.Contains(d.Message, "config/dev.exs") {
+			hasPortWarning = true
+		}
+	}
+	if !hasPortWarning {
+		t.Error("expected port wiring diagnostic for Phoenix")
 	}
 }
 

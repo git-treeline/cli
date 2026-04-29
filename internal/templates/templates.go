@@ -20,6 +20,8 @@ func ForDetection(project, templateDB string, det *detect.Result) string {
 		return vite(project, det)
 	case "rails":
 		return rails(project, templateDB, det)
+	case "phoenix":
+		return phoenix(project, templateDB, det)
 	case "node":
 		return node(project, det)
 	case "django", "python":
@@ -137,6 +139,62 @@ func rails(project, templateDB string, det *detect.Result) string {
 
 	if det.MergeTarget == "" {
 		b.WriteString("\n# merge_target: develop            # branch that prune --merged checks against\n")
+	}
+
+	writeHooksComment(&b)
+	writeEditorComment(&b)
+	return b.String()
+}
+
+func phoenix(project, templateDB string, det *detect.Result) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "project: %s\n", project)
+	writeMergeTarget(&b, det)
+
+	emit := shouldEmitEnv(det)
+	if emit {
+		writeEnvFileBlock(&b, envTarget(det))
+	}
+
+	adapter := det.DBAdapter
+	if adapter == "" {
+		adapter = "postgresql"
+	}
+
+	fmt.Fprintf(&b, "\ndatabase:\n")
+	fmt.Fprintf(&b, "  adapter: %s\n", adapter)
+	if adapter == "sqlite" {
+		fmt.Fprintf(&b, "  template: %s_dev.db\n", project)
+		fmt.Fprintf(&b, "  pattern: \"%s_{worktree}.db\"\n", project)
+	} else {
+		tdb := templateDB
+		if tdb == "" {
+			tdb = project + "_dev"
+		}
+		fmt.Fprintf(&b, "  template: %s\n", tdb)
+		fmt.Fprintf(&b, "  pattern: \"{template}_{worktree}\"\n")
+	}
+
+	if emit {
+		b.WriteString("\nenv:\n")
+		fmt.Fprintf(&b, "  PORT: \"{port}\"\n")
+		if adapter == "sqlite" {
+			fmt.Fprintf(&b, "  DATABASE_PATH: \"{database}\"\n")
+		} else {
+			fmt.Fprintf(&b, "  DATABASE_URL: \"ecto://postgres:postgres@localhost:5432/{database}\"\n")
+		}
+		writeResolveComment(&b)
+	}
+
+	b.WriteString("\ncommands:\n")
+	b.WriteString("  setup:\n")
+	b.WriteString("    - mix deps.get\n")
+	b.WriteString("    - mix ecto.migrate\n")
+	b.WriteString("  start: PORT={port} mix phx.server\n")
+
+	if det.IsUmbrella {
+		b.WriteString("\n# Umbrella project detected. gtl currently treats umbrellas as a single app —\n")
+		b.WriteString("# per-app port/db isolation isn't supported yet. Open an issue if you need it.\n")
 	}
 
 	writeHooksComment(&b)
@@ -279,6 +337,8 @@ func startCommandFor(det *detect.Result) string {
 		return "" // already emitted inline for vite (npx vite)
 	case "rails":
 		return "" // already emitted inline for rails (bin/dev)
+	case "phoenix":
+		return "" // already emitted inline for phoenix (PORT={port} mix phx.server)
 	case "node":
 		return runCmd(det) + " dev"
 	case "django", "python":
@@ -326,6 +386,13 @@ Use {port} in your start command (gtl init does this automatically):
 
   const port = process.env.PORT || 3000;
   app.listen(port);`
+	case "phoenix":
+		return `Phoenix doesn't read PORT by default. Wire it up in config/dev.exs:
+
+  config :myapp, MyAppWeb.Endpoint,
+    http: [ip: {127, 0, 0, 1}, port: String.to_integer(System.get_env("PORT") || "4000")]
+
+The generated start command sets PORT for you (PORT={port} mix phx.server).`
 	case "django", "python":
 		return `Use {port} in your start command for the allocated port:
 

@@ -193,6 +193,102 @@ func TestDetect_Go(t *testing.T) {
 	}
 }
 
+func TestDetect_Phoenix_Postgres(t *testing.T) {
+	dir := setup(t, "mix.exs", "mix.lock", "lib/myapp/application.ex")
+	_ = os.WriteFile(filepath.Join(dir, "mix.exs"), []byte(`defmodule MyApp.MixProject do
+  def deps do
+    [
+      {:phoenix, "~> 1.7"},
+      {:ecto_sql, "~> 3.10"},
+      {:postgrex, ">= 0.0.0"},
+    ]
+  end
+end`), 0o644)
+
+	r := Detect(dir)
+	if r.Framework != "phoenix" {
+		t.Errorf("expected phoenix, got %s", r.Framework)
+	}
+	if r.DBAdapter != "postgresql" {
+		t.Errorf("expected postgresql, got %s", r.DBAdapter)
+	}
+	if r.PackageManager != "mix" {
+		t.Errorf("expected mix, got %s", r.PackageManager)
+	}
+	if r.IsUmbrella {
+		t.Error("expected IsUmbrella=false for single-app project")
+	}
+}
+
+func TestDetect_Phoenix_SQLite(t *testing.T) {
+	dir := setup(t, "mix.exs", "lib/myapp/application.ex")
+	_ = os.WriteFile(filepath.Join(dir, "mix.exs"), []byte(`defmodule MyApp.MixProject do
+  def deps do
+    [
+      {:phoenix, "~> 1.7"},
+      {:ecto_sqlite3, "~> 0.12"},
+    ]
+  end
+end`), 0o644)
+
+	r := Detect(dir)
+	if r.Framework != "phoenix" {
+		t.Errorf("expected phoenix, got %s", r.Framework)
+	}
+	if r.DBAdapter != "sqlite" {
+		t.Errorf("expected sqlite, got %s", r.DBAdapter)
+	}
+}
+
+func TestDetect_Phoenix_Umbrella(t *testing.T) {
+	dir := setup(t,
+		"mix.exs",
+		"apps/web/mix.exs",
+		"apps/web/lib/web/application.ex",
+		"apps/core/mix.exs",
+	)
+	_ = os.WriteFile(filepath.Join(dir, "mix.exs"), []byte(`defmodule MyApp.Umbrella.MixProject do
+  def deps do
+    [{:phoenix, "~> 1.7"}]
+  end
+end`), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "apps/web/mix.exs"), []byte(""), 0o644)
+
+	r := Detect(dir)
+	if r.Framework != "phoenix" {
+		t.Errorf("expected phoenix, got %s", r.Framework)
+	}
+	if !r.IsUmbrella {
+		t.Error("expected IsUmbrella=true when apps/*/mix.exs exists")
+	}
+}
+
+func TestDetect_Phoenix_NotElixirOnly(t *testing.T) {
+	// mix.exs without :phoenix should not be detected as phoenix
+	dir := setup(t, "mix.exs")
+	_ = os.WriteFile(filepath.Join(dir, "mix.exs"), []byte(`defmodule Lib.MixProject do
+  def deps, do: [{:jason, "~> 1.4"}]
+end`), 0o644)
+
+	r := Detect(dir)
+	if r.Framework == "phoenix" {
+		t.Error("expected non-phoenix framework for plain Elixir lib")
+	}
+}
+
+func TestDetect_Phoenix_PrefersMixOverNpm(t *testing.T) {
+	dir := setup(t, "mix.exs", "lib/myapp/application.ex", "package.json", "package-lock.json")
+	_ = os.WriteFile(filepath.Join(dir, "mix.exs"), []byte(`{:phoenix, "~> 1.7"}`), 0o644)
+
+	r := Detect(dir)
+	if r.Framework != "phoenix" {
+		t.Errorf("expected phoenix, got %s", r.Framework)
+	}
+	if r.PackageManager != "mix" {
+		t.Errorf("expected mix (not npm) for phoenix project, got %s", r.PackageManager)
+	}
+}
+
 func TestDetect_Vite(t *testing.T) {
 	dir := setup(t, "package.json", "vite.config.js")
 	r := Detect(dir)
@@ -338,6 +434,7 @@ func TestIsServerFramework(t *testing.T) {
 		{"node", true},
 		{"django", true},
 		{"python", true},
+		{"phoenix", true},
 		{"go", false},
 		{"rust", false},
 		{"unknown", false},

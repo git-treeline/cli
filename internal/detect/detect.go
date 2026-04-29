@@ -14,7 +14,7 @@ import (
 // Result contains the detection findings for a project directory.
 // All fields are populated by Detect() based on filesystem analysis.
 type Result struct {
-	Framework      string   // "nextjs", "vite", "rails", "node", "django", "python", "rust", "go", "unknown"
+	Framework      string   // "nextjs", "vite", "rails", "phoenix", "node", "django", "python", "rust", "go", "unknown"
 	HasPrisma      bool
 	HasJSBundler   bool     // jsbundling-rails/cssbundling-rails or multi-process Procfile.dev
 	HasDotenv      bool     // project has dotenv or equivalent wired up
@@ -23,7 +23,8 @@ type Result struct {
 	HasEnvFile     bool     // true if any env file exists on disk
 	EnvFile        string   // best candidate: ".env.local", ".env.development", ".env", etc.
 	EnvFiles       []string // all env files found, in priority order
-	PackageManager string   // "npm", "yarn", "pnpm", "bundle", "cargo", "pip", ""
+	PackageManager string   // "npm", "yarn", "pnpm", "bundle", "mix", "cargo", "pip", ""
+	IsUmbrella     bool     // Phoenix umbrella project (apps/*/mix.exs); not yet fully supported
 	MergeTarget    string   // set by caller when git context is available
 }
 
@@ -51,6 +52,11 @@ func (r *Result) detectFramework(root string) {
 
 	if fileExists(root, "Gemfile") && fileExists(root, "config/application.rb") {
 		r.Framework = "rails"
+		return
+	}
+
+	if fileExists(root, "mix.exs") && r.detectPhoenix(root) {
+		r.Framework = "phoenix"
 		return
 	}
 
@@ -107,6 +113,21 @@ func (r *Result) detectDatabase(root string) {
 		}
 	}
 
+	if r.Framework == "phoenix" {
+		if content, err := os.ReadFile(filepath.Join(root, "mix.exs")); err == nil {
+			s := string(content)
+			switch {
+			case strings.Contains(s, ":ecto_sqlite3"):
+				r.DBAdapter = "sqlite"
+			case strings.Contains(s, ":postgrex"):
+				r.DBAdapter = "postgresql"
+			case strings.Contains(s, ":myxql"):
+				r.DBAdapter = "mysql"
+			}
+		}
+		return
+	}
+
 	if r.HasPrisma {
 		r.DBAdapter = "postgresql"
 	}
@@ -129,6 +150,10 @@ func (r *Result) detectRedis(root string) {
 }
 
 func (r *Result) detectPackageManager(root string) {
+	if r.Framework == "phoenix" {
+		r.PackageManager = "mix"
+		return
+	}
 	switch {
 	case fileExists(root, "pnpm-lock.yaml"):
 		r.PackageManager = "pnpm"
@@ -138,6 +163,8 @@ func (r *Result) detectPackageManager(root string) {
 		r.PackageManager = "npm"
 	case fileExists(root, "Gemfile.lock") || fileExists(root, "Gemfile"):
 		r.PackageManager = "bundle"
+	case fileExists(root, "mix.lock") || fileExists(root, "mix.exs"):
+		r.PackageManager = "mix"
 	case fileExists(root, "Cargo.lock") || fileExists(root, "Cargo.toml"):
 		r.PackageManager = "cargo"
 	case fileExists(root, "requirements.txt") || fileExists(root, "pyproject.toml"):
@@ -215,6 +242,30 @@ func (r *Result) detectPrisma(root string) {
 	r.HasPrisma = fileExists(root, "prisma/schema.prisma")
 }
 
+// detectPhoenix returns true if mix.exs declares :phoenix as a dependency.
+// Also sets IsUmbrella when an apps/ directory of sub-projects is present.
+func (r *Result) detectPhoenix(root string) bool {
+	content, err := os.ReadFile(filepath.Join(root, "mix.exs"))
+	if err != nil {
+		return false
+	}
+	if !strings.Contains(string(content), ":phoenix") {
+		return false
+	}
+	if dirExists(root, "apps") {
+		entries, err := os.ReadDir(filepath.Join(root, "apps"))
+		if err == nil {
+			for _, e := range entries {
+				if e.IsDir() && fileExists(root, "apps", e.Name(), "mix.exs") {
+					r.IsUmbrella = true
+					break
+				}
+			}
+		}
+	}
+	return true
+}
+
 func (r *Result) detectJSBundler(root string) {
 	if content, err := os.ReadFile(filepath.Join(root, "Gemfile")); err == nil {
 		s := string(content)
@@ -262,7 +313,7 @@ func dirExists(root, rel string) bool {
 // development server (Rails, Node, Django, etc.) as opposed to a CLI or library.
 func (r *Result) IsServerFramework() bool {
 	switch r.Framework {
-	case "rails", "nextjs", "vite", "node", "django", "python":
+	case "rails", "nextjs", "vite", "node", "django", "python", "phoenix":
 		return true
 	case "go", "rust", "unknown":
 		return false

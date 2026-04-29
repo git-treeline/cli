@@ -56,14 +56,14 @@ var initCmd = &cobra.Command{
 			project = filepath.Base(cwd)
 		}
 
-		templateDB := initTemplateDB
-		if templateDB == "" {
-			templateDB = project + "_development"
-		}
-
 		cwd, _ := os.Getwd()
 		detection := detect.Detect(cwd)
 		detection.MergeTarget = worktree.DetectDefaultBranch(cwd)
+
+		templateDB := initTemplateDB
+		if templateDB == "" {
+			templateDB = defaultTemplateDB(project, detection)
+		}
 
 		if len(detection.EnvFiles) > 1 {
 			idx := confirm.Select(
@@ -163,6 +163,16 @@ func splitLines(s string) []string {
 	return strings.Split(s, "\n")
 }
 
+// defaultTemplateDB returns the conventional development database name
+// for the detected framework: {project}_dev for Phoenix, {project}_development
+// for Rails and everything else.
+func defaultTemplateDB(project string, det *detect.Result) string {
+	if det != nil && det.Framework == "phoenix" {
+		return project + "_dev"
+	}
+	return project + "_development"
+}
+
 func openInEditor(path string) {
 	editor := os.Getenv("VISUAL")
 	if editor == "" {
@@ -186,9 +196,8 @@ func runInitForNew(mainRepo string, det *detect.Result) error {
 	}
 
 	project := filepath.Base(mainRepo)
-	templateDB := project + "_development"
-
 	det.MergeTarget = worktree.DetectDefaultBranch(mainRepo)
+	templateDB := defaultTemplateDB(project, det)
 
 	content := templates.ForDetection(project, templateDB, det)
 
