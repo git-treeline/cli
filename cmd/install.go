@@ -27,6 +27,8 @@ func init() {
 var installSelect = confirm.Select
 var installServeRunner = runServeInstall
 var routerHealthChecker = routerInstallIssues
+var routerStaleChecker = staleRouterReason
+var routerRefresher = refreshRouter
 
 var installCmd = &cobra.Command{
 	Use:   "install",
@@ -112,7 +114,16 @@ func maybeOfferServeInstall(uc *config.UserConfig) error {
 				fmt.Fprintln(os.Stderr, style.Warnf("Could not persist router preference: %v", err))
 			}
 		}
-		if mode != config.RouterModeDisabled {
+		if mode == config.RouterModeDisabled {
+			return nil
+		}
+		if reason := routerStaleChecker(); reason != "" {
+			fmt.Println(style.Actionf("HTTPS router is stale (%s), refreshing...", reason))
+			if err := routerRefresher(); err != nil {
+				return fmt.Errorf("refreshing router: %w", err)
+			}
+			fmt.Println(style.Dimf("HTTPS router: refreshed"))
+		} else {
 			fmt.Println(style.Dimf("HTTPS router: already running"))
 		}
 		return nil
@@ -273,4 +284,44 @@ func routerInstallIssuesWith(caInstalled, serviceRunning bool) []string {
 
 func routerIsHealthy() bool {
 	return len(routerHealthChecker()) == 0
+}
+
+// staleRouterReason returns a human-readable reason if the running router
+// service is out of date with the current CLI binary. Returns "" when the
+// router is up to date or its state cannot be determined.
+//
+// Two cases are detected:
+//  1. The plist/unit references a binary path that no longer exists on
+//     disk (typical after `brew upgrade` if the embedded path was a
+//     versioned Cellar path from before StableExecutablePath landed).
+//  2. The router process is running an older version than this CLI —
+//     launchd/systemd does not re-exec on binary upgrade, so the
+//     long-lived process keeps running the previous build.
+func staleRouterReason() string {
+	if binPath := service.InstalledBinaryPath(); binPath != "" {
+		if _, err := os.Stat(binPath); err != nil {
+			return fmt.Sprintf("installed binary %s missing", binPath)
+		}
+	}
+	running := service.RunningRouterVersion()
+	if running != "" && running != Version {
+		return fmt.Sprintf("running %s but CLI is %s", running, Version)
+	}
+	return ""
+}
+
+// refreshRouter rewrites the service definition with the current stable
+// executable path and bounces the service so the new binary is execed.
+// No sudo required — only the launchd plist / systemd unit is touched,
+// not the CA trust or port-forwarding rules.
+func refreshRouter() error {
+	gtlPath, err := service.StableExecutablePath()
+	if err != nil {
+		return fmt.Errorf("could not resolve executable path: %w", err)
+	}
+	uc := config.LoadUserConfig("")
+	if _, err := service.Install(gtlPath, uc.RouterPort()); err != nil {
+		return fmt.Errorf("rewriting router service: %w", err)
+	}
+	return nil
 }

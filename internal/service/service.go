@@ -319,6 +319,9 @@ func installSystemd(gtlPath string, _ int) (string, error) {
 	if err := exec.Command("systemctl", "--user", "enable", "--now", SystemdUnit()).Run(); err != nil {
 		return path, fmt.Errorf("wrote unit but failed to enable: %w", err)
 	}
+	if err := exec.Command("systemctl", "--user", "restart", SystemdUnit()).Run(); err != nil {
+		return path, fmt.Errorf("wrote unit but failed to restart: %w", err)
+	}
 	return path, nil
 }
 

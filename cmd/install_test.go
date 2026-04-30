@@ -294,6 +294,104 @@ func TestMaybeOfferServeInstall_DeclineKeepsPromptMode(t *testing.T) {
 	}
 }
 
+func TestMaybeOfferServeInstall_HealthyAndStaleTriggersRefresh(t *testing.T) {
+	t.Setenv("GTL_HOME", filepath.Join(t.TempDir(), "gtl-home"))
+	t.Setenv("GTL_HEADLESS", "")
+
+	uc := loadTestUserConfig(t)
+	uc.SetRouterMode(config.RouterModeEnabled)
+	if err := uc.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	oldHealth := routerHealthChecker
+	oldStale := routerStaleChecker
+	oldRefresh := routerRefresher
+	routerHealthChecker = func() []string { return nil }
+	routerStaleChecker = func() string { return "running 0.39.0 but CLI is 0.39.1" }
+	refreshed := false
+	routerRefresher = func() error { refreshed = true; return nil }
+	t.Cleanup(func() {
+		routerHealthChecker = oldHealth
+		routerStaleChecker = oldStale
+		routerRefresher = oldRefresh
+	})
+
+	out := captureStdout(t, func() {
+		if err := maybeOfferServeInstall(uc); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !refreshed {
+		t.Fatal("expected router refresh to run, but it did not")
+	}
+	if !strings.Contains(out, "stale") {
+		t.Errorf("expected stale-router message in output, got:\n%s", out)
+	}
+	if strings.Contains(out, "already running") {
+		t.Errorf("did not expect 'already running' when stale, got:\n%s", out)
+	}
+}
+
+func TestMaybeOfferServeInstall_HealthyAndFreshSkipsRefresh(t *testing.T) {
+	t.Setenv("GTL_HOME", filepath.Join(t.TempDir(), "gtl-home"))
+	t.Setenv("GTL_HEADLESS", "")
+
+	uc := loadTestUserConfig(t)
+	uc.SetRouterMode(config.RouterModeEnabled)
+	if err := uc.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	oldHealth := routerHealthChecker
+	oldStale := routerStaleChecker
+	oldRefresh := routerRefresher
+	routerHealthChecker = func() []string { return nil }
+	routerStaleChecker = func() string { return "" }
+	routerRefresher = func() error { t.Fatal("unexpected refresh call"); return nil }
+	t.Cleanup(func() {
+		routerHealthChecker = oldHealth
+		routerStaleChecker = oldStale
+		routerRefresher = oldRefresh
+	})
+
+	out := captureStdout(t, func() {
+		if err := maybeOfferServeInstall(uc); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(out, "already running") {
+		t.Errorf("expected 'already running' message, got:\n%s", out)
+	}
+}
+
+func TestMaybeOfferServeInstall_DisabledSkipsStaleCheck(t *testing.T) {
+	t.Setenv("GTL_HOME", filepath.Join(t.TempDir(), "gtl-home"))
+	t.Setenv("GTL_HEADLESS", "")
+
+	uc := loadTestUserConfig(t)
+	uc.SetRouterMode(config.RouterModeDisabled)
+	if err := uc.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	oldHealth := routerHealthChecker
+	oldStale := routerStaleChecker
+	oldRefresh := routerRefresher
+	routerHealthChecker = func() []string { return nil }
+	routerStaleChecker = func() string { t.Fatal("stale check should be skipped when disabled"); return "" }
+	routerRefresher = func() error { t.Fatal("refresh should not run when disabled"); return nil }
+	t.Cleanup(func() {
+		routerHealthChecker = oldHealth
+		routerStaleChecker = oldStale
+		routerRefresher = oldRefresh
+	})
+
+	if err := maybeOfferServeInstall(uc); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRouterInstallIssuesWith_PortForwardingIsOptional(t *testing.T) {
 	tests := []struct {
 		name           string
