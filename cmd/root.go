@@ -3,7 +3,7 @@ package cmd
 import (
 	"os"
 
-	"github.com/git-treeline/git-treeline/internal/platform"
+	"github.com/git-treeline/cli/internal/platform"
 	"github.com/spf13/cobra"
 )
 

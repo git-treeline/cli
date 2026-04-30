@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/git-treeline/git-treeline/internal/detect"
+	"github.com/git-treeline/cli/internal/detect"
 )
 
 // TunnelHint returns framework-specific guidance for whitelisting a tunnel

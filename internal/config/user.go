@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/git-treeline/git-treeline/internal/platform"
+	"github.com/git-treeline/cli/internal/platform"
 )
 
 var UserDefaults = map[string]any{

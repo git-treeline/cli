@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/git-treeline/git-treeline/internal/config"
-	"github.com/git-treeline/git-treeline/internal/detect"
-	setupPkg "github.com/git-treeline/git-treeline/internal/setup"
+	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/detect"
+	setupPkg "github.com/git-treeline/cli/internal/setup"
 )
 
 func captureStdout(t *testing.T, fn func()) string {

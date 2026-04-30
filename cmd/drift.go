@@ -6,9 +6,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/git-treeline/git-treeline/internal/config"
-	"github.com/git-treeline/git-treeline/internal/registry"
-	"github.com/git-treeline/git-treeline/internal/style"
+	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/registry"
+	"github.com/git-treeline/cli/internal/style"
 )
 
 // detectProjectDrift compares the project name in .treeline.yml against the

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/git-treeline/git-treeline/internal/detect"
+	"github.com/git-treeline/cli/internal/detect"
 )
 
 const agentSectionHeader = "## Git Treeline"

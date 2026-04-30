@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/git-treeline/git-treeline/internal/allocator"
-	"github.com/git-treeline/git-treeline/internal/format"
-	"github.com/git-treeline/git-treeline/internal/registry"
-	"github.com/git-treeline/git-treeline/internal/supervisor"
+	"github.com/git-treeline/cli/internal/allocator"
+	"github.com/git-treeline/cli/internal/format"
+	"github.com/git-treeline/cli/internal/registry"
+	"github.com/git-treeline/cli/internal/supervisor"
 	"github.com/spf13/cobra"
 )
 

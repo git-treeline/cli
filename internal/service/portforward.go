@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/git-treeline/git-treeline/internal/platform"
+	"github.com/git-treeline/cli/internal/platform"
 )
 
 const (

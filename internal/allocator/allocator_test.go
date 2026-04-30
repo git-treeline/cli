@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/git-treeline/git-treeline/internal/config"
-	"github.com/git-treeline/git-treeline/internal/registry"
+	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/registry"
 )
 
 func testAllocator(t *testing.T, portsNeeded int, yamlExtra string) (*Allocator, *registry.Registry) {

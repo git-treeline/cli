@@ -9,12 +9,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/git-treeline/git-treeline/internal/config"
-	"github.com/git-treeline/git-treeline/internal/confirm"
-	"github.com/git-treeline/git-treeline/internal/proxy"
-	"github.com/git-treeline/git-treeline/internal/registry"
-	"github.com/git-treeline/git-treeline/internal/service"
-	"github.com/git-treeline/git-treeline/internal/style"
+	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/confirm"
+	"github.com/git-treeline/cli/internal/proxy"
+	"github.com/git-treeline/cli/internal/registry"
+	"github.com/git-treeline/cli/internal/service"
+	"github.com/git-treeline/cli/internal/style"
 	"github.com/spf13/cobra"
 )
 

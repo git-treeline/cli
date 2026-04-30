@@ -7,7 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/git-treeline/git-treeline/internal/registry"
+	"github.com/git-treeline/cli/internal/registry"
 	"github.com/spf13/cobra"
 )
 

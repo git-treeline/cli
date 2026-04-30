@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/cli/internal/config"
 )
 
 // captureStderr runs fn and returns everything written to os.Stderr.

@@ -10,10 +10,10 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/lipgloss/v2"
-	"github.com/git-treeline/git-treeline/internal/config"
-	"github.com/git-treeline/git-treeline/internal/setup"
-	"github.com/git-treeline/git-treeline/internal/supervisor"
-	"github.com/git-treeline/git-treeline/internal/worktree"
+	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/setup"
+	"github.com/git-treeline/cli/internal/supervisor"
+	"github.com/git-treeline/cli/internal/worktree"
 )
 
 const pollInterval = 2 * time.Second

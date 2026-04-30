@@ -7,11 +7,11 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/git-treeline/git-treeline/internal/config"
-	"github.com/git-treeline/git-treeline/internal/registry"
-	"github.com/git-treeline/git-treeline/internal/setup"
-	"github.com/git-treeline/git-treeline/internal/style"
-	"github.com/git-treeline/git-treeline/internal/supervisor"
+	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/registry"
+	"github.com/git-treeline/cli/internal/setup"
+	"github.com/git-treeline/cli/internal/style"
+	"github.com/git-treeline/cli/internal/supervisor"
 	"github.com/spf13/cobra"
 )
 

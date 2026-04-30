@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/git-treeline/git-treeline/internal/envparse"
+	"github.com/git-treeline/cli/internal/envparse"
 )
 
 func TestStripEnvQuotes(t *testing.T) {

@@ -5,11 +5,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/git-treeline/git-treeline/internal/config"
-	"github.com/git-treeline/git-treeline/internal/confirm"
-	"github.com/git-treeline/git-treeline/internal/format"
-	"github.com/git-treeline/git-treeline/internal/registry"
-	"github.com/git-treeline/git-treeline/internal/worktree"
+	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/confirm"
+	"github.com/git-treeline/cli/internal/format"
+	"github.com/git-treeline/cli/internal/registry"
+	"github.com/git-treeline/cli/internal/worktree"
 	"github.com/spf13/cobra"
 )
 

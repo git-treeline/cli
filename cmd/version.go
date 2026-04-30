@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Set via ldflags at build time: -ldflags "-X github.com/git-treeline/git-treeline/cmd.Version=v0.3.0"
+// Set via ldflags at build time: -ldflags "-X github.com/git-treeline/cli/cmd.Version=v0.3.0"
 var Version = "dev"
 
 func init() {

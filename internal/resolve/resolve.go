@@ -6,8 +6,8 @@ package resolve
 import (
 	"fmt"
 
-	"github.com/git-treeline/git-treeline/internal/format"
-	"github.com/git-treeline/git-treeline/internal/registry"
+	"github.com/git-treeline/cli/internal/format"
+	"github.com/git-treeline/cli/internal/registry"
 )
 
 // Resolver resolves cross-worktree URLs from the registry. It checks link

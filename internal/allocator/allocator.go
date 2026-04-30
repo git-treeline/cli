@@ -10,9 +10,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/git-treeline/git-treeline/internal/config"
-	"github.com/git-treeline/git-treeline/internal/interpolation"
-	"github.com/git-treeline/git-treeline/internal/registry"
+	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/interpolation"
+	"github.com/git-treeline/cli/internal/registry"
 )
 
 const maxRedisDbs = 16

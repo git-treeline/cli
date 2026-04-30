@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/git-treeline/git-treeline/internal/detect"
+	"github.com/git-treeline/cli/internal/detect"
 	"gopkg.in/yaml.v3"
 )
 

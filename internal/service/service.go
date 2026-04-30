@@ -14,7 +14,7 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/git-treeline/git-treeline/internal/platform"
+	"github.com/git-treeline/cli/internal/platform"
 )
 
 // StableExecutablePath returns a path suitable for embedding in a service

@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/git-treeline/git-treeline/internal/registry"
+	"github.com/git-treeline/cli/internal/registry"
 )
 
 func TestRouteKey(t *testing.T) {

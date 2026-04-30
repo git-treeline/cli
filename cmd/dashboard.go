@@ -5,7 +5,7 @@ import (
 	"os"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/git-treeline/git-treeline/internal/tui"
+	"github.com/git-treeline/cli/internal/tui"
 	"github.com/spf13/cobra"
 )
 

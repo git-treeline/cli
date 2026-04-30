@@ -3,7 +3,7 @@ package templates
 import (
 	"testing"
 
-	"github.com/git-treeline/git-treeline/internal/detect"
+	"github.com/git-treeline/cli/internal/detect"
 )
 
 func TestFrameworkName(t *testing.T) {

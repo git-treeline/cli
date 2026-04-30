@@ -23,8 +23,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/git-treeline/git-treeline/internal/tailscale"
-	"github.com/git-treeline/git-treeline/internal/tunnel"
+	"github.com/git-treeline/cli/internal/tailscale"
+	"github.com/git-treeline/cli/internal/tunnel"
 )
 
 const (

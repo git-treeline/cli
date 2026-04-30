@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/git-treeline/git-treeline/internal/style"
+	"github.com/git-treeline/cli/internal/style"
 	"github.com/spf13/cobra"
 )
 

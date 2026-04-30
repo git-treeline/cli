@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/cli/internal/config"
 )
 
 var ansiEscapeRE = regexp.MustCompile(`\x1b\[[0-9;]*m`)

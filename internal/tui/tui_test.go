@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/git-treeline/git-treeline/internal/registry"
+	"github.com/git-treeline/cli/internal/registry"
 )
 
 // --- buildFlatList ---

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/git-treeline/git-treeline/internal/detect"
+	"github.com/git-treeline/cli/internal/detect"
 )
 
 func TestWriteAgentContext_CreatesAgentsMD(t *testing.T) {

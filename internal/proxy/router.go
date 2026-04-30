@@ -22,7 +22,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/git-treeline/git-treeline/internal/registry"
+	"github.com/git-treeline/cli/internal/registry"
 )
 
 // AliasSource returns static alias routes to merge into the route table.

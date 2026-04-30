@@ -7,11 +7,11 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/git-treeline/git-treeline/internal/config"
-	"github.com/git-treeline/git-treeline/internal/format"
-	"github.com/git-treeline/git-treeline/internal/proxy"
-	"github.com/git-treeline/git-treeline/internal/registry"
-	"github.com/git-treeline/git-treeline/internal/service"
+	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/format"
+	"github.com/git-treeline/cli/internal/proxy"
+	"github.com/git-treeline/cli/internal/registry"
+	"github.com/git-treeline/cli/internal/service"
 	"github.com/spf13/cobra"
 )
 

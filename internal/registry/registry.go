@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/git-treeline/git-treeline/internal/platform"
+	"github.com/git-treeline/cli/internal/platform"
 )
 
 func resolvePath(p string) string {

@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/git-treeline/git-treeline/internal/detect"
+	"github.com/git-treeline/cli/internal/detect"
 )
 
 // ForDetection returns a .treeline.yml template based on the detection result.

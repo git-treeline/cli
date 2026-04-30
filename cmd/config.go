@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 
-	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/cli/internal/config"
 	"github.com/spf13/cobra"
 )
 

@@ -1,6 +1,6 @@
 package main
 
-import "github.com/git-treeline/git-treeline/cmd"
+import "github.com/git-treeline/cli/cmd"
 
 func main() {
 	cmd.Execute()

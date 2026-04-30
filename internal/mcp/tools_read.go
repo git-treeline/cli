@@ -7,14 +7,14 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/git-treeline/git-treeline/internal/config"
-	"github.com/git-treeline/git-treeline/internal/envparse"
-	"github.com/git-treeline/git-treeline/internal/format"
-	"github.com/git-treeline/git-treeline/internal/proxy"
-	"github.com/git-treeline/git-treeline/internal/resolve"
-	"github.com/git-treeline/git-treeline/internal/service"
-	"github.com/git-treeline/git-treeline/internal/setup"
-	"github.com/git-treeline/git-treeline/internal/worktree"
+	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/envparse"
+	"github.com/git-treeline/cli/internal/format"
+	"github.com/git-treeline/cli/internal/proxy"
+	"github.com/git-treeline/cli/internal/resolve"
+	"github.com/git-treeline/cli/internal/service"
+	"github.com/git-treeline/cli/internal/setup"
+	"github.com/git-treeline/cli/internal/worktree"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 

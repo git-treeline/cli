@@ -8,14 +8,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/git-treeline/git-treeline/internal/allocator"
-	"github.com/git-treeline/git-treeline/internal/config"
-	"github.com/git-treeline/git-treeline/internal/detect"
-	"github.com/git-treeline/git-treeline/internal/format"
-	"github.com/git-treeline/git-treeline/internal/registry"
-	"github.com/git-treeline/git-treeline/internal/supervisor"
-	"github.com/git-treeline/git-treeline/internal/templates"
-	"github.com/git-treeline/git-treeline/internal/worktree"
+	"github.com/git-treeline/cli/internal/allocator"
+	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/detect"
+	"github.com/git-treeline/cli/internal/format"
+	"github.com/git-treeline/cli/internal/registry"
+	"github.com/git-treeline/cli/internal/supervisor"
+	"github.com/git-treeline/cli/internal/templates"
+	"github.com/git-treeline/cli/internal/worktree"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 

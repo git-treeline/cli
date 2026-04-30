@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/cli/internal/config"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )

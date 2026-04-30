@@ -5,11 +5,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/git-treeline/git-treeline/internal/config"
-	"github.com/git-treeline/git-treeline/internal/proxy"
-	"github.com/git-treeline/git-treeline/internal/service"
-	"github.com/git-treeline/git-treeline/internal/style"
-	"github.com/git-treeline/git-treeline/internal/worktree"
+	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/proxy"
+	"github.com/git-treeline/cli/internal/service"
+	"github.com/git-treeline/cli/internal/style"
+	"github.com/git-treeline/cli/internal/worktree"
 )
 
 // warnServeNotInstalled prints a non-blocking warning when the HTTPS router

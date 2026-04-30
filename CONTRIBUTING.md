@@ -5,8 +5,8 @@ Thanks for considering a contribution. Here's what you need to know.
 ## Setup
 
 ```bash
-git clone https://github.com/git-treeline/git-treeline.git
-cd git-treeline
+git clone https://github.com/git-treeline/cli.git
+cd cli
 make ci
 ```
 

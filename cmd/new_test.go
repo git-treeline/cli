@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/cli/internal/config"
 )
 
 func TestResolveNewWorktreePath_FlagOverride(t *testing.T) {

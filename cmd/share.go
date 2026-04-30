@@ -1,8 +1,8 @@
 package cmd
 
 import (
-	"github.com/git-treeline/git-treeline/internal/config"
-	"github.com/git-treeline/git-treeline/internal/share"
+	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/share"
 	"github.com/spf13/cobra"
 )
 

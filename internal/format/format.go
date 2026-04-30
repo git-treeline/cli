@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/git-treeline/git-treeline/internal/database"
+	"github.com/git-treeline/cli/internal/database"
 )
 
 // JoinInts formats a slice of integers as a string with the given separator.

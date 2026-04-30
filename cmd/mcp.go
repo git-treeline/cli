@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	gtlmcp "github.com/git-treeline/git-treeline/internal/mcp"
+	gtlmcp "github.com/git-treeline/cli/internal/mcp"
 	"github.com/spf13/cobra"
 )
 

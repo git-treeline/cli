@@ -1,4 +1,4 @@
-module github.com/git-treeline/git-treeline
+module github.com/git-treeline/cli
 
 go 1.26.2
 

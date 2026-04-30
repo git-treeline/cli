@@ -3,7 +3,7 @@ package templates
 import (
 	"fmt"
 
-	"github.com/git-treeline/git-treeline/internal/detect"
+	"github.com/git-treeline/cli/internal/detect"
 )
 
 // Diagnostic represents an advisory message from post-init analysis.
@@ -31,7 +31,7 @@ func diagnoseUmbrella(det *detect.Result) []Diagnostic {
 		Level: "warn",
 		Message: "Phoenix umbrella project detected.\n" +
 			"  gtl treats the umbrella as a single app — per-app port/db isolation isn't supported yet.\n" +
-			"  File an issue at https://github.com/git-treeline/git-treeline if you need it.",
+			"  File an issue at https://github.com/git-treeline/cli if you need it.",
 	}}
 }
 

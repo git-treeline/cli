@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/git-treeline/git-treeline/internal/registry"
+	"github.com/git-treeline/cli/internal/registry"
 )
 
 func newTestRegistry(t *testing.T) *registry.Registry {

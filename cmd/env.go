@@ -9,9 +9,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/git-treeline/git-treeline/internal/config"
-	"github.com/git-treeline/git-treeline/internal/envparse"
-	"github.com/git-treeline/git-treeline/internal/registry"
+	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/envparse"
+	"github.com/git-treeline/cli/internal/registry"
 	"github.com/spf13/cobra"
 )
 

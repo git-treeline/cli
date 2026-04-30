@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/git-treeline/git-treeline/internal/format"
-	"github.com/git-treeline/git-treeline/internal/proxy"
-	"github.com/git-treeline/git-treeline/internal/registry"
+	"github.com/git-treeline/cli/internal/format"
+	"github.com/git-treeline/cli/internal/proxy"
+	"github.com/git-treeline/cli/internal/registry"
 	"github.com/spf13/cobra"
 )
 

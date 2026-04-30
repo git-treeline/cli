@@ -35,12 +35,12 @@ This installs both `git-treeline` and the `gtl` shorthand alias.
 ### From source (requires Go 1.26+)
 
 ```bash
-go install github.com/git-treeline/git-treeline@latest
+go install github.com/git-treeline/cli@latest
 ```
 
 ### From release binary
 
-Download the latest binary from [GitHub Releases](https://github.com/git-treeline/git-treeline/releases), extract, and place on your `PATH`.
+Download the latest binary from [GitHub Releases](https://github.com/git-treeline/cli/releases), extract, and place on your `PATH`.
 
 > **Naming:** The binary is `git-treeline`, which also works as `git treeline` (git subcommand convention). Homebrew additionally installs `gtl` as a short alias. All three invocations are equivalent.
 

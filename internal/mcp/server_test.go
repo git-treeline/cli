@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/git-treeline/git-treeline/internal/registry"
-	"github.com/git-treeline/git-treeline/internal/setup"
+	"github.com/git-treeline/cli/internal/registry"
+	"github.com/git-treeline/cli/internal/setup"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 
