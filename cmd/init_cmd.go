@@ -50,15 +50,13 @@ var initCmd = &cobra.Command{
 			fmt.Println(style.Actionf("Created user config at %s", platform.ConfigFile()))
 		}
 
-		project := initProject
-		if project == "" {
-			cwd, _ := os.Getwd()
-			project = filepath.Base(cwd)
-		}
-
 		cwd, _ := os.Getwd()
 		detection := detect.Detect(cwd)
 		detection.MergeTarget = worktree.DetectDefaultBranch(cwd)
+		project := initProject
+		if project == "" {
+			project = defaultProjectName(cwd, detection)
+		}
 
 		templateDB := initTemplateDB
 		if templateDB == "" {
@@ -167,10 +165,40 @@ func splitLines(s string) []string {
 // for the detected framework: {project}_dev for Phoenix, {project}_development
 // for Rails and everything else.
 func defaultTemplateDB(project string, det *detect.Result) string {
-	if det != nil && det.Framework == "phoenix" {
-		return project + "_dev"
+	if det != nil && det.DBTemplate != "" {
+		return det.DBTemplate
 	}
-	return project + "_development"
+	dbProject := databaseIdentifierName(project)
+	if det != nil && det.Framework == "phoenix" {
+		return dbProject + "_dev"
+	}
+	return dbProject + "_development"
+}
+
+func databaseIdentifierName(name string) string {
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range name {
+		valid := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'
+		if valid {
+			b.WriteRune(r)
+			lastUnderscore = r == '_'
+			continue
+		}
+		if !lastUnderscore {
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	result := strings.Trim(b.String(), "_")
+	if result == "" {
+		return "app"
+	}
+	first := result[0]
+	if (first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_' {
+		return result
+	}
+	return "db_" + result
 }
 
 func openInEditor(path string) {
@@ -195,7 +223,7 @@ func runInitForNew(mainRepo string, det *detect.Result) error {
 		return nil
 	}
 
-	project := filepath.Base(mainRepo)
+	project := defaultProjectName(mainRepo, det)
 	det.MergeTarget = worktree.DetectDefaultBranch(mainRepo)
 	templateDB := defaultTemplateDB(project, det)
 
@@ -211,4 +239,11 @@ func runInitForNew(mainRepo string, det *detect.Result) error {
 	}
 	fmt.Println(style.Actionf("%s", msg))
 	return nil
+}
+
+func defaultProjectName(root string, det *detect.Result) string {
+	if det != nil && det.ProjectName != "" {
+		return det.ProjectName
+	}
+	return filepath.Base(root)
 }

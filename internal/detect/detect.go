@@ -14,11 +14,13 @@ import (
 // Result contains the detection findings for a project directory.
 // All fields are populated by Detect() based on filesystem analysis.
 type Result struct {
-	Framework      string   // "nextjs", "vite", "rails", "phoenix", "node", "django", "python", "rust", "go", "unknown"
+	Framework      string // "nextjs", "vite", "rails", "phoenix", "node", "django", "python", "rust", "go", "unknown"
+	ProjectName    string // framework-specific project/app name, when detected
 	HasPrisma      bool
-	HasJSBundler   bool     // jsbundling-rails/cssbundling-rails or multi-process Procfile.dev
-	HasDotenv      bool     // project has dotenv or equivalent wired up
-	DBAdapter      string   // "postgresql", "sqlite", ""
+	HasJSBundler   bool   // jsbundling-rails/cssbundling-rails or multi-process Procfile.dev
+	HasDotenv      bool   // project has dotenv or equivalent wired up
+	DBAdapter      string // "postgresql", "sqlite", ""
+	DBTemplate     string // static development database name, when detected
 	HasRedis       bool
 	HasEnvFile     bool     // true if any env file exists on disk
 	EnvFile        string   // best candidate: ".env.local", ".env.development", ".env", etc.
@@ -32,6 +34,7 @@ func Detect(root string) *Result {
 	r := &Result{Framework: "unknown"}
 
 	r.detectFramework(root)
+	r.detectProjectName(root)
 	r.detectPrisma(root)
 	r.detectJSBundler(root)
 	r.detectDotenv(root)
@@ -91,26 +94,96 @@ func (r *Result) detectFramework(root string) {
 	}
 }
 
+func (r *Result) detectProjectName(root string) {
+	if r.Framework != "rails" {
+		return
+	}
+	appRB := filepath.Join(root, "config", "application.rb")
+	if f, err := os.Open(appRB); err == nil {
+		defer func() { _ = f.Close() }()
+		r.ProjectName = parseRailsApplicationModule(f)
+	}
+}
+
+func parseRailsApplicationModule(f *os.File) string {
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if beforeComment, _, ok := strings.Cut(line, "#"); ok {
+			line = beforeComment
+		}
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 || fields[0] != "module" {
+			continue
+		}
+		name := strings.Trim(fields[1], `"'`)
+		if name == "" {
+			continue
+		}
+		if project := rubyModuleToProjectName(name); project != "" {
+			return project
+		}
+	}
+	return ""
+}
+
+func rubyModuleToProjectName(name string) string {
+	name = strings.ReplaceAll(name, "::", "_")
+	var b strings.Builder
+	var prev rune
+	for i, r := range name {
+		if !isASCIIAlphaNum(r) {
+			if b.Len() > 0 && prev != '_' {
+				b.WriteByte('_')
+				prev = '_'
+			}
+			continue
+		}
+		if isUpper(r) {
+			if i > 0 && prev != '_' && (isLower(prev) || isDigit(prev)) {
+				b.WriteByte('_')
+			}
+			r += 'a' - 'A'
+		}
+		b.WriteRune(r)
+		prev = r
+	}
+	return strings.Trim(b.String(), "_")
+}
+
+func isASCIIAlphaNum(r rune) bool {
+	return isLower(r) || isUpper(r) || isDigit(r)
+}
+
+func isLower(r rune) bool {
+	return r >= 'a' && r <= 'z'
+}
+
+func isUpper(r rune) bool {
+	return r >= 'A' && r <= 'Z'
+}
+
+func isDigit(r rune) bool {
+	return r >= '0' && r <= '9'
+}
+
 func (r *Result) detectDatabase(root string) {
 	dbYml := filepath.Join(root, "config", "database.yml")
 	if f, err := os.Open(dbYml); err == nil {
 		defer func() { _ = f.Close() }()
-		scanner := bufio.NewScanner(f)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if strings.HasPrefix(line, "adapter:") {
-				val := strings.TrimSpace(strings.TrimPrefix(line, "adapter:"))
-				switch {
-				case strings.Contains(val, "sqlite"):
-					r.DBAdapter = "sqlite"
-				case strings.Contains(val, "postgresql"), strings.Contains(val, "postgis"):
-					r.DBAdapter = "postgresql"
-				case strings.Contains(val, "mysql"):
-					r.DBAdapter = "mysql"
-				}
-				return
-			}
+		adapter, database := parseRailsDatabaseConfig(f)
+		switch {
+		case strings.Contains(adapter, "sqlite"):
+			r.DBAdapter = "sqlite"
+		case strings.Contains(adapter, "postgresql"), strings.Contains(adapter, "postgis"):
+			r.DBAdapter = "postgresql"
+		case strings.Contains(adapter, "mysql"):
+			r.DBAdapter = "mysql"
 		}
+		if r.DBAdapter == "postgresql" && isDatabaseIdentifier(database) {
+			r.DBTemplate = database
+		}
+		return
 	}
 
 	if r.Framework == "phoenix" {
@@ -131,6 +204,93 @@ func (r *Result) detectDatabase(root string) {
 	if r.HasPrisma {
 		r.DBAdapter = "postgresql"
 	}
+}
+
+func parseRailsDatabaseConfig(f *os.File) (adapter, database string) {
+	scanner := bufio.NewScanner(f)
+	inDevelopment := false
+	devIndent := -1
+	for scanner.Scan() {
+		raw := scanner.Text()
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+
+		indent := leadingSpaces(raw)
+		if indent == 0 && strings.HasSuffix(trimmed, ":") {
+			key := strings.TrimSpace(strings.TrimSuffix(trimmed, ":"))
+			inDevelopment = key == "development"
+			if inDevelopment {
+				devIndent = indent
+			}
+			continue
+		}
+		if inDevelopment && indent <= devIndent {
+			inDevelopment = false
+		}
+
+		key, value, ok := parseYAMLScalar(trimmed)
+		if !ok {
+			continue
+		}
+		if key == "adapter" && adapter == "" {
+			adapter = value
+		}
+		if inDevelopment {
+			switch key {
+			case "adapter":
+				adapter = value
+			case "database":
+				database = value
+			}
+		}
+	}
+	return adapter, database
+}
+
+func leadingSpaces(s string) int {
+	n := 0
+	for _, r := range s {
+		if r != ' ' {
+			break
+		}
+		n++
+	}
+	return n
+}
+
+func parseYAMLScalar(line string) (string, string, bool) {
+	idx := strings.Index(line, ":")
+	if idx < 0 {
+		return "", "", false
+	}
+	key := strings.TrimSpace(line[:idx])
+	value := strings.TrimSpace(line[idx+1:])
+	value = strings.Trim(value, `"'`)
+	if key == "" || value == "" || strings.Contains(value, "<%") {
+		return "", "", false
+	}
+	return key, value, true
+}
+
+func isDatabaseIdentifier(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if i == 0 {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' {
+				continue
+			}
+			return false
+		}
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (r *Result) detectRedis(root string) {

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/git-treeline/git-treeline/internal/config"
+	"github.com/git-treeline/git-treeline/internal/detect"
 	setupPkg "github.com/git-treeline/git-treeline/internal/setup"
 )
 
@@ -81,6 +82,56 @@ func TestInstallCmd_MissingProjectConfigFromSubdirInitializesRepoRoot(t *testing
 	}
 	if _, err := os.Stat(filepath.Join(subdir, ".treeline.yml")); !os.IsNotExist(err) {
 		t.Fatalf("expected no nested .treeline.yml in subdir, got err=%v", err)
+	}
+}
+
+func TestRunInitForNew_RailsUsesDetectedTemplateDatabase(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "honolulu-v1")
+	if err := os.MkdirAll(filepath.Join(dir, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Gemfile"), []byte("gem 'rails'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config", "application.rb"), []byte("module HonoluluV1\nend\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config", "database.yml"), []byte(`default: &default
+  adapter: postgresql
+
+development:
+  <<: *default
+  database: honolulu_v1_development
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runInitForNew(dir, detect.Detect(dir)); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".treeline.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "project: honolulu_v1") {
+		t.Errorf("expected project from Rails app name, got:\n%s", content)
+	}
+	if !strings.Contains(content, "template: honolulu_v1_development") {
+		t.Errorf("expected Rails template DB from database.yml, got:\n%s", content)
+	}
+	if strings.Contains(content, "template: honolulu-v1_development") {
+		t.Errorf("expected no hyphenated PostgreSQL template DB, got:\n%s", content)
+	}
+}
+
+func TestDefaultTemplateDB_SanitizesProjectForPostgreSQL(t *testing.T) {
+	if got := defaultTemplateDB("honolulu-v1", &detect.Result{Framework: "rails"}); got != "honolulu_v1_development" {
+		t.Errorf("expected sanitized Rails template DB, got %q", got)
+	}
+	if got := defaultTemplateDB("123-api", &detect.Result{Framework: "phoenix"}); got != "db_123_api_dev" {
+		t.Errorf("expected sanitized Phoenix template DB, got %q", got)
 	}
 }
 

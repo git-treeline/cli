@@ -79,6 +79,45 @@ func TestDetect_Rails_PostgreSQL(t *testing.T) {
 	}
 }
 
+func TestDetect_Rails_PostgreSQLTemplateDatabase(t *testing.T) {
+	dir := setup(t, "Gemfile", "config/application.rb", "config/database.yml")
+	_ = os.WriteFile(filepath.Join(dir, "config/database.yml"), []byte(`default: &default
+  adapter: postgresql
+
+development:
+  <<: *default
+  database: honolulu_v1_development
+
+test:
+  <<: *default
+  database: honolulu_v1_test
+`), 0o644)
+
+	r := Detect(dir)
+	if r.DBAdapter != "postgresql" {
+		t.Errorf("expected postgresql, got %s", r.DBAdapter)
+	}
+	if r.DBTemplate != "honolulu_v1_development" {
+		t.Errorf("expected DBTemplate honolulu_v1_development, got %q", r.DBTemplate)
+	}
+}
+
+func TestDetect_RailsProjectNameFromApplicationModule(t *testing.T) {
+	dir := setup(t, "Gemfile", "config/application.rb")
+	_ = os.WriteFile(filepath.Join(dir, "config/application.rb"), []byte(`require_relative "boot"
+
+module HonoluluV1
+  class Application < Rails::Application
+  end
+end
+`), 0o644)
+
+	r := Detect(dir)
+	if r.ProjectName != "honolulu_v1" {
+		t.Errorf("expected ProjectName honolulu_v1, got %q", r.ProjectName)
+	}
+}
+
 func TestDetect_Rails_SQLite(t *testing.T) {
 	dir := setup(t, "Gemfile", "config/application.rb", "config/database.yml")
 	_ = os.WriteFile(filepath.Join(dir, "config/database.yml"), []byte("development:\n  adapter: sqlite3\n"), 0o644)
