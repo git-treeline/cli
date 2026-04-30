@@ -1,3 +1,7 @@
+## [0.39.3]
+
+- **Module path renamed** to `github.com/git-treeline/cli` (was `github.com/git-treeline/git-treeline`). The GitHub repo was renamed to `cli` to reflect that this is the CLI for the broader git-treeline project. End users see no change — `git-treeline` and `gtl` binaries, the Homebrew formula name, and all behavior are unchanged. `go install` users should switch to the new path; GitHub redirects handle the old path for now.
+
 ## [0.39.2]
 
 - **`gtl install` auto-refreshes a stale router service** — after `brew upgrade`, launchd and systemd keep the long-lived router process running the previous binary, so `gtl install` would print "HTTPS router: already running" while the running process was actually the old version (or, worse, mapped to a deleted Cellar path). `gtl install` now detects this — when the plist/unit's binary path is missing on disk, or when the running router's recorded version differs from the CLI — and bounces the service in place. No sudo required, since only the launchd plist / systemd unit is rewritten. The Linux install path also now restarts the unit after `enable --now` so binary upgrades actually take effect.
