@@ -1,3 +1,7 @@
+## [0.39.4]
+
+- **`review.skip_switch_confirm` user config** — when `gtl review <PR>` is invoked from inside another worktree it prompts to confirm switching the current worktree to the PR branch. Setting `review.skip_switch_confirm: true` (e.g. `gtl config set review.skip_switch_confirm true`) bypasses the prompt for users who always want to switch. Default remains `false`, so the existing interactive flow is unchanged.
+
 ## [0.39.3]
 
 - **Module path renamed** to `github.com/git-treeline/cli` (was `github.com/git-treeline/git-treeline`). The GitHub repo was renamed to `cli` to reflect that this is the CLI for the broader git-treeline project. End users see no change — `git-treeline` and `gtl` binaries, the Homebrew formula name, and all behavior are unchanged. `go install` users should switch to the new path; GitHub redirects handle the old path for now.
