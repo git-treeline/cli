@@ -219,6 +219,8 @@ Fetches the PR branch via `gh`, creates a worktree, allocates resources, runs se
 
 When run from inside a worktree, `review` prompts to switch the current worktree to the PR branch (same as `gtl switch`). `new` warns that the worktree will be created elsewhere and asks for confirmation; pass `--force` / `-f` to skip the prompt. From the main repo, both commands behave as before.
 
+To bypass the switch confirmation in `review` permanently, set `review.skip_switch_confirm: true` in user config (`gtl config set review.skip_switch_confirm true`).
+
 ### 8. Open a worktree in the browser
 
 ```bash
