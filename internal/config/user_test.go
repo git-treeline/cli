@@ -658,6 +658,23 @@ func TestUserConfig_RouterWarningsEnabled_Disabled(t *testing.T) {
 	}
 }
 
+func TestUserConfig_ReviewSkipSwitchConfirm_Default(t *testing.T) {
+	uc := LoadUserConfig(filepath.Join(t.TempDir(), "config.json"))
+	if uc.ReviewSkipSwitchConfirm() {
+		t.Error("expected default false (prompt shown)")
+	}
+}
+
+func TestUserConfig_ReviewSkipSwitchConfirm_Enabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(path, []byte(`{"review":{"skip_switch_confirm":true}}`), 0o644)
+	uc := LoadUserConfig(path)
+	if !uc.ReviewSkipSwitchConfirm() {
+		t.Error("expected true when review.skip_switch_confirm is set")
+	}
+}
+
 func TestUserConfig_WorktreePathTemplate_Default(t *testing.T) {
 	uc := LoadUserConfig("/nonexistent/config.json")
 	if uc.WorktreePathTemplate() != "" {

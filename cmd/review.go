@@ -64,6 +64,9 @@ resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 		mainRepo := worktree.DetectMainRepo(absPath)
 
 		if isInWorktree(absPath, mainRepo) {
+			pc := config.LoadProjectConfig(absPath)
+			uc := config.LoadUserConfig("")
+
 			currentBranch := worktree.CurrentBranch(absPath)
 			branchLabel := currentBranch
 			if branchLabel == "" {
@@ -71,7 +74,7 @@ resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 			}
 			fmt.Println()
 			fmt.Printf("You're in worktree '%s' (branch: %s).\n", filepath.Base(absPath), branchLabel)
-			if !confirm.Prompt(fmt.Sprintf("Switch to PR #%d (branch: %s)?", prNumber, branch), false, nil) {
+			if !confirm.Prompt(fmt.Sprintf("Switch to PR #%d (branch: %s)?", prNumber, branch), uc.ReviewSkipSwitchConfirm(), nil) {
 				return nil
 			}
 			fmt.Println()
@@ -79,8 +82,6 @@ resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 				return cliErr(cmd, err)
 			}
 
-			pc := config.LoadProjectConfig(absPath)
-			uc := config.LoadUserConfig("")
 			projectName := pc.Project()
 			reg := registry.New("")
 			alloc := reg.Find(absPath)

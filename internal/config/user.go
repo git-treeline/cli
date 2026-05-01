@@ -186,6 +186,16 @@ func (uc *UserConfig) RouterWarningsEnabled() bool {
 	return true
 }
 
+// ReviewSkipSwitchConfirm returns whether `gtl review` should bypass the
+// "Switch to PR #N (branch: ...)?" prompt when invoked from inside another
+// worktree. Default: false. Set review.skip_switch_confirm: true to bypass.
+func (uc *UserConfig) ReviewSkipSwitchConfirm() bool {
+	if v, ok := Dig(uc.Data, "review", "skip_switch_confirm").(bool); ok {
+		return v
+	}
+	return false
+}
+
 // RouterAliases returns static alias routes from the user config (e.g.
 // {"grafana": 3100}). These are per-machine routes for personal services.
 func (uc *UserConfig) RouterAliases() map[string]int {
@@ -407,7 +417,7 @@ func (uc *UserConfig) Init() error {
 
 var userKnownKeys = map[string]bool{
 	"port": true, "redis": true, "router": true, "tunnel": true,
-	"worktree": true, "editor": true, "warnings": true,
+	"worktree": true, "editor": true, "warnings": true, "review": true,
 }
 
 func (uc *UserConfig) load() map[string]any {
