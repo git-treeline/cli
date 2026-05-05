@@ -102,19 +102,19 @@ test:
 	}
 }
 
-func TestDetect_RailsProjectNameFromApplicationModule(t *testing.T) {
-	dir := setup(t, "Gemfile", "config/application.rb")
-	_ = os.WriteFile(filepath.Join(dir, "config/application.rb"), []byte(`require_relative "boot"
-
-module HonoluluV1
-  class Application < Rails::Application
-  end
-end
+func TestDetect_Rails_PostgreSQLInvalidTemplate(t *testing.T) {
+	dir := setup(t, "Gemfile", "config/application.rb", "config/database.yml")
+	_ = os.WriteFile(filepath.Join(dir, "config/database.yml"), []byte(`development:
+  adapter: postgresql
+  database: my-app_development
 `), 0o644)
 
 	r := Detect(dir)
-	if r.ProjectName != "honolulu_v1" {
-		t.Errorf("expected ProjectName honolulu_v1, got %q", r.ProjectName)
+	if r.DBTemplate != "" {
+		t.Errorf("expected DBTemplate empty for invalid identifier, got %q", r.DBTemplate)
+	}
+	if r.DBTemplateInvalid != "my-app_development" {
+		t.Errorf("expected DBTemplateInvalid=my-app_development, got %q", r.DBTemplateInvalid)
 	}
 }
 

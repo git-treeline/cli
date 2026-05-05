@@ -113,6 +113,24 @@ func TestDiagnose_WithEnvFile(t *testing.T) {
 	}
 }
 
+func TestDiagnose_InvalidDBTemplate(t *testing.T) {
+	det := &detect.Result{
+		Framework:         "rails",
+		DBAdapter:         "postgresql",
+		DBTemplateInvalid: "my-app_development",
+	}
+	diags := Diagnose(det)
+	found := false
+	for _, d := range diags {
+		if d.Level == "warn" && contains(d.Message, "my-app_development") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected warn diagnostic mentioning invalid template, got %#v", diags)
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && searchString(s, substr)
 }

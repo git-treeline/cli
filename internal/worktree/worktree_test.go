@@ -705,3 +705,47 @@ func TestFetch_NonexistentBranch(t *testing.T) {
 		t.Error("expected error for non-existent branch")
 	}
 }
+
+func TestParseRepoNameFromURL(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"git@github.com:acme/fitter.git", "fitter"},
+		{"git@github.com:acme/fitter", "fitter"},
+		{"https://github.com/acme/fitter.git", "fitter"},
+		{"https://github.com/acme/fitter", "fitter"},
+		{"ssh://git@github.com/acme/fitter.git", "fitter"},
+		{"https://gitlab.com/group/sub/fitter.git", "fitter"},
+		{"https://gitlab.com/group/sub/fitter/", "fitter"},
+		{"file:///srv/git/fitter.git", "fitter"},
+		{"/srv/git/fitter.git", "fitter"},
+		{"fitter", "fitter"},
+		{"", ""},
+		{"   ", ""},
+	}
+	for _, c := range cases {
+		got := parseRepoNameFromURL(c.in)
+		if got != c.want {
+			t.Errorf("parseRepoNameFromURL(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestRepoNameFromRemote(t *testing.T) {
+	skipIfNoGit(t)
+	repo := initTestRepo(t)
+	run(t, repo, "git", "remote", "add", "origin", "git@github.com:acme/fitter-app.git")
+
+	got := RepoNameFromRemote(repo)
+	if got != "fitter-app" {
+		t.Errorf("RepoNameFromRemote = %q, want %q", got, "fitter-app")
+	}
+}
+
+func TestRepoNameFromRemote_NoOrigin(t *testing.T) {
+	skipIfNoGit(t)
+	repo := initTestRepo(t)
+	if got := RepoNameFromRemote(repo); got != "" {
+		t.Errorf("RepoNameFromRemote without origin = %q, want empty", got)
+	}
+}

@@ -14,13 +14,14 @@ import (
 // Result contains the detection findings for a project directory.
 // All fields are populated by Detect() based on filesystem analysis.
 type Result struct {
-	Framework      string // "nextjs", "vite", "rails", "phoenix", "node", "django", "python", "rust", "go", "unknown"
-	ProjectName    string // framework-specific project/app name, when detected
-	HasPrisma      bool
-	HasJSBundler   bool   // jsbundling-rails/cssbundling-rails or multi-process Procfile.dev
-	HasDotenv      bool   // project has dotenv or equivalent wired up
-	DBAdapter      string // "postgresql", "sqlite", ""
-	DBTemplate     string // static development database name, when detected
+	Framework         string // "nextjs", "vite", "rails", "phoenix", "node", "django", "python", "rust", "go", "unknown"
+	HasPrisma         bool
+	HasJSBundler      bool   // jsbundling-rails/cssbundling-rails or multi-process Procfile.dev
+	HasDotenv         bool   // project has dotenv or equivalent wired up
+	DBAdapter         string // "postgresql", "sqlite", ""
+	DBTemplate        string // static development database name, when detected
+	DBTemplateInvalid string // raw value from database.yml that was rejected as a non-identifier
+
 	HasRedis       bool
 	HasEnvFile     bool     // true if any env file exists on disk
 	EnvFile        string   // best candidate: ".env.local", ".env.development", ".env", etc.
@@ -34,7 +35,6 @@ func Detect(root string) *Result {
 	r := &Result{Framework: "unknown"}
 
 	r.detectFramework(root)
-	r.detectProjectName(root)
 	r.detectPrisma(root)
 	r.detectJSBundler(root)
 	r.detectDotenv(root)
@@ -94,79 +94,6 @@ func (r *Result) detectFramework(root string) {
 	}
 }
 
-func (r *Result) detectProjectName(root string) {
-	if r.Framework != "rails" {
-		return
-	}
-	appRB := filepath.Join(root, "config", "application.rb")
-	if f, err := os.Open(appRB); err == nil {
-		defer func() { _ = f.Close() }()
-		r.ProjectName = parseRailsApplicationModule(f)
-	}
-}
-
-func parseRailsApplicationModule(f *os.File) string {
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if beforeComment, _, ok := strings.Cut(line, "#"); ok {
-			line = beforeComment
-		}
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) < 2 || fields[0] != "module" {
-			continue
-		}
-		name := strings.Trim(fields[1], `"'`)
-		if name == "" {
-			continue
-		}
-		if project := rubyModuleToProjectName(name); project != "" {
-			return project
-		}
-	}
-	return ""
-}
-
-func rubyModuleToProjectName(name string) string {
-	name = strings.ReplaceAll(name, "::", "_")
-	var b strings.Builder
-	var prev rune
-	for i, r := range name {
-		if !isASCIIAlphaNum(r) {
-			if b.Len() > 0 && prev != '_' {
-				b.WriteByte('_')
-				prev = '_'
-			}
-			continue
-		}
-		if isUpper(r) {
-			if i > 0 && prev != '_' && (isLower(prev) || isDigit(prev)) {
-				b.WriteByte('_')
-			}
-			r += 'a' - 'A'
-		}
-		b.WriteRune(r)
-		prev = r
-	}
-	return strings.Trim(b.String(), "_")
-}
-
-func isASCIIAlphaNum(r rune) bool {
-	return isLower(r) || isUpper(r) || isDigit(r)
-}
-
-func isLower(r rune) bool {
-	return r >= 'a' && r <= 'z'
-}
-
-func isUpper(r rune) bool {
-	return r >= 'A' && r <= 'Z'
-}
-
-func isDigit(r rune) bool {
-	return r >= '0' && r <= '9'
-}
-
 func (r *Result) detectDatabase(root string) {
 	dbYml := filepath.Join(root, "config", "database.yml")
 	if f, err := os.Open(dbYml); err == nil {
@@ -180,8 +107,12 @@ func (r *Result) detectDatabase(root string) {
 		case strings.Contains(adapter, "mysql"):
 			r.DBAdapter = "mysql"
 		}
-		if r.DBAdapter == "postgresql" && isDatabaseIdentifier(database) {
-			r.DBTemplate = database
+		if r.DBAdapter == "postgresql" && database != "" {
+			if isDatabaseIdentifier(database) {
+				r.DBTemplate = database
+			} else {
+				r.DBTemplateInvalid = database
+			}
 		}
 		return
 	}

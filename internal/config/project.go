@@ -4,12 +4,53 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 const ProjectConfigFile = ".treeline.yml"
+
+// identifierRe matches a valid SQL/redis-safe identifier: letter or underscore
+// to start, then alphanumerics and underscores. The same rule applies to
+// project names and database template names because they propagate into both.
+var identifierRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+// IsValidIdentifier reports whether s is a safe project / database identifier.
+func IsValidIdentifier(s string) bool {
+	return identifierRe.MatchString(s)
+}
+
+// SanitizeIdentifier converts an arbitrary string into a valid identifier by
+// replacing runs of non-identifier characters with `_`, trimming leading and
+// trailing underscores, and prefixing with `db_` when the result would start
+// with a digit. Returns "app" for inputs that contain no usable characters.
+func SanitizeIdentifier(s string) string {
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range s {
+		valid := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'
+		if valid {
+			b.WriteRune(r)
+			lastUnderscore = r == '_'
+			continue
+		}
+		if !lastUnderscore && b.Len() > 0 {
+			b.WriteByte('_')
+			lastUnderscore = true
+		}
+	}
+	result := strings.Trim(b.String(), "_")
+	if result == "" {
+		return "app"
+	}
+	first := result[0]
+	if (first >= '0' && first <= '9') {
+		return "db_" + result
+	}
+	return result
+}
 
 var ProjectDefaults = map[string]any{
 	"port_count": 1,
@@ -47,7 +88,28 @@ func (pc *ProjectConfig) Project() string {
 	if v, ok := pc.Data["project"].(string); ok && v != "" {
 		return v
 	}
-	return filepath.Base(pc.ProjectRoot)
+	return SanitizeIdentifier(filepath.Base(pc.ProjectRoot))
+}
+
+// Validate checks that the loaded config has identifier-safe values for fields
+// that propagate into databases, redis prefixes, and router keys. Returns nil
+// when the config is safe to use, otherwise an error naming the offending
+// field with a suggested replacement.
+func (pc *ProjectConfig) Validate() error {
+	if v, ok := pc.Data["project"].(string); ok && v != "" {
+		if !IsValidIdentifier(v) {
+			return fmt.Errorf("project name %q in %s contains invalid characters; must match [a-zA-Z_][a-zA-Z0-9_]* (run `gtl rename %s` to fix)",
+				v, ProjectConfigFile, SanitizeIdentifier(v))
+		}
+	}
+	if t := pc.DatabaseTemplate(); t != "" {
+		adapter := pc.DatabaseAdapter()
+		if (adapter == "postgresql" || adapter == "mysql") && !IsValidIdentifier(t) {
+			return fmt.Errorf("database.template %q in %s is not a valid %s identifier; must match [a-zA-Z_][a-zA-Z0-9_]* (suggested: %s)",
+				t, ProjectConfigFile, adapter, SanitizeIdentifier(t))
+		}
+	}
+	return nil
 }
 
 func (pc *ProjectConfig) PortsNeeded() int {

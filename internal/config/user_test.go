@@ -789,6 +789,76 @@ func TestUserConfig_SaveFilePermissions(t *testing.T) {
 	}
 }
 
+func TestMigrateProjectKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	uc := &UserConfig{
+		Path: path,
+		Data: map[string]any{
+			"port": map[string]any{
+				"reservations": map[string]any{
+					"fitter":         float64(3000),
+					"fitter/main":    float64(3000),
+					"fitter/staging": float64(3010),
+					"other":          float64(3100),
+				},
+			},
+			"editor": map[string]any{
+				"themes": map[string]any{
+					"fitter":      "Solarized",
+					"fitter/main": "Dark",
+				},
+				"colors": map[string]any{
+					"other": "blue",
+				},
+			},
+		},
+	}
+
+	migrated := uc.MigrateProjectKeys("fitter", "fitter_app")
+	if migrated != 5 {
+		t.Errorf("migrated = %d, want 5 (3 reservations + 2 themes)", migrated)
+	}
+
+	res := uc.PortReservations()
+	if res["fitter_app"] != 3000 || res["fitter_app/main"] != 3000 || res["fitter_app/staging"] != 3010 {
+		t.Errorf("port reservations not migrated: %#v", res)
+	}
+	if _, has := res["fitter"]; has {
+		t.Error("old fitter port reservation still present")
+	}
+	if res["other"] != 3100 {
+		t.Error("unrelated reservation lost")
+	}
+
+	themes, _ := Dig(uc.Data, "editor", "themes").(map[string]any)
+	if themes["fitter_app"] != "Solarized" || themes["fitter_app/main"] != "Dark" {
+		t.Errorf("themes not migrated: %#v", themes)
+	}
+	if _, has := themes["fitter"]; has {
+		t.Error("old fitter theme still present")
+	}
+
+	colors, _ := Dig(uc.Data, "editor", "colors").(map[string]any)
+	if colors["other"] != "blue" {
+		t.Error("unrelated editor color lost")
+	}
+}
+
+func TestMigrateProjectKeys_NoOpWhenSame(t *testing.T) {
+	uc := &UserConfig{Data: map[string]any{
+		"port": map[string]any{
+			"reservations": map[string]any{"fitter": float64(3000)},
+		},
+	}}
+	if got := uc.MigrateProjectKeys("fitter", "fitter"); got != 0 {
+		t.Errorf("expected 0 migrations for same name, got %d", got)
+	}
+	if got := uc.MigrateProjectKeys("", "anything"); got != 0 {
+		t.Errorf("expected 0 migrations for empty old name, got %d", got)
+	}
+}
+
 func TestUserConfig_InitFilePermissions(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "gtl-data")

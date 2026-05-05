@@ -61,8 +61,9 @@ func TestProjectConfig_Defaults(t *testing.T) {
 	if pc.EnvFileTarget() != ".env.local" {
 		t.Errorf("expected .env.local, got %s", pc.EnvFileTarget())
 	}
-	if pc.Project() != filepath.Base(dir) {
-		t.Errorf("expected %s, got %s", filepath.Base(dir), pc.Project())
+	want := SanitizeIdentifier(filepath.Base(dir))
+	if pc.Project() != want {
+		t.Errorf("expected %s, got %s", want, pc.Project())
 	}
 }
 
@@ -812,5 +813,105 @@ func TestRewriteEnvFileBlock_PreservesRestOfFile(t *testing.T) {
 	}
 	if !strings.Contains(got, "project: myapp") {
 		t.Errorf("expected project preserved, got:\n%s", got)
+	}
+}
+
+func TestIsValidIdentifier(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"fitter", true},
+		{"fitter_app", true},
+		{"_underscore_lead", true},
+		{"app1", true},
+		{"My_App_2", true},
+		{"", false},
+		{"my-app", false},
+		{"1leading_digit", false},
+		{"with space", false},
+		{"semi;colon", false},
+		{"dot.value", false},
+	}
+	for _, c := range cases {
+		if got := IsValidIdentifier(c.in); got != c.want {
+			t.Errorf("IsValidIdentifier(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestSanitizeIdentifier(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"fitter", "fitter"},
+		{"fitter-app", "fitter_app"},
+		{"my--app", "my_app"},
+		{"--leading-and-trailing--", "leading_and_trailing"},
+		{"with space", "with_space"},
+		{"1leading", "db_1leading"},
+		{"123", "db_123"},
+		{"", "app"},
+		{"---", "app"},
+	}
+	for _, c := range cases {
+		if got := SanitizeIdentifier(c.in); got != c.want {
+			t.Errorf("SanitizeIdentifier(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestProjectConfig_Validate(t *testing.T) {
+	cases := []struct {
+		name    string
+		yml     string
+		wantErr string // substring; "" means no error
+	}{
+		{
+			name:    "valid",
+			yml:     "project: fitter\ndatabase:\n  adapter: postgresql\n  template: fitter_development\n",
+			wantErr: "",
+		},
+		{
+			name:    "dashed_project",
+			yml:     "project: fitter-app\ndatabase:\n  adapter: postgresql\n  template: fitter_development\n",
+			wantErr: "project name",
+		},
+		{
+			name:    "dashed_template",
+			yml:     "project: fitter\ndatabase:\n  adapter: postgresql\n  template: fitter-development\n",
+			wantErr: "database.template",
+		},
+		{
+			name:    "no_project_set_dir_basename_used",
+			yml:     "database:\n  adapter: postgresql\n  template: fitter_development\n",
+			wantErr: "",
+		},
+		{
+			name:    "sqlite_template_can_have_dashes",
+			yml:     "project: fitter\ndatabase:\n  adapter: sqlite\n  template: ./db/dev-fitter.sqlite3\n",
+			wantErr: "",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			_ = os.WriteFile(filepath.Join(dir, ProjectConfigFile), []byte(c.yml), 0o644)
+			pc := LoadProjectConfig(dir)
+			err := pc.Validate()
+			if c.wantErr == "" {
+				if err != nil {
+					t.Errorf("expected no error, got: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Errorf("expected error containing %q, got nil", c.wantErr)
+				return
+			}
+			if !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("expected error containing %q, got: %v", c.wantErr, err)
+			}
+		})
 	}
 }

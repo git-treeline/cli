@@ -179,6 +179,63 @@ func TestAllocate_DatabaseName(t *testing.T) {
 	}
 }
 
+func TestBuildDatabaseName_SanitizesFullResult(t *testing.T) {
+	cases := []struct {
+		name, project, template, pattern, worktreeName, want string
+	}{
+		{
+			name:         "dashed_project_in_pattern",
+			project:      "fitter-app",
+			template:     "fitter_app_development",
+			pattern:      "{project}_{worktree}",
+			worktreeName: "feature/x",
+			want:         "fitter_app_feature_x",
+		},
+		{
+			name:         "dashed_template_value",
+			project:      "fitter",
+			template:     "fitter-dev",
+			pattern:      "{template}_{worktree}",
+			worktreeName: "feature_x",
+			want:         "fitter_dev_feature_x",
+		},
+		{
+			name:         "default_pattern_dashed_worktree",
+			project:      "fitter",
+			template:     "fitter_development",
+			pattern:      "{template}_{worktree}",
+			worktreeName: "feature-branch",
+			want:         "fitter_development_feature_branch",
+		},
+		{
+			name:         "leading_and_trailing_dashes_collapse",
+			project:      "fitter",
+			template:     "-weird-",
+			pattern:      "{template}_{worktree}",
+			worktreeName: "x",
+			want:         "weird_x",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			yamlExtra := ""
+			al, _ := testAllocator(t, 1, yamlExtra)
+			al.ProjectConfig.Data["project"] = c.project
+			al.ProjectConfig.Data["database"] = map[string]any{
+				"adapter":  "postgresql",
+				"template": c.template,
+				"pattern":  c.pattern,
+			}
+			got := al.buildDatabaseName(c.worktreeName)
+			if got != c.want {
+				t.Errorf("buildDatabaseName(%q) with project=%q template=%q pattern=%q\n  got:  %q\n  want: %q",
+					c.worktreeName, c.project, c.template, c.pattern, got, c.want)
+			}
+		})
+	}
+}
+
 func TestAllocate_RedisPrefix(t *testing.T) {
 	al, _ := testAllocator(t, 1, "")
 	alloc, err := al.Allocate("/wt/my-branch", "my-branch", false)

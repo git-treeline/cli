@@ -348,6 +348,44 @@ func (uc *UserConfig) resolveEditorOverride(key, project, branch string) string 
 	return ""
 }
 
+// MigrateProjectKeys rewrites every config map key that's exactly oldName or
+// is prefixed with "oldName/" so it uses newName instead. Targets the maps
+// where project names appear as keys: port.reservations, editor.themes,
+// editor.colors. Returns the number of keys rewritten. Caller must Save().
+func (uc *UserConfig) MigrateProjectKeys(oldName, newName string) int {
+	if oldName == "" || newName == "" || oldName == newName {
+		return 0
+	}
+	targets := [][]string{
+		{"port", "reservations"},
+		{"editor", "themes"},
+		{"editor", "colors"},
+	}
+	total := 0
+	for _, path := range targets {
+		raw, ok := Dig(uc.Data, path...).(map[string]any)
+		if !ok {
+			continue
+		}
+		for key, val := range raw {
+			rewritten := ""
+			switch {
+			case key == oldName:
+				rewritten = newName
+			case strings.HasPrefix(key, oldName+"/"):
+				rewritten = newName + key[len(oldName):]
+			}
+			if rewritten == "" {
+				continue
+			}
+			delete(raw, key)
+			raw[rewritten] = val
+			total++
+		}
+	}
+	return total
+}
+
 func (uc *UserConfig) Get(dottedKey string) any {
 	keys := splitDotted(dottedKey)
 	return Dig(uc.Data, keys...)

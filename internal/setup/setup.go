@@ -84,6 +84,9 @@ func New(worktreePath string, mainRepo string, uc *config.UserConfig) *Setup {
 }
 
 func (s *Setup) Run() (*allocator.Allocation, error) {
+	if err := s.ProjectConfig.Validate(); err != nil {
+		return nil, err
+	}
 	if pruned, err := s.Registry.Prune(); err == nil && pruned > 0 {
 		s.log("Reclaimed %d stale allocation(s)", pruned)
 	}
