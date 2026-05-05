@@ -14,17 +14,6 @@ func mkClone(t *testing.T, dir string) {
 	}
 }
 
-func mkWorktreeMarker(t *testing.T, dir, parent string) {
-	t.Helper()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, ".git"),
-		[]byte("gitdir: "+parent+"/.git/worktrees/x\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestValidate_HealthyRegistry(t *testing.T) {
 	reg := newTestRegistry(t)
 	dir := filepath.Dir(reg.Path)

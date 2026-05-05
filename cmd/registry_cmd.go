@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/git-treeline/cli/internal/confirm"
@@ -172,24 +171,5 @@ func shouldUseRegistryRepair() bool {
 		}
 	}
 	return false
-}
-
-// registrySnippet returns a short, single-line summary suitable for embedding
-// in another command's output. Returns "" when the registry is clean.
-func registrySnippet() string {
-	reg := registry.New("")
-	issues, err := reg.Validate()
-	if err != nil || len(issues) == 0 {
-		return ""
-	}
-	kinds := map[string]int{}
-	for _, iss := range issues {
-		kinds[iss.Kind]++
-	}
-	parts := make([]string, 0, len(kinds))
-	for kind, n := range kinds {
-		parts = append(parts, fmt.Sprintf("%d %s", n, kind))
-	}
-	return fmt.Sprintf("registry has %d issue(s): %s — run 'gtl registry validate'", len(issues), strings.Join(parts, ", "))
 }
 
