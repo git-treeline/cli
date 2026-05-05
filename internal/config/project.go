@@ -98,14 +98,14 @@ func (pc *ProjectConfig) Project() string {
 func (pc *ProjectConfig) Validate() error {
 	if v, ok := pc.Data["project"].(string); ok && v != "" {
 		if !IsValidIdentifier(v) {
-			return fmt.Errorf("project name %q in %s contains invalid characters; must match [a-zA-Z_][a-zA-Z0-9_]*\n  Run `gtl rename %s` to fix.",
+			return fmt.Errorf("project name %q in %s contains invalid characters; must match [a-zA-Z_][a-zA-Z0-9_]* (run `gtl rename %s` to fix)",
 				v, ProjectConfigFile, SanitizeIdentifier(v))
 		}
 	}
 	if t := pc.DatabaseTemplate(); t != "" {
 		adapter := pc.DatabaseAdapter()
 		if (adapter == "postgresql" || adapter == "mysql") && !IsValidIdentifier(t) {
-			return fmt.Errorf("database.template %q in %s is not a valid %s identifier; must match [a-zA-Z_][a-zA-Z0-9_]*\n  Suggested: %s",
+			return fmt.Errorf("database.template %q in %s is not a valid %s identifier; must match [a-zA-Z_][a-zA-Z0-9_]* (suggested: %s)",
 				t, ProjectConfigFile, adapter, SanitizeIdentifier(t))
 		}
 	}
