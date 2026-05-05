@@ -1,3 +1,10 @@
+## [0.40.2]
+
+- **`gtl rename <new-name>`** — renames a project across `.treeline.yml`, the registry, user-config keys (port reservations, editor themes/colors, including `project/branch` variants), drops the old worktree databases, and re-runs setup so each worktree comes back up under the new name with a freshly cloned DB. Project names must match `[a-zA-Z_][a-zA-Z0-9_]*` (same rule as Postgres identifiers); the command suggests a sanitized form when given an invalid name.
+- **`gtl init` derives the project name from `git remote get-url origin`** (basename, `.git` stripped) instead of the directory name or the Rails `application.rb` module — repo name is stable across rebrands and matches what the team calls the project. Result is sanitized to a valid identifier so a `fitter-app` repo lands as `fitter_app` in `.treeline.yml`.
+- **Fixed dashed project / template names breaking Postgres clones.** A dash in `project:` or `database.template:` flowed through `{project}`/`{template}` substitution and produced identifiers Postgres rejects (`createdb: ERROR: syntax error at or near "-"`). `buildDatabaseName` now sanitizes the full post-substitution result, and `setup` validates `project` and `database.template` at config load with a `gtl rename <suggested>` hint when invalid.
+- **`gtl init` warns when `config/database.yml` has a non-identifier database name** instead of silently dropping the value, so the misconfiguration is visible at init time.
+
 ## [0.40.1]
 
 - **pf rules now survive a reboot.** `gtl serve install` ships a small LaunchDaemon at `/Library/LaunchDaemons/dev.treeline.pfreload.plist` that re-runs `pfctl -ef /etc/pf.conf` at boot. Apple's own pf service loads the rules but does NOT enable pf — without our daemon, the redirect from :443 to the router silently broke after every reboot until the user manually ran `sudo pfctl -ef`. The daemon invokes Apple's signed `/sbin/pfctl` directly (no Treeline binary in the boot path → no notarization or code-signing concerns). `gtl serve uninstall` removes it cleanly.
