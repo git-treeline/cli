@@ -167,6 +167,50 @@ func TestRouterStatusPage(t *testing.T) {
 	}
 }
 
+// The doctor's liveness probe hits this endpoint to distinguish "router
+// bound to socket" from "router actually answers". A 200 here is the
+// signal that the running router speaks our protocol.
+func TestRouter_HealthEndpoint(t *testing.T) {
+	reg := testRegistry(t, nil)
+	router := NewRouter(3000, reg)
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + HealthEndpoint)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("X-Treeline-Router"); got != "1" {
+		t.Errorf("expected X-Treeline-Router=1, got %q", got)
+	}
+}
+
+// Health endpoint must short-circuit BEFORE subdomain lookup, so it works
+// even with no Host or a Host that has no matching route.
+func TestRouter_HealthEndpointBypassesRouting(t *testing.T) {
+	reg := testRegistry(t, nil)
+	router := NewRouter(3000, reg)
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("GET", ts.URL+HealthEndpoint, nil)
+	req.Host = "no-such-route.example.com"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200 even with unmatched host, got %d", resp.StatusCode)
+	}
+}
+
 func TestRouteKey_LongLabelTruncated(t *testing.T) {
 	key := RouteKey("my-long-company-name", "feature/redesign-entire-authentication-flow-for-enterprise-clients")
 	if len(key) > 63 {
