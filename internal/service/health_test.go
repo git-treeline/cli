@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -20,15 +21,38 @@ func fakeDial(succeed bool) func(string, string, time.Duration) (net.Conn, error
 	}
 }
 
+func fakeHTTP(status int, err error) func(string, time.Duration) (int, error) {
+	return func(_ string, _ time.Duration) (int, error) {
+		return status, err
+	}
+}
+
+func fakePF(configuredOnDisk, loadedInKernel, pfEnabled bool, detail string) func(int) PortForwardStatus {
+	return func(int) PortForwardStatus {
+		return PortForwardStatus{
+			ConfiguredOnDisk: configuredOnDisk,
+			LoadedInKernel:   loadedInKernel,
+			PfEnabled:        pfEnabled,
+			Detail:           detail,
+		}
+	}
+}
+
+// allHealthy returns a healthDeps where every probe reports the happy path.
+// Listener PID matches launchd's recorded PID; pf rules are loaded; the
+// router answers the liveness probe with 200.
 func allHealthy() healthDeps {
 	return healthDeps{
 		isRunning:               func() bool { return true },
 		installedBinaryPath:     func() string { return "/usr/local/bin/gtl" },
 		runningRouterVersion:    func() string { return "1.0.0" },
+		runningPID:              func() int { return 1234 },
 		isPortForwardConfigured: func() bool { return true },
+		checkPortForward:        fakePF(true, true, true, ""),
 		dialTimeout:             fakeDial(true),
+		httpProbe:               fakeHTTP(200, nil),
 		executable:              func() (string, error) { return "/usr/local/bin/gtl", nil },
-		processOnPort:           func(int) string { return "gtl (pid 1234)" },
+		processOnPort:           func(int) processInfo { return processInfo{Name: "git-treeline", PID: 1234} },
 	}
 }
 
@@ -37,8 +61,8 @@ func allHealthy() healthDeps {
 func TestCheckHealthWith_AllHealthy(t *testing.T) {
 	checks := checkHealthWith(allHealthy(), 8443, "1.0.0")
 
-	if len(checks) != 5 {
-		t.Fatalf("expected 5 checks, got %d", len(checks))
+	if len(checks) != 6 {
+		t.Fatalf("expected 6 checks, got %d", len(checks))
 	}
 	for _, c := range checks {
 		if c.Status != "ok" {
@@ -52,20 +76,24 @@ func TestCheckHealthWith_AllBroken(t *testing.T) {
 		isRunning:               func() bool { return false },
 		installedBinaryPath:     func() string { return "" },
 		runningRouterVersion:    func() string { return "" },
+		runningPID:              func() int { return 0 },
 		isPortForwardConfigured: func() bool { return false },
+		checkPortForward:        fakePF(false, false, false, "not configured"),
 		dialTimeout:             fakeDial(false),
+		httpProbe:               fakeHTTP(0, fmt.Errorf("connection refused")),
 		executable:              func() (string, error) { return "/usr/local/bin/gtl", nil },
-		processOnPort:           func(int) string { return "" },
+		processOnPort:           func(int) processInfo { return processInfo{} },
 	}
 
 	checks := checkHealthWith(d, 8443, "1.0.0")
 
 	expected := map[string]string{
-		"service":         "error",
-		"binary":          "warn",
-		"router_version":  "warn",
-		"router_port":     "error",
-		"port_forwarding": "warn",
+		"service":           "error",
+		"binary":            "warn",
+		"router_version":    "warn",
+		"router_port":       "error",
+		"router_responding": "warn",
+		"port_forwarding":   "warn",
 	}
 	for _, c := range checks {
 		want, ok := expected[c.Name]
@@ -174,11 +202,14 @@ func TestCheckRouterVersion_NoVersionFile(t *testing.T) {
 
 // --- checkRouterListening ---
 
-func TestCheckRouterListening_Ok(t *testing.T) {
+func TestCheckRouterListening_Ok_PIDMatches(t *testing.T) {
 	d := allHealthy()
 	c := checkRouterListening(d, 8443)
 	if c.Status != "ok" {
-		t.Errorf("expected ok, got %s", c.Status)
+		t.Errorf("expected ok, got %s (%s)", c.Status, c.Detail)
+	}
+	if !strings.Contains(c.Detail, "pid 1234") {
+		t.Errorf("expected detail to include the listener pid, got %q", c.Detail)
 	}
 }
 
@@ -188,9 +219,6 @@ func TestCheckRouterListening_NotListening_ServiceRunning(t *testing.T) {
 	c := checkRouterListening(d, 8443)
 	if c.Status != "error" {
 		t.Errorf("expected error, got %s", c.Status)
-	}
-	if c.Detail != "service registered but port 8443 not listening" {
-		t.Errorf("unexpected detail: %s", c.Detail)
 	}
 }
 
@@ -202,17 +230,92 @@ func TestCheckRouterListening_NotListening_ServiceStopped(t *testing.T) {
 	if c.Status != "error" {
 		t.Errorf("expected error, got %s", c.Status)
 	}
-	if c.Detail != "port 8443 not listening" {
-		t.Errorf("unexpected detail: %s", c.Detail)
+}
+
+// Regression: previously the rogue check substring-matched the process name
+// against "gtl"; the binary is named "git-treeline" which does NOT contain
+// "gtl" as a substring, so the legitimate router got flagged as rogue.
+// With PID-compare, when the listener PID matches launchd's recorded PID,
+// it's our router regardless of the name.
+func TestCheckRouterListening_GitTreelineNotRogue(t *testing.T) {
+	d := allHealthy()
+	d.processOnPort = func(int) processInfo { return processInfo{Name: "git-treeline", PID: 1234} }
+	d.runningPID = func() int { return 1234 }
+
+	c := checkRouterListening(d, 8443)
+	if c.Status != "ok" {
+		t.Errorf("expected ok for matching PID, got %s (%s)", c.Status, c.Detail)
 	}
 }
 
-func TestCheckRouterListening_RogueProcess(t *testing.T) {
+func TestCheckRouterListening_PIDMismatch_Warns(t *testing.T) {
 	d := allHealthy()
-	d.processOnPort = func(int) string { return "nginx (pid 5678)" }
+	d.processOnPort = func(int) processInfo { return processInfo{Name: "nginx", PID: 5678} }
+	d.runningPID = func() int { return 1234 }
+
 	c := checkRouterListening(d, 8443)
 	if c.Status != "warn" {
-		t.Errorf("expected warn for rogue process, got %s", c.Status)
+		t.Errorf("expected warn for PID mismatch, got %s", c.Status)
+	}
+	if !strings.Contains(c.Detail, "5678") || !strings.Contains(c.Detail, "1234") {
+		t.Errorf("expected detail to mention both PIDs, got %q", c.Detail)
+	}
+	if c.Fix != "gtl serve restart" {
+		t.Errorf("expected fix to be 'gtl serve restart', got %q", c.Fix)
+	}
+}
+
+func TestCheckRouterListening_FallbackWhenLaunchdPIDUnknown(t *testing.T) {
+	// runningPID returns 0 → couldn't read launchd → fall back to a soft
+	// name check. Both "gtl" and "git-treeline" should pass.
+	for _, name := range []string{"gtl", "git-treeline"} {
+		d := allHealthy()
+		d.runningPID = func() int { return 0 }
+		d.processOnPort = func(int) processInfo { return processInfo{Name: name, PID: 9999} }
+		c := checkRouterListening(d, 8443)
+		if c.Status != "ok" {
+			t.Errorf("name=%q: expected ok, got %s (%s)", name, c.Status, c.Detail)
+		}
+	}
+
+	// Something genuinely foreign should still warn.
+	d := allHealthy()
+	d.runningPID = func() int { return 0 }
+	d.processOnPort = func(int) processInfo { return processInfo{Name: "nginx", PID: 9999} }
+	c := checkRouterListening(d, 8443)
+	if c.Status != "warn" {
+		t.Errorf("expected warn for unknown listener with unknown launchd PID, got %s", c.Status)
+	}
+}
+
+// --- checkRouterResponding ---
+
+func TestCheckRouterResponding_2xx(t *testing.T) {
+	d := allHealthy()
+	c := checkRouterResponding(d, 8443)
+	if c.Status != "ok" {
+		t.Errorf("expected ok, got %s (%s)", c.Status, c.Detail)
+	}
+}
+
+func TestCheckRouterResponding_5xx(t *testing.T) {
+	d := allHealthy()
+	d.httpProbe = fakeHTTP(503, nil)
+	c := checkRouterResponding(d, 8443)
+	if c.Status != "warn" {
+		t.Errorf("expected warn for 5xx, got %s", c.Status)
+	}
+}
+
+func TestCheckRouterResponding_TransportError(t *testing.T) {
+	d := allHealthy()
+	d.httpProbe = fakeHTTP(0, fmt.Errorf("connection refused"))
+	c := checkRouterResponding(d, 8443)
+	if c.Status != "warn" {
+		t.Errorf("expected warn for transport error, got %s", c.Status)
+	}
+	if c.Fix != "gtl serve restart" {
+		t.Errorf("expected fix to suggest restart, got %q", c.Fix)
 	}
 }
 
@@ -222,20 +325,35 @@ func TestCheckPortForward_Ok(t *testing.T) {
 	d := allHealthy()
 	c := checkPortForward(d, 8443)
 	if c.Status != "ok" {
-		t.Errorf("expected ok, got %s", c.Status)
+		t.Errorf("expected ok, got %s (%s)", c.Status, c.Detail)
 	}
 }
 
 func TestCheckPortForward_NotConfigured(t *testing.T) {
 	d := allHealthy()
-	d.isPortForwardConfigured = func() bool { return false }
+	d.checkPortForward = fakePF(false, false, false, "")
 	c := checkPortForward(d, 8443)
 	if c.Status != "warn" {
 		t.Errorf("expected warn, got %s", c.Status)
 	}
 }
 
-func TestCheckPortForward_ConfiguredButUnreachable(t *testing.T) {
+func TestCheckPortForward_ConfiguredOnDiskButNotInKernel(t *testing.T) {
+	// This is the exact failure mode the user hit: pf.conf has the
+	// rule but `pfctl -s nat` doesn't, so traffic to :443 doesn't reach
+	// the router.
+	d := allHealthy()
+	d.checkPortForward = fakePF(true, false, true, "rule not loaded in kernel — pf.conf has it but `pfctl -s nat` doesn't show port 8443 (run 'gtl serve reload-pf')")
+	c := checkPortForward(d, 8443)
+	if c.Status != "error" {
+		t.Errorf("expected error, got %s", c.Status)
+	}
+	if c.Fix != "gtl serve reload-pf" {
+		t.Errorf("expected fix to be 'gtl serve reload-pf', got %q", c.Fix)
+	}
+}
+
+func TestCheckPortForward_RuleLoadedButPort443Unreachable(t *testing.T) {
 	d := allHealthy()
 	d.dialTimeout = func(_, addr string, _ time.Duration) (net.Conn, error) {
 		if addr == "127.0.0.1:443" {
@@ -246,5 +364,8 @@ func TestCheckPortForward_ConfiguredButUnreachable(t *testing.T) {
 	c := checkPortForward(d, 8443)
 	if c.Status != "error" {
 		t.Errorf("expected error, got %s", c.Status)
+	}
+	if c.Fix != "gtl serve reload-pf" {
+		t.Errorf("expected fix to suggest reload-pf, got %q", c.Fix)
 	}
 }

@@ -153,7 +153,19 @@ func (r *Router) Run() error {
 
 const maxProxyHops = 5
 
+// HealthEndpoint is the path the doctor probes to confirm the running
+// router is responsive (not just bound to a port).
+const HealthEndpoint = "/_treeline/health"
+
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if req.URL.Path == HealthEndpoint {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Treeline-Router", "1")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok\n")
+		return
+	}
+
 	hops := 0
 	if v := req.Header.Get("X-Gtl-Hops"); v != "" {
 		hops, _ = strconv.Atoi(v)
