@@ -20,10 +20,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var doctorJSON bool
+var (
+	doctorJSON bool
+	doctorFix  bool
+)
 
 func init() {
 	doctorCmd.Flags().BoolVar(&doctorJSON, "json", false, "Output as JSON")
+	doctorCmd.Flags().BoolVar(&doctorFix, "fix", false, "Run auto-remediation for detected issues (router restart, pf reload, registry prune)")
 	rootCmd.AddCommand(doctorCmd)
 }
 
@@ -52,7 +56,9 @@ var doctorCmd = &cobra.Command{
 		doctorServe()
 		doctorDiagnostics(det)
 		doctorRequestFlow(absPath, pc)
-
+		if doctorFix {
+			return doctorAutoFix(absPath, pc)
+		}
 		return nil
 	},
 }
@@ -492,6 +498,111 @@ func doctorDiagnostics(det *detect.Result) {
 			}
 		}
 	}
+}
+
+// fixAction names a remediation that doctor --fix can apply automatically.
+type fixAction string
+
+const (
+	fixServeRestart fixAction = "gtl serve restart"
+	fixReloadPF     fixAction = "gtl serve reload-pf"
+	fixPrune        fixAction = "gtl prune"
+)
+
+// planAutoFix maps the doctor's findings to a deduplicated, ordered list of
+// actions to run. Pure function for testability — the caller actually
+// executes the actions.
+func planAutoFix(in flowInput, registryHasOrphans bool) []fixAction {
+	seen := map[fixAction]bool{}
+	var plan []fixAction
+	add := func(a fixAction) {
+		if !seen[a] {
+			seen[a] = true
+			plan = append(plan, a)
+		}
+	}
+
+	// First failing link in the request flow drives most fixes.
+	step := evaluateRequestFlow(in)
+	if step != nil {
+		switch step.fix {
+		case "gtl serve restart":
+			add(fixServeRestart)
+		case "gtl serve reload-pf":
+			add(fixReloadPF)
+		}
+	}
+	// Independent of the flow chain: a stale router-version warning, even if
+	// the router is responding, deserves a restart.
+	for _, c := range in.serviceChecks {
+		if c.Name == "router_version" && c.Status == "warn" {
+			add(fixServeRestart)
+		}
+	}
+	// Registry orphans (entries whose worktree directory is gone) are safe
+	// to prune.
+	if registryHasOrphans {
+		add(fixPrune)
+	}
+	return plan
+}
+
+func doctorAutoFix(absPath string, pc *config.ProjectConfig) error {
+	in := buildFlowInput(absPath, pc)
+	plan := planAutoFix(in, shouldUseRegistryRepair())
+
+	fmt.Println("\nAuto-fix")
+	if len(plan) == 0 {
+		doctorLine("Status", "nothing to fix automatically")
+		return nil
+	}
+
+	for _, a := range plan {
+		fmt.Printf("  → %s\n", a)
+		if err := runAutoFix(a); err != nil {
+			fmt.Fprintf(os.Stderr, "  ✗ %v\n", err)
+			return err
+		}
+		fmt.Println("    done.")
+	}
+	return nil
+}
+
+func buildFlowInput(absPath string, pc *config.ProjectConfig) flowInput {
+	uc := config.LoadUserConfig("")
+	reg := registry.New("")
+	alloc := reg.Find(absPath)
+	in := flowInput{
+		startCommand:  pc.StartCommand(),
+		serviceChecks: service.CheckHealth(uc.RouterPort(), Version),
+		caInstalled:   proxy.IsCAInstalled(),
+	}
+	if alloc != nil {
+		in.allocatedPorts = format.GetPorts(format.Allocation(alloc))
+		if len(in.allocatedPorts) > 0 {
+			in.appListening = allocator.CheckPortsListening(in.allocatedPorts)
+		}
+	}
+	return in
+}
+
+// runAutoFixFn is the indirection point for tests — replaces the real
+// remediation actions with no-ops.
+var runAutoFixFn = runAutoFixDefault
+
+func runAutoFix(a fixAction) error { return runAutoFixFn(a) }
+
+func runAutoFixDefault(a fixAction) error {
+	switch a {
+	case fixServeRestart:
+		return service.Bounce(service.DefaultBounceTimeout)
+	case fixReloadPF:
+		return service.ReloadPortForward()
+	case fixPrune:
+		_, err := registry.New("").Prune()
+		return err
+	}
+	return fmt.Errorf("unknown fix action: %s", a)
 }
 
 func doctorLine(label, value string) {

@@ -203,3 +203,109 @@ func TestEvaluateRequestFlow_CANotInstalled(t *testing.T) {
 		t.Errorf("expected ca_cert step, got %+v", step)
 	}
 }
+
+// --- planAutoFix ---
+
+func TestPlanAutoFix_NothingToDoOnHealthy(t *testing.T) {
+	plan := planAutoFix(flowInput{
+		allocatedPorts: []int{3022},
+		appListening:   true,
+		serviceChecks:  healthyChecks(),
+		caInstalled:    true,
+	}, false)
+	if len(plan) != 0 {
+		t.Errorf("expected empty plan, got %+v", plan)
+	}
+}
+
+func TestPlanAutoFix_StaleRouterPlansRestart(t *testing.T) {
+	checks := healthyChecks()
+	for i := range checks {
+		if checks[i].Name == "router_version" {
+			checks[i].Status = "warn"
+			checks[i].Detail = "router=0.39.2, cli=0.39.4"
+		}
+	}
+	plan := planAutoFix(flowInput{
+		allocatedPorts: []int{3022},
+		appListening:   true,
+		serviceChecks:  checks,
+		caInstalled:    true,
+	}, false)
+	if len(plan) != 1 || plan[0] != fixServeRestart {
+		t.Errorf("expected [fixServeRestart], got %+v", plan)
+	}
+}
+
+func TestPlanAutoFix_PFErrorPlansReload(t *testing.T) {
+	checks := healthyChecks()
+	for i := range checks {
+		if checks[i].Name == "port_forwarding" {
+			checks[i].Status = "error"
+			checks[i].Fix = "gtl serve reload-pf"
+		}
+	}
+	plan := planAutoFix(flowInput{
+		allocatedPorts: []int{3022},
+		appListening:   true,
+		serviceChecks:  checks,
+		caInstalled:    true,
+	}, false)
+	found := false
+	for _, a := range plan {
+		if a == fixReloadPF {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected fixReloadPF in plan, got %+v", plan)
+	}
+}
+
+func TestPlanAutoFix_RegistryOrphansPlanPrune(t *testing.T) {
+	plan := planAutoFix(flowInput{
+		allocatedPorts: []int{3022},
+		appListening:   true,
+		serviceChecks:  healthyChecks(),
+		caInstalled:    true,
+	}, true)
+	found := false
+	for _, a := range plan {
+		if a == fixPrune {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected fixPrune in plan, got %+v", plan)
+	}
+}
+
+func TestPlanAutoFix_DedupesMultipleSignals(t *testing.T) {
+	// Both router_version warn AND router_responding warn should
+	// produce a SINGLE serve restart action, not two.
+	checks := healthyChecks()
+	for i := range checks {
+		if checks[i].Name == "router_version" {
+			checks[i].Status = "warn"
+		}
+		if checks[i].Name == "router_responding" {
+			checks[i].Status = "warn"
+			checks[i].Fix = "gtl serve restart"
+		}
+	}
+	plan := planAutoFix(flowInput{
+		allocatedPorts: []int{3022},
+		appListening:   true,
+		serviceChecks:  checks,
+		caInstalled:    true,
+	}, false)
+	count := 0
+	for _, a := range plan {
+		if a == fixServeRestart {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected serve restart once, got %d in %+v", count, plan)
+	}
+}
