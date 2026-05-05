@@ -19,8 +19,22 @@ func Diagnose(det *detect.Result) []Diagnostic {
 	diags = append(diags, diagnoseEnvLoading(det)...)
 	diags = append(diags, diagnosePortWiring(det)...)
 	diags = append(diags, diagnoseUmbrella(det)...)
+	diags = append(diags, diagnoseInvalidDBTemplate(det)...)
 
 	return diags
+}
+
+func diagnoseInvalidDBTemplate(det *detect.Result) []Diagnostic {
+	if det.DBTemplateInvalid == "" {
+		return nil
+	}
+	return []Diagnostic{{
+		Level: "warn",
+		Message: fmt.Sprintf("config/database.yml has development.database = %q, which isn't a valid Postgres identifier (dashes/quotes/etc).\n"+
+			"  Treeline left database.template empty in .treeline.yml. Fix it manually before running gtl setup,\n"+
+			"  or rename the database in Postgres + database.yml so they match.",
+			det.DBTemplateInvalid),
+	}}
 }
 
 func diagnoseUmbrella(det *detect.Result) []Diagnostic {

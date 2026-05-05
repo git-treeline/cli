@@ -61,6 +61,37 @@ func DetectRepoRoot(path string) string {
 	return root
 }
 
+// RepoNameFromRemote returns the repo basename from the `origin` remote URL
+// (e.g. "fitter" from "git@github.com:acme/fitter.git" or
+// "https://gitlab.com/group/sub/fitter"). Returns "" when there's no origin
+// remote or the URL can't be parsed.
+func RepoNameFromRemote(repoPath string) string {
+	url := gitOutput(repoPath, "remote", "get-url", "origin")
+	return parseRepoNameFromURL(url)
+}
+
+func parseRepoNameFromURL(url string) string {
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return ""
+	}
+	// Strip the host/userinfo prefix. For scheme URLs this trims "https://host"
+	// or "ssh://git@host"; for scp-style "git@host:path" it trims "git@host".
+	if i := strings.Index(url, "://"); i >= 0 {
+		url = url[i+3:]
+		if j := strings.Index(url, "/"); j >= 0 {
+			url = url[j+1:]
+		}
+	} else if i := strings.Index(url, ":"); i >= 0 {
+		url = url[i+1:]
+	}
+	url = strings.TrimRight(url, "/")
+	if i := strings.LastIndex(url, "/"); i >= 0 {
+		url = url[i+1:]
+	}
+	return strings.TrimSuffix(url, ".git")
+}
+
 // Create adds a git worktree at path. If newBranch is true, it creates a new
 // branch from base. Otherwise it checks out an existing branch.
 func Create(path, branch string, newBranch bool, base string) error {

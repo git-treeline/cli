@@ -55,7 +55,7 @@ var initCmd = &cobra.Command{
 		detection.MergeTarget = worktree.DetectDefaultBranch(cwd)
 		project := initProject
 		if project == "" {
-			project = defaultProjectName(cwd, detection)
+			project = defaultProjectName(cwd)
 		}
 
 		templateDB := initTemplateDB
@@ -168,37 +168,11 @@ func defaultTemplateDB(project string, det *detect.Result) string {
 	if det != nil && det.DBTemplate != "" {
 		return det.DBTemplate
 	}
-	dbProject := databaseIdentifierName(project)
+	dbProject := config.SanitizeIdentifier(project)
 	if det != nil && det.Framework == "phoenix" {
 		return dbProject + "_dev"
 	}
 	return dbProject + "_development"
-}
-
-func databaseIdentifierName(name string) string {
-	var b strings.Builder
-	lastUnderscore := false
-	for _, r := range name {
-		valid := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'
-		if valid {
-			b.WriteRune(r)
-			lastUnderscore = r == '_'
-			continue
-		}
-		if !lastUnderscore {
-			b.WriteByte('_')
-			lastUnderscore = true
-		}
-	}
-	result := strings.Trim(b.String(), "_")
-	if result == "" {
-		return "app"
-	}
-	first := result[0]
-	if (first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_' {
-		return result
-	}
-	return "db_" + result
 }
 
 func openInEditor(path string) {
@@ -223,7 +197,7 @@ func runInitForNew(mainRepo string, det *detect.Result) error {
 		return nil
 	}
 
-	project := defaultProjectName(mainRepo, det)
+	project := defaultProjectName(mainRepo)
 	det.MergeTarget = worktree.DetectDefaultBranch(mainRepo)
 	templateDB := defaultTemplateDB(project, det)
 
@@ -241,9 +215,13 @@ func runInitForNew(mainRepo string, det *detect.Result) error {
 	return nil
 }
 
-func defaultProjectName(root string, det *detect.Result) string {
-	if det != nil && det.ProjectName != "" {
-		return det.ProjectName
+// defaultProjectName derives a project name from the git remote first,
+// then falls back to the directory basename. The result is sanitized to a
+// valid identifier so it's safe to use in databases, redis prefixes, and
+// router keys without further escaping.
+func defaultProjectName(root string) string {
+	if name := worktree.RepoNameFromRemote(root); name != "" {
+		return config.SanitizeIdentifier(name)
 	}
-	return filepath.Base(root)
+	return config.SanitizeIdentifier(filepath.Base(root))
 }

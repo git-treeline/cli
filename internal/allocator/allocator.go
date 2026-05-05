@@ -422,21 +422,27 @@ func (al *Allocator) nextAvailableRedisDB() int {
 var sanitizeRe = regexp.MustCompile(`[^a-zA-Z0-9_]`)
 var collapseRe = regexp.MustCompile(`_+`)
 
+// sanitizeIdentifier converts an arbitrary string into a database/redis-safe
+// identifier: only [a-zA-Z0-9_], no leading/trailing underscores, no runs.
+func sanitizeIdentifier(s string) string {
+	s = sanitizeRe.ReplaceAllString(s, "_")
+	s = collapseRe.ReplaceAllString(s, "_")
+	return strings.Trim(s, "_")
+}
+
 func (al *Allocator) buildDatabaseName(worktreeName string) string {
 	template := al.ProjectConfig.DatabaseTemplate()
 	if template == "" {
 		return ""
 	}
 
-	sanitized := sanitizeRe.ReplaceAllString(worktreeName, "_")
-	sanitized = collapseRe.ReplaceAllString(sanitized, "_")
-	sanitized = strings.Trim(sanitized, "_")
-
-	return strings.NewReplacer(
+	name := strings.NewReplacer(
 		"{template}", template,
-		"{worktree}", sanitized,
+		"{worktree}", sanitizeIdentifier(worktreeName),
 		"{project}", al.ProjectConfig.Project(),
 	).Replace(al.ProjectConfig.DatabasePattern())
+
+	return sanitizeIdentifier(name)
 }
 
 func intsToAny(ints []int) []any {
