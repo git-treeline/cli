@@ -1,3 +1,18 @@
+## [0.40.0]
+
+- **Doctor & serve overhaul** — fixes a stack of issues exposed when a hard reboot dropped pf rules and a `brew upgrade` left the router running an older build. Most-impactful changes:
+
+  - **`gtl serve restart`** — fast bounce of the router service via `launchctl kickstart -k` (or `systemctl --user restart` on Linux). No sudo, no plist rewrite, no pf reload. Replaces the silent `launchctl unload`/`load` pair that previously no-op'd on modern macOS, which is the cause of "I ran `gtl serve install` and nothing changed" reports.
+  - **`gtl serve reload-pf`** — targeted `pfctl` reload for when only the port-forwarding rules dropped (after a reboot), without paying the cost of a full `gtl serve install`.
+  - **`gtl doctor` actually verifies things.** Now compares the listener PID to `launchctl print`'s registered PID instead of substring-matching the process name (the legitimate `git-treeline` router was getting flagged as "rogue" because that string doesn't contain `gtl`). Adds a real HTTP liveness probe to `/_treeline/health` so a deadlocked router isn't reported as healthy. Reads pf state from the kernel (`pfctl -s nat`) instead of trusting `pf.conf` on disk — fixes `Port forwarding: active` lying when rules weren't loaded.
+  - **Doctor: Request flow** — new section that walks the chain a worktree URL takes (app port → router → router_responding → pf → CA) and surfaces the FIRST failure as the actionable diagnosis. The other sections stay for detail; you no longer have to guess which one is the cause.
+  - **Doctor: app-not-listening surfaces `commands.start`** as the fix instead of just printing "not listening".
+  - **`gtl doctor --fix`** auto-runs the remediations the doctor was already printing as `fix:` hints (router restart, pf reload, registry prune for orphaned entries).
+  - **`gtl reallocate`** — bulk re-runs setup. Modes: explicit paths, `--from <dir>` (scans Conductor-style layouts), `--all-registry` (every entry whose dir still exists). Defaults to dry-run.
+  - **`gtl registry validate` / `repair` / `forget`** — read-only audit of the registry, safe automatic repair (pruning orphans, with a backup), and a single-entry removal for tooling integrations.
+  - **`gtl prune --stale` no longer deletes Conductor workspaces.** The previous implementation cross-referenced `git worktree list` of the CWD as the only ground truth — Conductor uses standalone clones, not worktrees of a parent repo, so they all looked stale and got nuked. Now `--stale` distinguishes worktrees (`.git` is a file) from clones (`.git` is a directory) and only applies the worktree-list check to actual worktrees. When the worktree query fails, defaults to keep — never prune on a transient git error.
+  - **Stale-router warning on every `gtl <cmd>`** — when the running router's version disagrees with the CLI binary, every command prints a single yellow line pointing at `gtl serve restart`. Suppressed for self-repairing commands (`install`, `serve …`) and via `GTL_NO_STALE_WARN=1`.
+
 ## [0.39.4]
 
 - **`review.skip_switch_confirm` user config** — when `gtl review <PR>` is invoked from inside another worktree it prompts to confirm switching the current worktree to the PR branch. Setting `review.skip_switch_confirm: true` (e.g. `gtl config set review.skip_switch_confirm true`) bypasses the prompt for users who always want to switch. Default remains `false`, so the existing interactive flow is unchanged.
