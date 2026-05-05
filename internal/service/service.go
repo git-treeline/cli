@@ -122,6 +122,24 @@ func Uninstall() error {
 	}
 }
 
+// IsInstalled reports whether the service definition exists on disk for the
+// current user, regardless of whether it's currently running. Used by
+// `gtl serve restart --if-installed` so tooling integrations (Homebrew
+// post_install) can safely be a no-op on machines where the user never
+// installed the router.
+func IsInstalled() bool {
+	switch runtime.GOOS {
+	case "darwin":
+		_, err := os.Stat(PlistPath())
+		return err == nil
+	case "linux":
+		_, err := os.Stat(UnitPath())
+		return err == nil
+	default:
+		return false
+	}
+}
+
 // IsRunning checks if the service is currently active.
 func IsRunning() bool {
 	switch runtime.GOOS {

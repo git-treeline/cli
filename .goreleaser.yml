@@ -35,6 +35,12 @@ brews:
 
       generate_completions_from_executable(bin/"git-treeline", "completion")
       generate_completions_from_executable(bin/"git-treeline", "completion", base_name: "gtl")
+    post_install: |
+      # If the user previously installed the HTTPS router service, bounce it
+      # so the launchd-managed process picks up the new gtl binary. The
+      # --if-installed flag makes this a no-op for users who never ran
+      # 'gtl serve install', so first-time brew installs stay quiet.
+      system bin/"gtl", "serve", "restart", "--if-installed"
     caveats: |
       Get started:
         cd your-project && gtl install

@@ -38,6 +38,7 @@ func init() {
 	serveCmd.AddCommand(serveInstallCmd)
 	serveCmd.AddCommand(serveUninstallCmd)
 	serveRestartCmd.Flags().BoolVar(&serveRestartReloadPF, "pf", false, "Also reload pf rules (port forwarding)")
+	serveRestartCmd.Flags().BoolVar(&serveRestartIfInstalled, "if-installed", false, "No-op if the router service is not installed for this user")
 	serveCmd.AddCommand(serveRestartCmd)
 	serveCmd.AddCommand(serveReloadPFCmd)
 	serveCmd.AddCommand(serveStatusCmd)
@@ -50,7 +51,10 @@ func init() {
 	rootCmd.AddCommand(serveCmd)
 }
 
-var serveRestartReloadPF bool
+var (
+	serveRestartReloadPF   bool
+	serveRestartIfInstalled bool
+)
 
 var serveRestartCmd = &cobra.Command{
 	Use:   "restart",
@@ -60,12 +64,25 @@ upgrade of the gtl binary. Cheaper and faster than 'gtl serve install' —
 no sudo, no plist rewrite, no pf reload.
 
 Pass --pf to also reload port-forwarding rules (useful after a reboot
-that dropped them).`,
+that dropped them).
+
+Pass --if-installed to no-op when the router service has not been
+installed for the current user (intended for tooling integrations like
+the Homebrew post_install hook — bouncing something that doesn't exist
+should not be an error).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+			if serveRestartIfInstalled {
+				// Tooling-friendly no-op on unsupported platforms.
+				return nil
+			}
 			return cliErr(cmd, &CliError{
 				Message: fmt.Sprintf("gtl serve restart requires macOS or Linux (detected %s).", runtime.GOOS),
 			})
+		}
+		if serveRestartIfInstalled && !service.IsInstalled() {
+			fmt.Println(style.Dimf("Router service not installed for this user — skipping restart."))
+			return nil
 		}
 		fmt.Println(style.Actionf("Restarting router service..."))
 		if err := service.Bounce(service.DefaultBounceTimeout); err != nil {
