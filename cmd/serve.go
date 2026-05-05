@@ -183,7 +183,7 @@ var serveStatusCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		uc := config.LoadUserConfig("")
 		port := uc.RouterPort()
-		portFwd := service.IsPortForwardConfigured()
+		pfStatus := service.CheckPortForward(port)
 		caInstalled := proxy.IsCAInstalled()
 
 		if service.IsRunning() {
@@ -199,11 +199,7 @@ var serveStatusCmd = &cobra.Command{
 			fmt.Println("CA: not installed (run 'gtl serve install')")
 		}
 
-		if portFwd {
-			fmt.Println("Port forwarding: active (443 → router)")
-		} else {
-			fmt.Println("Port forwarding: not configured")
-		}
+		fmt.Println(formatPortForwardStatus(pfStatus, port))
 
 		domain := uc.RouterDomain()
 		reg := registry.New("")
@@ -229,7 +225,7 @@ var serveStatusCmd = &cobra.Command{
 
 		fmt.Printf("\nRoutes (%d):\n", len(routes))
 		for _, key := range sortedRouteKeys(routes) {
-			if portFwd {
+			if pfStatus.ConfiguredOnDisk {
 				fmt.Printf("  %s://%s.%s → :%d\n", scheme, key, domain, routes[key])
 			} else {
 				fmt.Printf("  %s://%s.%s:%d → :%d\n", scheme, key, domain, port, routes[key])
@@ -294,6 +290,32 @@ func projectAliases(reg *registry.Registry) proxy.AliasSource {
 			}
 		}
 		return merged
+	}
+}
+
+// formatPortForwardStatus returns the single-line "Port forwarding: ..."
+// string used by `gtl serve status`. Distinct from the doctor's check —
+// status is for at-a-glance reading, doctor is for diagnosis. Both pull
+// from the same kernel-level CheckPortForward.
+//
+// Important: never report "pf disabled" or "rule missing" unless we
+// actually read the relevant state. Without sudo on modern macOS, both
+// `pfctl -s info` and `pfctl -s nat` may error — silently treating those
+// failures as "disabled/missing" is the bug this helper exists to avoid.
+func formatPortForwardStatus(st service.PortForwardStatus, routerPort int) string {
+	switch {
+	case !st.ConfiguredOnDisk:
+		return "Port forwarding: not configured"
+	case st.PfStateKnown && !st.PfEnabled:
+		return "Port forwarding: ⚠ configured but pf is disabled (run 'gtl serve reload-pf')"
+	case !st.PfStateKnown && !st.KernelStateKnown:
+		return fmt.Sprintf("Port forwarding: configured (443 → %d, run with sudo or 'gtl doctor' for kernel-state verification)", routerPort)
+	case !st.KernelStateKnown:
+		return fmt.Sprintf("Port forwarding: configured (443 → %d, kernel ruleset not readable without sudo)", routerPort)
+	case !st.LoadedInKernel:
+		return "Port forwarding: ⚠ pf.conf has the rule but the kernel ruleset doesn't (run 'gtl serve reload-pf')"
+	default:
+		return fmt.Sprintf("Port forwarding: active (443 → %d)", routerPort)
 	}
 }
 

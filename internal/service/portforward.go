@@ -77,9 +77,19 @@ type PortForwardStatus struct {
 	// On macOS this requires both pf to be enabled AND our rdr rule to be
 	// in the active anchor.
 	LoadedInKernel bool
-	// PfEnabled (macOS only) is true when `pfctl -s info` reports pf is
-	// enabled. Meaningless on Linux.
+	// PfEnabled (macOS only) reports the running pf status. Meaningful only
+	// when PfStateKnown is true. Meaningless on Linux.
 	PfEnabled bool
+	// PfStateKnown (macOS only) is true when `pfctl -s info` succeeded —
+	// without it, callers must not interpret PfEnabled=false as proof that
+	// pf is actually disabled. On modern macOS, `pfctl -s info` may
+	// require sudo; without it, returns an error.
+	PfStateKnown bool
+	// KernelStateKnown is true when we successfully queried the kernel rule
+	// list. On macOS, `pfctl -s nat` (and per-anchor variants) typically
+	// require sudo — if our calls fail with permission errors, this is
+	// false, and LoadedInKernel should not be trusted as authoritative.
+	KernelStateKnown bool
 	// Detail is a one-line human-readable summary, or "" when everything is
 	// healthy.
 	Detail string
@@ -106,30 +116,40 @@ func checkPortForwardDarwin(routerPort int) PortForwardStatus {
 	st := PortForwardStatus{ConfiguredOnDisk: IsPortForwardConfigured()}
 
 	// pfctl -s info reports the daemon's enabled/disabled state. This call
-	// does not require sudo on macOS.
+	// MAY require sudo on modern macOS — when it fails we record
+	// PfStateKnown=false so callers don't misread the missing answer as
+	// "pf is disabled."
 	if out, err := runCmdOutput("/sbin/pfctl", "-s", "info"); err == nil {
 		for _, line := range strings.Split(string(out), "\n") {
-			if strings.HasPrefix(strings.TrimSpace(line), "Status: Enabled") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "Status: Enabled") {
 				st.PfEnabled = true
+				st.PfStateKnown = true
+				break
+			}
+			if strings.HasPrefix(trimmed, "Status: Disabled") {
+				st.PfEnabled = false
+				st.PfStateKnown = true
 				break
 			}
 		}
 	}
 
-	// pfctl -a treeline -s nat lists the rules in our anchor. Without sudo
-	// macOS sometimes refuses; in that case we fall back to the main NAT
-	// ruleset (`pfctl -s nat`), which can also reference our anchor via a
-	// `rdr-anchor` line.
+	// pfctl -a treeline -s nat lists the rules in our anchor. Both this and
+	// the main `pfctl -s nat` typically require sudo on modern macOS, so we
+	// track whether either query actually succeeded — if neither does we
+	// can't prove or disprove "loaded in kernel."
 	wantSubstr := fmt.Sprintf("port %d", routerPort)
 	if out, err := runCmdOutput("/sbin/pfctl", "-a", pfAnchorName(), "-s", "nat"); err == nil {
+		st.KernelStateKnown = true
 		if strings.Contains(string(out), wantSubstr) {
 			st.LoadedInKernel = true
 		}
 	}
 	if !st.LoadedInKernel {
 		if out, err := runCmdOutput("/sbin/pfctl", "-s", "nat"); err == nil {
-			body := string(out)
-			if strings.Contains(body, wantSubstr) {
+			st.KernelStateKnown = true
+			if strings.Contains(string(out), wantSubstr) {
 				st.LoadedInKernel = true
 			}
 		}
@@ -138,8 +158,12 @@ func checkPortForwardDarwin(routerPort int) PortForwardStatus {
 	switch {
 	case !st.ConfiguredOnDisk:
 		st.Detail = "not configured (run 'gtl serve install')"
-	case !st.PfEnabled:
+	case st.PfStateKnown && !st.PfEnabled:
 		st.Detail = "pf disabled — rules will not apply (run 'gtl serve reload-pf')"
+	case !st.PfStateKnown && !st.KernelStateKnown:
+		st.Detail = "pf state not readable without sudo — verify with 'sudo pfctl -s info'"
+	case !st.KernelStateKnown:
+		st.Detail = "kernel ruleset not readable without sudo — verify with 'sudo pfctl -s nat'"
 	case !st.LoadedInKernel:
 		st.Detail = fmt.Sprintf("rule not loaded in kernel — pf.conf has it but `pfctl -s nat` doesn't show port %d (run 'gtl serve reload-pf')", routerPort)
 	}
@@ -157,6 +181,7 @@ func checkPortForwardLinux(routerPort int) PortForwardStatus {
 		}
 		return st
 	}
+	st.KernelStateKnown = true
 	body := string(out)
 	if strings.Contains(body, "git-treeline") &&
 		strings.Contains(body, fmt.Sprintf("ports %d", routerPort)) {
