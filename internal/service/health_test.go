@@ -68,16 +68,18 @@ func fakePFAll(configuredOnDisk, loadedInKernel, pfEnabled, pfStateKnown, kernel
 // router answers the liveness probe with 200.
 func allHealthy() healthDeps {
 	return healthDeps{
-		isRunning:               func() bool { return true },
-		installedBinaryPath:     func() string { return "/usr/local/bin/gtl" },
-		runningRouterVersion:    func() string { return "1.0.0" },
-		runningPID:              func() int { return 1234 },
-		isPortForwardConfigured: func() bool { return true },
-		checkPortForward:        fakePF(true, true, true, ""),
-		dialTimeout:             fakeDial(true),
-		httpProbe:               fakeHTTP(200, nil),
-		executable:              func() (string, error) { return "/usr/local/bin/gtl", nil },
-		processOnPort:           func(int) processInfo { return processInfo{Name: "git-treeline", PID: 1234} },
+		isRunning:                  func() bool { return true },
+		installedBinaryPath:        func() string { return "/usr/local/bin/gtl" },
+		runningRouterVersion:       func() string { return "1.0.0" },
+		runningPID:                 func() int { return 1234 },
+		isPortForwardConfigured:    func() bool { return true },
+		checkPortForward:           fakePF(true, true, true, ""),
+		dialTimeout:                fakeDial(true),
+		httpProbe:                  fakeHTTP(200, nil),
+		executable:                 func() (string, error) { return "/usr/local/bin/gtl", nil },
+		processOnPort:              func(int) processInfo { return processInfo{Name: "git-treeline", PID: 1234} },
+		isPfReloadDaemonInstalled:  func() bool { return true },
+		pfReloadDaemonSupported:    true,
 	}
 }
 
@@ -86,8 +88,8 @@ func allHealthy() healthDeps {
 func TestCheckHealthWith_AllHealthy(t *testing.T) {
 	checks := checkHealthWith(allHealthy(), 8443, "1.0.0")
 
-	if len(checks) != 6 {
-		t.Fatalf("expected 6 checks, got %d", len(checks))
+	if len(checks) != 7 {
+		t.Fatalf("expected 7 checks, got %d", len(checks))
 	}
 	for _, c := range checks {
 		if c.Status != "ok" {
@@ -96,18 +98,31 @@ func TestCheckHealthWith_AllHealthy(t *testing.T) {
 	}
 }
 
+func TestCheckHealthWith_NoPfReloadDaemonOnLinux(t *testing.T) {
+	d := allHealthy()
+	d.pfReloadDaemonSupported = false
+	checks := checkHealthWith(d, 8443, "1.0.0")
+	for _, c := range checks {
+		if c.Name == "pf_reload_daemon" {
+			t.Errorf("pf_reload_daemon check should not run on non-darwin, got %+v", c)
+		}
+	}
+}
+
 func TestCheckHealthWith_AllBroken(t *testing.T) {
 	d := healthDeps{
-		isRunning:               func() bool { return false },
-		installedBinaryPath:     func() string { return "" },
-		runningRouterVersion:    func() string { return "" },
-		runningPID:              func() int { return 0 },
-		isPortForwardConfigured: func() bool { return false },
-		checkPortForward:        fakePF(false, false, false, "not configured"),
-		dialTimeout:             fakeDial(false),
-		httpProbe:               fakeHTTP(0, fmt.Errorf("connection refused")),
-		executable:              func() (string, error) { return "/usr/local/bin/gtl", nil },
-		processOnPort:           func(int) processInfo { return processInfo{} },
+		isRunning:                  func() bool { return false },
+		installedBinaryPath:        func() string { return "" },
+		runningRouterVersion:       func() string { return "" },
+		runningPID:                 func() int { return 0 },
+		isPortForwardConfigured:    func() bool { return false },
+		checkPortForward:           fakePF(false, false, false, "not configured"),
+		dialTimeout:                fakeDial(false),
+		httpProbe:                  fakeHTTP(0, fmt.Errorf("connection refused")),
+		executable:                 func() (string, error) { return "/usr/local/bin/gtl", nil },
+		processOnPort:              func(int) processInfo { return processInfo{} },
+		isPfReloadDaemonInstalled:  func() bool { return false },
+		pfReloadDaemonSupported:    true,
 	}
 
 	checks := checkHealthWith(d, 8443, "1.0.0")
@@ -119,6 +134,7 @@ func TestCheckHealthWith_AllBroken(t *testing.T) {
 		"router_port":       "error",
 		"router_responding": "warn",
 		"port_forwarding":   "warn",
+		"pf_reload_daemon":  "ok", // pf not configured → daemon is n/a
 	}
 	for _, c := range checks {
 		want, ok := expected[c.Name]
@@ -446,6 +462,42 @@ func TestCheckPortForward_KernelStateUnknown_DialFails(t *testing.T) {
 	}
 	if c.Fix != "gtl serve reload-pf" {
 		t.Errorf("expected fix to be 'gtl serve reload-pf', got %q", c.Fix)
+	}
+}
+
+// --- checkPfReloadDaemon ---
+
+func TestCheckPfReloadDaemon_OkWhenInstalled(t *testing.T) {
+	d := allHealthy()
+	c := checkPfReloadDaemon(d)
+	if c.Status != "ok" {
+		t.Errorf("expected ok, got %s (%s)", c.Status, c.Detail)
+	}
+}
+
+func TestCheckPfReloadDaemon_WarnWhenPfConfiguredButDaemonMissing(t *testing.T) {
+	// The exact upgrade path: user has pf rules from v0.40.0 but the
+	// daemon was added in v0.40.1. They need to re-run gtl serve install.
+	d := allHealthy()
+	d.isPfReloadDaemonInstalled = func() bool { return false }
+	c := checkPfReloadDaemon(d)
+	if c.Status != "warn" {
+		t.Errorf("expected warn, got %s", c.Status)
+	}
+	if c.Fix != "gtl serve install" {
+		t.Errorf("expected serve install fix, got %q", c.Fix)
+	}
+}
+
+func TestCheckPfReloadDaemon_OkWhenPfNotConfigured(t *testing.T) {
+	// User chose not to install port forwarding. The daemon would be
+	// pointless — don't nag them about it.
+	d := allHealthy()
+	d.isPortForwardConfigured = func() bool { return false }
+	d.isPfReloadDaemonInstalled = func() bool { return false }
+	c := checkPfReloadDaemon(d)
+	if c.Status != "ok" {
+		t.Errorf("expected ok (n/a), got %s", c.Status)
 	}
 }
 

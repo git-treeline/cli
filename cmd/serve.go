@@ -179,6 +179,14 @@ var serveUninstallCmd = &cobra.Command{
 			}
 		}
 
+		if service.IsPfReloadDaemonInstalled() {
+			if err := service.UninstallPfReloadDaemon(); err != nil {
+				fmt.Fprintln(os.Stderr, style.Warnf("could not remove boot-time pf reloader: %v", err))
+			} else {
+				fmt.Println("Boot-time pf reloader removed.")
+			}
+		}
+
 		if err := proxy.UntrustCA(); err != nil {
 			fmt.Fprintln(os.Stderr, style.Warnf("could not remove CA trust: %v", err))
 		} else {

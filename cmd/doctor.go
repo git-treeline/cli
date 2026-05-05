@@ -439,6 +439,7 @@ func doctorServe() {
 		"router_port":       "Router port",
 		"router_responding": "Router responding",
 		"port_forwarding":   "Port forwarding",
+		"pf_reload_daemon":  "pf reboot survival",
 	}
 
 	checks := service.CheckHealth(port, Version)

@@ -1,3 +1,11 @@
+## [0.40.1]
+
+- **pf rules now survive a reboot.** `gtl serve install` ships a small LaunchDaemon at `/Library/LaunchDaemons/dev.treeline.pfreload.plist` that re-runs `pfctl -ef /etc/pf.conf` at boot. Apple's own pf service loads the rules but does NOT enable pf — without our daemon, the redirect from :443 to the router silently broke after every reboot until the user manually ran `sudo pfctl -ef`. The daemon invokes Apple's signed `/sbin/pfctl` directly (no Treeline binary in the boot path → no notarization or code-signing concerns). `gtl serve uninstall` removes it cleanly.
+- **`gtl doctor` warns when the boot-time pf reloader is missing**, so users upgrading from v0.40.0 see exactly what to run (`gtl serve install`) to get the new daemon.
+- **`gtl serve restart --if-installed`** — tooling-friendly variant that no-ops with exit 0 when the router service has not been installed for the current user.
+- **Brew `post_install` auto-bounces the router on `brew upgrade`.** Wired via the `.goreleaser.yml` `brews.post_install` directive: after the new binary lands at `/opt/homebrew/bin/gtl`, brew runs `gtl serve restart --if-installed`. Users who installed serve get the new code running immediately; first-time installers stay quiet (the `--if-installed` no-op).
+- **`gtl serve status` uses the same kernel-aware port-forwarding check as the doctor.** Previously it read `pf.conf` on disk and lied "active" while pf was actually disabled — the bug that masked the post-reboot outage. Distinguishes "we read pf state and it's disabled" from "we couldn't read pf state without sudo," so we never silently report a false "pf disabled" alarm on macOS Sequoia.
+
 ## [0.40.0]
 
 - **Doctor & serve overhaul** — fixes a stack of issues exposed when a hard reboot dropped pf rules and a `brew upgrade` left the router running an older build. Most-impactful changes:

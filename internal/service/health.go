@@ -27,30 +27,34 @@ type processInfo struct {
 }
 
 type healthDeps struct {
-	isRunning               func() bool
-	installedBinaryPath     func() string
-	runningRouterVersion    func() string
-	runningPID              func() int
-	isPortForwardConfigured func() bool
-	checkPortForward        func(routerPort int) PortForwardStatus
-	dialTimeout             func(network, address string, timeout time.Duration) (net.Conn, error)
-	httpProbe               func(url string, timeout time.Duration) (int, error)
-	executable              func() (string, error)
-	processOnPort           func(port int) processInfo
+	isRunning                  func() bool
+	installedBinaryPath        func() string
+	runningRouterVersion       func() string
+	runningPID                 func() int
+	isPortForwardConfigured    func() bool
+	checkPortForward           func(routerPort int) PortForwardStatus
+	dialTimeout                func(network, address string, timeout time.Duration) (net.Conn, error)
+	httpProbe                  func(url string, timeout time.Duration) (int, error)
+	executable                 func() (string, error)
+	processOnPort              func(port int) processInfo
+	isPfReloadDaemonInstalled  func() bool
+	pfReloadDaemonSupported    bool
 }
 
 func defaultHealthDeps() healthDeps {
 	return healthDeps{
-		isRunning:               IsRunning,
-		installedBinaryPath:     InstalledBinaryPath,
-		runningRouterVersion:    RunningRouterVersion,
-		runningPID:              RunningPID,
-		isPortForwardConfigured: IsPortForwardConfigured,
-		checkPortForward:        CheckPortForward,
-		dialTimeout:             net.DialTimeout,
-		httpProbe:               httpProbe,
-		executable:              os.Executable,
-		processOnPort:           processOnPort,
+		isRunning:                  IsRunning,
+		installedBinaryPath:        InstalledBinaryPath,
+		runningRouterVersion:       RunningRouterVersion,
+		runningPID:                 RunningPID,
+		isPortForwardConfigured:    IsPortForwardConfigured,
+		checkPortForward:           CheckPortForward,
+		dialTimeout:                net.DialTimeout,
+		httpProbe:                  httpProbe,
+		executable:                 os.Executable,
+		processOnPort:              processOnPort,
+		isPfReloadDaemonInstalled:  IsPfReloadDaemonInstalled,
+		pfReloadDaemonSupported:    runtime.GOOS == "darwin",
 	}
 }
 
@@ -68,8 +72,39 @@ func checkHealthWith(d healthDeps, routerPort int, cliVersion string) []HealthCh
 	checks = append(checks, checkRouterListening(d, routerPort))
 	checks = append(checks, checkRouterResponding(d, routerPort))
 	checks = append(checks, checkPortForward(d, routerPort))
+	if d.pfReloadDaemonSupported {
+		checks = append(checks, checkPfReloadDaemon(d))
+	}
 
 	return checks
+}
+
+// checkPfReloadDaemon flags the absence of the boot-time pf reloader when
+// port forwarding is otherwise configured. Without the daemon, pf rules
+// drop on every reboot and the user has to manually run
+// `gtl serve reload-pf`. macOS-only.
+func checkPfReloadDaemon(d healthDeps) HealthCheck {
+	if !d.isPortForwardConfigured() {
+		// No pf rules to keep alive across reboots — daemon is irrelevant.
+		return HealthCheck{
+			Name:   "pf_reload_daemon",
+			Status: "ok",
+			Detail: "n/a (port forwarding not configured)",
+		}
+	}
+	if !d.isPfReloadDaemonInstalled() {
+		return HealthCheck{
+			Name:   "pf_reload_daemon",
+			Status: "warn",
+			Detail: "missing — pf rules will drop on reboot",
+			Fix:    "gtl serve install",
+		}
+	}
+	return HealthCheck{
+		Name:   "pf_reload_daemon",
+		Status: "ok",
+		Detail: "installed (pf rules survive reboot)",
+	}
 }
 
 func checkServiceRegistered(d healthDeps) HealthCheck {
