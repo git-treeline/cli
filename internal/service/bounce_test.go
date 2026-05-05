@@ -322,6 +322,27 @@ func TestRunningPIDDarwin_ParsesLaunchctlOutput(t *testing.T) {
 	}
 }
 
+func TestIsInstalled_DarwinReturnsTrueWhenPlistExists(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("darwin-only")
+	}
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	if IsInstalled() {
+		t.Fatal("expected IsInstalled=false with no plist")
+	}
+	plist := PlistPath()
+	if err := os.MkdirAll(filepath.Dir(plist), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plist, []byte("<plist/>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !IsInstalled() {
+		t.Fatal("expected IsInstalled=true once plist exists")
+	}
+}
+
 func TestRunningPIDDarwin_ZeroOnError(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("darwin-only")

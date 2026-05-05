@@ -238,6 +238,16 @@ func runServeInstall(uc *config.UserConfig) error {
 		fmt.Fprintln(os.Stderr, style.Warnf("port forwarding skipped: %v", err))
 		fmt.Fprintln(os.Stderr, style.Dimf("  URLs will require a port number: https://{branch}.%s:%d", domain, port))
 		fmt.Println()
+	} else {
+		// macOS resets pf state on reboot — without our LaunchDaemon, the
+		// rdr rule is on disk but pf is disabled until the user manually
+		// runs `gtl serve reload-pf`. The daemon makes the redirect
+		// survive reboots without intervention. macOS-only; no-op on Linux.
+		if err := service.InstallPfReloadDaemon(); err != nil {
+			fmt.Fprintln(os.Stderr, style.Warnf("boot-time pf reloader install skipped: %v", err))
+			fmt.Fprintln(os.Stderr, style.Dimf("  After reboot, run 'gtl serve reload-pf' manually."))
+			fmt.Println()
+		}
 	}
 
 	if _, err := service.Install(gtlPath, port); err != nil {

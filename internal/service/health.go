@@ -27,30 +27,34 @@ type processInfo struct {
 }
 
 type healthDeps struct {
-	isRunning               func() bool
-	installedBinaryPath     func() string
-	runningRouterVersion    func() string
-	runningPID              func() int
-	isPortForwardConfigured func() bool
-	checkPortForward        func(routerPort int) PortForwardStatus
-	dialTimeout             func(network, address string, timeout time.Duration) (net.Conn, error)
-	httpProbe               func(url string, timeout time.Duration) (int, error)
-	executable              func() (string, error)
-	processOnPort           func(port int) processInfo
+	isRunning                  func() bool
+	installedBinaryPath        func() string
+	runningRouterVersion       func() string
+	runningPID                 func() int
+	isPortForwardConfigured    func() bool
+	checkPortForward           func(routerPort int) PortForwardStatus
+	dialTimeout                func(network, address string, timeout time.Duration) (net.Conn, error)
+	httpProbe                  func(url string, timeout time.Duration) (int, error)
+	executable                 func() (string, error)
+	processOnPort              func(port int) processInfo
+	isPfReloadDaemonInstalled  func() bool
+	pfReloadDaemonSupported    bool
 }
 
 func defaultHealthDeps() healthDeps {
 	return healthDeps{
-		isRunning:               IsRunning,
-		installedBinaryPath:     InstalledBinaryPath,
-		runningRouterVersion:    RunningRouterVersion,
-		runningPID:              RunningPID,
-		isPortForwardConfigured: IsPortForwardConfigured,
-		checkPortForward:        CheckPortForward,
-		dialTimeout:             net.DialTimeout,
-		httpProbe:               httpProbe,
-		executable:              os.Executable,
-		processOnPort:           processOnPort,
+		isRunning:                  IsRunning,
+		installedBinaryPath:        InstalledBinaryPath,
+		runningRouterVersion:       RunningRouterVersion,
+		runningPID:                 RunningPID,
+		isPortForwardConfigured:    IsPortForwardConfigured,
+		checkPortForward:           CheckPortForward,
+		dialTimeout:                net.DialTimeout,
+		httpProbe:                  httpProbe,
+		executable:                 os.Executable,
+		processOnPort:              processOnPort,
+		isPfReloadDaemonInstalled:  IsPfReloadDaemonInstalled,
+		pfReloadDaemonSupported:    runtime.GOOS == "darwin",
 	}
 }
 
@@ -68,8 +72,39 @@ func checkHealthWith(d healthDeps, routerPort int, cliVersion string) []HealthCh
 	checks = append(checks, checkRouterListening(d, routerPort))
 	checks = append(checks, checkRouterResponding(d, routerPort))
 	checks = append(checks, checkPortForward(d, routerPort))
+	if d.pfReloadDaemonSupported {
+		checks = append(checks, checkPfReloadDaemon(d))
+	}
 
 	return checks
+}
+
+// checkPfReloadDaemon flags the absence of the boot-time pf reloader when
+// port forwarding is otherwise configured. Without the daemon, pf rules
+// drop on every reboot and the user has to manually run
+// `gtl serve reload-pf`. macOS-only.
+func checkPfReloadDaemon(d healthDeps) HealthCheck {
+	if !d.isPortForwardConfigured() {
+		// No pf rules to keep alive across reboots — daemon is irrelevant.
+		return HealthCheck{
+			Name:   "pf_reload_daemon",
+			Status: "ok",
+			Detail: "n/a (port forwarding not configured)",
+		}
+	}
+	if !d.isPfReloadDaemonInstalled() {
+		return HealthCheck{
+			Name:   "pf_reload_daemon",
+			Status: "warn",
+			Detail: "missing — pf rules will drop on reboot",
+			Fix:    "gtl serve install",
+		}
+	}
+	return HealthCheck{
+		Name:   "pf_reload_daemon",
+		Status: "ok",
+		Detail: "installed (pf rules survive reboot)",
+	}
 }
 
 func checkServiceRegistered(d healthDeps) HealthCheck {
@@ -266,7 +301,11 @@ func checkPortForward(d healthDeps, routerPort int) HealthCheck {
 			Fix:    "gtl serve install",
 		}
 	}
-	if !st.LoadedInKernel {
+	// pf disabled is a definite failure — rules can't apply. The "couldn't
+	// even read pf state" case falls through to a port 443 dial below as
+	// the authoritative signal. Linux ignores PfStateKnown (it's macOS-
+	// specific) but its branch sets KernelStateKnown=true on success.
+	if st.PfStateKnown && !st.PfEnabled {
 		return HealthCheck{
 			Name:   "port_forwarding",
 			Status: "error",
@@ -274,17 +313,33 @@ func checkPortForward(d healthDeps, routerPort int) HealthCheck {
 			Fix:    "gtl serve reload-pf",
 		}
 	}
-	// Rules are loaded — verify port 443 actually accepts connections.
+	// We know pf is enabled (or its state is unknown) — verify port 443
+	// actually accepts connections. This dial is the most reliable signal
+	// when we couldn't read the kernel ruleset without sudo.
 	conn, err := d.dialTimeout("tcp", "127.0.0.1:443", 2*time.Second)
 	if err != nil {
+		// Port 443 not reachable. If we read the kernel ruleset and it
+		// didn't show our rule, the diagnosis is "rule missing"; otherwise
+		// it's "loaded but unreachable" — both fix with reload-pf.
+		detail := "rule loaded but port 443 not reachable"
+		if st.KernelStateKnown && !st.LoadedInKernel {
+			detail = st.Detail
+		}
 		return HealthCheck{
 			Name:   "port_forwarding",
 			Status: "error",
-			Detail: "rule loaded but port 443 not reachable",
+			Detail: detail,
 			Fix:    "gtl serve reload-pf",
 		}
 	}
 	_ = conn.Close()
+	if !st.KernelStateKnown {
+		return HealthCheck{
+			Name:   "port_forwarding",
+			Status: "ok",
+			Detail: fmt.Sprintf("443 → %d (kernel state not readable without sudo, but the port answers)", routerPort),
+		}
+	}
 	return HealthCheck{
 		Name:   "port_forwarding",
 		Status: "ok",
