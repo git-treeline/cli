@@ -37,6 +37,9 @@ func routeHostnames(baseDomain string) []string {
 func init() {
 	serveCmd.AddCommand(serveInstallCmd)
 	serveCmd.AddCommand(serveUninstallCmd)
+	serveRestartCmd.Flags().BoolVar(&serveRestartReloadPF, "pf", false, "Also reload pf rules (port forwarding)")
+	serveCmd.AddCommand(serveRestartCmd)
+	serveCmd.AddCommand(serveReloadPFCmd)
 	serveCmd.AddCommand(serveStatusCmd)
 	serveCmd.AddCommand(serveRunCmd)
 	serveHostsCmd.AddCommand(serveHostsSyncCmd)
@@ -45,6 +48,46 @@ func init() {
 	serveAliasCmd.Flags().BoolVar(&serveAliasRemove, "remove", false, "Remove the named alias")
 	serveCmd.AddCommand(serveAliasCmd)
 	rootCmd.AddCommand(serveCmd)
+}
+
+var serveRestartReloadPF bool
+
+var serveRestartCmd = &cobra.Command{
+	Use:   "restart",
+	Short: "Restart the router daemon (kickstart)",
+	Long: `Restart the running router so it picks up changes such as a Homebrew
+upgrade of the gtl binary. Cheaper and faster than 'gtl serve install' —
+no sudo, no plist rewrite, no pf reload.
+
+Pass --pf to also reload port-forwarding rules (useful after a reboot
+that dropped them).`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+			return cliErr(cmd, &CliError{
+				Message: fmt.Sprintf("gtl serve restart requires macOS or Linux (detected %s).", runtime.GOOS),
+			})
+		}
+		fmt.Println(style.Actionf("Restarting router service..."))
+		if err := service.Bounce(service.DefaultBounceTimeout); err != nil {
+			return cliErr(cmd, &CliError{
+				Message: fmt.Sprintf("Could not restart router: %v", err),
+				Hint:    "If this persists, run 'gtl serve install' for a full reset.",
+			})
+		}
+		fmt.Println(style.Dimf("Router restarted (running %s).", Version))
+
+		if serveRestartReloadPF {
+			fmt.Println(style.Actionf("Reloading pf rules..."))
+			if err := service.ReloadPortForward(); err != nil {
+				return cliErr(cmd, &CliError{
+					Message: fmt.Sprintf("Could not reload pf: %v", err),
+					Hint:    "Run 'gtl serve install' to repair the pf configuration.",
+				})
+			}
+			fmt.Println(style.Dimf("pf rules reloaded."))
+		}
+		return nil
+	},
 }
 
 var serveCmd = &cobra.Command{
@@ -263,6 +306,33 @@ func warnRouterVersionMismatch() {
 	}
 	fmt.Fprintln(os.Stderr, style.Warnf("Router is running %s but CLI is %s.", running, Version))
 	fmt.Fprintln(os.Stderr, style.Dimf("  Run 'gtl serve install' to update the router."))
+}
+
+var serveReloadPFCmd = &cobra.Command{
+	Use:   "reload-pf",
+	Short: "Reload port-forwarding rules into the running kernel",
+	Long: `Re-applies the port-forwarding rules from /etc/pf.conf into pf's running
+ruleset. Useful after a reboot or network state change that left pf.conf on
+disk but cleared the kernel ruleset (a common cause of "port 443 not
+reachable" with the router otherwise healthy).
+
+Requires sudo on macOS.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+			return cliErr(cmd, &CliError{
+				Message: fmt.Sprintf("gtl serve reload-pf requires macOS or Linux (detected %s).", runtime.GOOS),
+			})
+		}
+		fmt.Println(style.Actionf("Reloading pf rules..."))
+		if err := service.ReloadPortForward(); err != nil {
+			return cliErr(cmd, &CliError{
+				Message: fmt.Sprintf("Could not reload pf: %v", err),
+				Hint:    "Run 'gtl serve install' for a full reset.",
+			})
+		}
+		fmt.Println(style.Dimf("pf rules reloaded."))
+		return nil
+	},
 }
 
 var serveAliasRemove bool

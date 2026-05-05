@@ -20,10 +20,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var doctorJSON bool
+var (
+	doctorJSON bool
+	doctorFix  bool
+)
 
 func init() {
 	doctorCmd.Flags().BoolVar(&doctorJSON, "json", false, "Output as JSON")
+	doctorCmd.Flags().BoolVar(&doctorFix, "fix", false, "Run auto-remediation for detected issues (router restart, pf reload, registry prune)")
 	rootCmd.AddCommand(doctorCmd)
 }
 
@@ -48,10 +52,13 @@ var doctorCmd = &cobra.Command{
 		doctorProjectDrift(absPath)
 		doctorPortConfig()
 		doctorAllocation(absPath)
-		doctorRuntime(absPath)
+		doctorRuntime(absPath, pc)
 		doctorServe()
 		doctorDiagnostics(det)
-
+		doctorRequestFlow(absPath, pc)
+		if doctorFix {
+			return doctorAutoFix(absPath, pc)
+		}
 		return nil
 	},
 }
@@ -271,7 +278,7 @@ func doctorAllocation(absPath string) {
 	}
 }
 
-func doctorRuntime(absPath string) {
+func doctorRuntime(absPath string, pc *config.ProjectConfig) {
 	fmt.Println("\nRuntime")
 
 	reg := registry.New("")
@@ -284,6 +291,9 @@ func doctorRuntime(absPath string) {
 				doctorLine(fmt.Sprintf("Port %d", ports[0]), "listening")
 			} else {
 				doctorLine(fmt.Sprintf("Port %d", ports[0]), "not listening")
+				if sc := pc.StartCommand(); sc != "" {
+					fmt.Printf("  fix: %s\n", sc)
+				}
 			}
 		}
 	}
@@ -297,6 +307,125 @@ func doctorRuntime(absPath string) {
 	}
 }
 
+// doctorRequestFlow walks the request chain a worktree URL takes (app port
+// → router → router has the route → port forwarding → CA) and surfaces the
+// FIRST failing link as the actionable diagnosis. Everything else is noise
+// when the first link is broken.
+func doctorRequestFlow(absPath string, pc *config.ProjectConfig) {
+	fmt.Println("\nRequest flow")
+
+	step := firstFailingStep(absPath, pc)
+	if step == nil {
+		doctorLine("Status", "✓ all links healthy")
+		return
+	}
+	doctorLine("Blocked at", "✗ "+step.label)
+	if step.detail != "" {
+		fmt.Printf("    %s\n", step.detail)
+	}
+	if step.fix != "" {
+		fmt.Printf("    fix: %s\n", step.fix)
+	}
+}
+
+type flowStep struct {
+	label  string
+	detail string
+	fix    string
+}
+
+// flowInput is the snapshot of state evaluateRequestFlow examines. Extracted
+// so the orchestration logic can be tested without standing up a real
+// router / launchd / pf / CA.
+type flowInput struct {
+	allocatedPorts  []int
+	appListening    bool
+	startCommand    string
+	serviceChecks   []service.HealthCheck
+	caInstalled     bool
+}
+
+func firstFailingStep(absPath string, pc *config.ProjectConfig) *flowStep {
+	uc := config.LoadUserConfig("")
+	reg := registry.New("")
+	alloc := reg.Find(absPath)
+
+	in := flowInput{
+		startCommand:  pc.StartCommand(),
+		serviceChecks: service.CheckHealth(uc.RouterPort(), Version),
+		caInstalled:   proxy.IsCAInstalled(),
+	}
+	if alloc != nil {
+		in.allocatedPorts = format.GetPorts(format.Allocation(alloc))
+		if len(in.allocatedPorts) > 0 {
+			in.appListening = allocator.CheckPortsListening(in.allocatedPorts)
+		}
+	}
+	return evaluateRequestFlow(in)
+}
+
+func evaluateRequestFlow(in flowInput) *flowStep {
+	// 1. App listening on its allocated port?
+	if len(in.allocatedPorts) > 0 && !in.appListening {
+		fix := "start the dev server"
+		if in.startCommand != "" {
+			fix = in.startCommand
+		}
+		return &flowStep{
+			label:  fmt.Sprintf("app on :%d", in.allocatedPorts[0]),
+			detail: "the dev server is not listening — the router has nowhere to forward to",
+			fix:    fix,
+		}
+	}
+
+	// 2. Router service registered + listening + responding.
+	for _, c := range in.serviceChecks {
+		if c.Name == "port_forwarding" {
+			continue // handled below
+		}
+		if c.Status == "error" || (c.Status == "warn" && c.Name == "router_responding") {
+			return &flowStep{
+				label:  c.Name,
+				detail: c.Detail,
+				fix:    c.Fix,
+			}
+		}
+	}
+	// router_version mismatch isn't a hard block but is the most likely
+	// surprise after a brew upgrade — call it out specifically.
+	for _, c := range in.serviceChecks {
+		if c.Name == "router_version" && c.Status == "warn" {
+			return &flowStep{
+				label:  "router_version",
+				detail: c.Detail,
+				fix:    "gtl serve restart",
+			}
+		}
+	}
+
+	// 3. Port forwarding loaded in kernel.
+	for _, c := range in.serviceChecks {
+		if c.Name == "port_forwarding" && c.Status != "ok" {
+			return &flowStep{
+				label:  "port_forwarding",
+				detail: c.Detail,
+				fix:    c.Fix,
+			}
+		}
+	}
+
+	// 4. CA cert installed and not expired (browser will warn otherwise,
+	// but the request still reaches the router — soft warning only).
+	if !in.caInstalled {
+		return &flowStep{
+			label:  "ca_cert",
+			detail: "CA not installed — browsers will reject HTTPS",
+			fix:    "gtl serve install",
+		}
+	}
+	return nil
+}
+
 func doctorServe() {
 	uc := config.LoadUserConfig("")
 	port := uc.RouterPort()
@@ -304,10 +433,12 @@ func doctorServe() {
 	fmt.Println("\nServe")
 
 	displayNames := map[string]string{
-		"service":         "Service",
-		"binary":          "Binary",
-		"router_port":     "Router port",
-		"port_forwarding": "Port forwarding",
+		"service":           "Service",
+		"binary":            "Binary",
+		"router_version":    "Router version",
+		"router_port":       "Router port",
+		"router_responding": "Router responding",
+		"port_forwarding":   "Port forwarding",
 	}
 
 	checks := service.CheckHealth(port, Version)
@@ -367,6 +498,111 @@ func doctorDiagnostics(det *detect.Result) {
 			}
 		}
 	}
+}
+
+// fixAction names a remediation that doctor --fix can apply automatically.
+type fixAction string
+
+const (
+	fixServeRestart fixAction = "gtl serve restart"
+	fixReloadPF     fixAction = "gtl serve reload-pf"
+	fixPrune        fixAction = "gtl prune"
+)
+
+// planAutoFix maps the doctor's findings to a deduplicated, ordered list of
+// actions to run. Pure function for testability — the caller actually
+// executes the actions.
+func planAutoFix(in flowInput, registryHasOrphans bool) []fixAction {
+	seen := map[fixAction]bool{}
+	var plan []fixAction
+	add := func(a fixAction) {
+		if !seen[a] {
+			seen[a] = true
+			plan = append(plan, a)
+		}
+	}
+
+	// First failing link in the request flow drives most fixes.
+	step := evaluateRequestFlow(in)
+	if step != nil {
+		switch step.fix {
+		case "gtl serve restart":
+			add(fixServeRestart)
+		case "gtl serve reload-pf":
+			add(fixReloadPF)
+		}
+	}
+	// Independent of the flow chain: a stale router-version warning, even if
+	// the router is responding, deserves a restart.
+	for _, c := range in.serviceChecks {
+		if c.Name == "router_version" && c.Status == "warn" {
+			add(fixServeRestart)
+		}
+	}
+	// Registry orphans (entries whose worktree directory is gone) are safe
+	// to prune.
+	if registryHasOrphans {
+		add(fixPrune)
+	}
+	return plan
+}
+
+func doctorAutoFix(absPath string, pc *config.ProjectConfig) error {
+	in := buildFlowInput(absPath, pc)
+	plan := planAutoFix(in, shouldUseRegistryRepair())
+
+	fmt.Println("\nAuto-fix")
+	if len(plan) == 0 {
+		doctorLine("Status", "nothing to fix automatically")
+		return nil
+	}
+
+	for _, a := range plan {
+		fmt.Printf("  → %s\n", a)
+		if err := runAutoFix(a); err != nil {
+			fmt.Fprintf(os.Stderr, "  ✗ %v\n", err)
+			return err
+		}
+		fmt.Println("    done.")
+	}
+	return nil
+}
+
+func buildFlowInput(absPath string, pc *config.ProjectConfig) flowInput {
+	uc := config.LoadUserConfig("")
+	reg := registry.New("")
+	alloc := reg.Find(absPath)
+	in := flowInput{
+		startCommand:  pc.StartCommand(),
+		serviceChecks: service.CheckHealth(uc.RouterPort(), Version),
+		caInstalled:   proxy.IsCAInstalled(),
+	}
+	if alloc != nil {
+		in.allocatedPorts = format.GetPorts(format.Allocation(alloc))
+		if len(in.allocatedPorts) > 0 {
+			in.appListening = allocator.CheckPortsListening(in.allocatedPorts)
+		}
+	}
+	return in
+}
+
+// runAutoFixFn is the indirection point for tests — replaces the real
+// remediation actions with no-ops.
+var runAutoFixFn = runAutoFixDefault
+
+func runAutoFix(a fixAction) error { return runAutoFixFn(a) }
+
+func runAutoFixDefault(a fixAction) error {
+	switch a {
+	case fixServeRestart:
+		return service.Bounce(service.DefaultBounceTimeout)
+	case fixReloadPF:
+		return service.ReloadPortForward()
+	case fixPrune:
+		_, err := registry.New("").Prune()
+		return err
+	}
+	return fmt.Errorf("unknown fix action: %s", a)
 }
 
 func doctorLine(label, value string) {

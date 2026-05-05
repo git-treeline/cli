@@ -289,20 +289,18 @@ func (r *Registry) Prune() (int, error) {
 }
 
 // PruneStale removes allocations where the directory doesn't exist OR the
-// directory exists but is not a registered git worktree.
+// directory exists, is a git worktree (not a standalone clone), and is not
+// registered with its parent repo's worktree list.
+//
+// Standalone clones are explicitly preserved: they are full repositories
+// not tied to a parent's worktree list, and the older check incorrectly
+// flagged them as stale (this is what nuked Conductor workspaces).
 func (r *Registry) PruneStale() (int, error) {
-	knownWorktrees := listGitWorktrees()
-
 	count := 0
 	err := r.withLock(func(data *RegistryData) {
 		filtered := make([]Allocation, 0, len(data.Allocations))
 		for _, a := range data.Allocations {
-			wt := GetString(a, "worktree")
-			if _, err := os.Stat(wt); err != nil {
-				count++
-				continue
-			}
-			if knownWorktrees != nil && !knownWorktrees[wt] {
+			if isStaleEntry(a) {
 				count++
 				continue
 			}
@@ -313,8 +311,43 @@ func (r *Registry) PruneStale() (int, error) {
 	return count, err
 }
 
-func listGitWorktrees() map[string]bool {
-	out, err := exec.Command("git", "worktree", "list", "--porcelain").Output()
+// isStaleEntry returns true when the registry entry should be removed by
+// PruneStale. Stale = directory missing, OR the entry is a git worktree
+// (not a standalone clone) that no longer appears in the parent repo's
+// worktree list.
+func isStaleEntry(a Allocation) bool {
+	wt := GetString(a, "worktree")
+	if wt == "" {
+		return false
+	}
+	info, err := os.Stat(wt)
+	if err != nil || !info.IsDir() {
+		return true
+	}
+	gitMarker, err := os.Stat(filepath.Join(wt, ".git"))
+	if err != nil {
+		// No .git at all — directory is not a git checkout; treat as stale.
+		return true
+	}
+	if gitMarker.IsDir() {
+		// Standalone clone — directory exists, full repo. Keep.
+		return false
+	}
+	// Git worktree (.git is a pointer file). Cross-reference parent's
+	// worktree list. If the parent can't be queried, prefer to keep the
+	// entry rather than nuke it.
+	known := listGitWorktreesFor(wt)
+	if known == nil {
+		return false
+	}
+	return !known[wt]
+}
+
+// listGitWorktreesFor returns the worktrees registered with the parent of
+// the given worktree directory (`git -C <dir> worktree list --porcelain`).
+// Returns nil if the command fails so callers can default to "keep".
+func listGitWorktreesFor(dir string) map[string]bool {
+	out, err := exec.Command("git", "-C", dir, "worktree", "list", "--porcelain").Output()
 	if err != nil {
 		return nil
 	}

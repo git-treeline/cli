@@ -2,7 +2,9 @@ package service
 
 import (
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,14 +21,22 @@ type HealthCheck struct {
 	Fix    string `json:"fix,omitempty"`
 }
 
+type processInfo struct {
+	Name string
+	PID  int
+}
+
 type healthDeps struct {
 	isRunning               func() bool
 	installedBinaryPath     func() string
 	runningRouterVersion    func() string
+	runningPID              func() int
 	isPortForwardConfigured func() bool
+	checkPortForward        func(routerPort int) PortForwardStatus
 	dialTimeout             func(network, address string, timeout time.Duration) (net.Conn, error)
+	httpProbe               func(url string, timeout time.Duration) (int, error)
 	executable              func() (string, error)
-	processOnPort           func(port int) string
+	processOnPort           func(port int) processInfo
 }
 
 func defaultHealthDeps() healthDeps {
@@ -34,8 +44,11 @@ func defaultHealthDeps() healthDeps {
 		isRunning:               IsRunning,
 		installedBinaryPath:     InstalledBinaryPath,
 		runningRouterVersion:    RunningRouterVersion,
+		runningPID:              RunningPID,
 		isPortForwardConfigured: IsPortForwardConfigured,
+		checkPortForward:        CheckPortForward,
 		dialTimeout:             net.DialTimeout,
+		httpProbe:               httpProbe,
 		executable:              os.Executable,
 		processOnPort:           processOnPort,
 	}
@@ -53,6 +66,7 @@ func checkHealthWith(d healthDeps, routerPort int, cliVersion string) []HealthCh
 	checks = append(checks, checkBinaryMatch(d))
 	checks = append(checks, checkRouterVersion(d, cliVersion))
 	checks = append(checks, checkRouterListening(d, routerPort))
+	checks = append(checks, checkRouterResponding(d, routerPort))
 	checks = append(checks, checkPortForward(d, routerPort))
 
 	return checks
@@ -149,8 +163,8 @@ func checkRouterListening(d healthDeps, port int) HealthCheck {
 			return HealthCheck{
 				Name:   "router_port",
 				Status: "error",
-			Detail: fmt.Sprintf("service registered but port %d not listening", port),
-			Fix:    "gtl serve install",
+				Detail: fmt.Sprintf("service registered but port %d not listening", port),
+				Fix:    "gtl serve restart",
 			}
 		}
 		return HealthCheck{
@@ -162,25 +176,89 @@ func checkRouterListening(d healthDeps, port int) HealthCheck {
 	}
 	_ = conn.Close()
 
-	proc := d.processOnPort(port)
-	if proc != "" && !strings.Contains(proc, "gtl") {
+	// Compare the listener's PID with the PID launchd/systemd has registered
+	// for our service. If they match, this is our router — full stop.
+	// If they differ, something else holds the port (or our service crashed
+	// and a stale process is squatting). The previous check substring-
+	// matched the process name against "gtl", which produced false alarms
+	// when the binary was named "git-treeline" — fixed.
+	listener := d.processOnPort(port)
+	registered := d.runningPID()
+	if listener.Name == "" {
+		// Couldn't read from lsof; fall back to "ok" since we did dial.
+		return HealthCheck{
+			Name:   "router_port",
+			Status: "ok",
+			Detail: fmt.Sprintf("listening on %d", port),
+		}
+	}
+	if registered > 0 && listener.PID == registered {
+		return HealthCheck{
+			Name:   "router_port",
+			Status: "ok",
+			Detail: fmt.Sprintf("listening on %d (pid %d)", port, listener.PID),
+		}
+	}
+	if registered > 0 && listener.PID != registered {
 		return HealthCheck{
 			Name:   "router_port",
 			Status: "warn",
-			Detail: fmt.Sprintf("port %d occupied by: %s", port, proc),
-			Fix:    "kill the rogue process, then gtl serve install",
+			Detail: fmt.Sprintf("port %d occupied by %s (pid %d), but launchd has %d for our service",
+				port, listener.Name, listener.PID, registered),
+			Fix: "gtl serve restart",
 		}
 	}
-
+	// registered == 0 means we couldn't read launchd's PID — fall back to a
+	// loose name check rather than crying wolf.
+	if !looksLikeRouter(listener.Name) {
+		return HealthCheck{
+			Name:   "router_port",
+			Status: "warn",
+			Detail: fmt.Sprintf("port %d occupied by %s (pid %d) — does not look like our router", port, listener.Name, listener.PID),
+			Fix:    "investigate the process, then 'gtl serve install'",
+		}
+	}
 	return HealthCheck{
 		Name:   "router_port",
 		Status: "ok",
-		Detail: fmt.Sprintf("listening on %d", port),
+		Detail: fmt.Sprintf("listening on %d (pid %d)", port, listener.PID),
+	}
+}
+
+// checkRouterResponding does an end-to-end liveness probe: a real HTTP
+// request to the router's health endpoint. A listening socket is necessary
+// but not sufficient — the router could be deadlocked or panicking on
+// every request. Treats any 2xx/3xx/4xx as alive (the router answered).
+// 5xx or transport error → warn.
+func checkRouterResponding(d healthDeps, port int) HealthCheck {
+	url := fmt.Sprintf("http://127.0.0.1:%d/_treeline/health", port)
+	status, err := d.httpProbe(url, 2*time.Second)
+	if err != nil {
+		return HealthCheck{
+			Name:   "router_responding",
+			Status: "warn",
+			Detail: fmt.Sprintf("liveness probe failed: %v", err),
+			Fix:    "gtl serve restart",
+		}
+	}
+	if status >= 500 {
+		return HealthCheck{
+			Name:   "router_responding",
+			Status: "warn",
+			Detail: fmt.Sprintf("router answered with %d", status),
+			Fix:    "gtl serve restart",
+		}
+	}
+	return HealthCheck{
+		Name:   "router_responding",
+		Status: "ok",
+		Detail: fmt.Sprintf("HTTP %d from /_treeline/health", status),
 	}
 }
 
 func checkPortForward(d healthDeps, routerPort int) HealthCheck {
-	if !d.isPortForwardConfigured() {
+	st := d.checkPortForward(routerPort)
+	if !st.ConfiguredOnDisk {
 		return HealthCheck{
 			Name:   "port_forwarding",
 			Status: "warn",
@@ -188,51 +266,80 @@ func checkPortForward(d healthDeps, routerPort int) HealthCheck {
 			Fix:    "gtl serve install",
 		}
 	}
-
+	if !st.LoadedInKernel {
+		return HealthCheck{
+			Name:   "port_forwarding",
+			Status: "error",
+			Detail: st.Detail,
+			Fix:    "gtl serve reload-pf",
+		}
+	}
+	// Rules are loaded — verify port 443 actually accepts connections.
 	conn, err := d.dialTimeout("tcp", "127.0.0.1:443", 2*time.Second)
 	if err != nil {
 		return HealthCheck{
 			Name:   "port_forwarding",
 			Status: "error",
-			Detail: "configured in pf.conf but port 443 not reachable — rules may need reload",
-			Fix:    "gtl serve install",
+			Detail: "rule loaded but port 443 not reachable",
+			Fix:    "gtl serve reload-pf",
 		}
 	}
 	_ = conn.Close()
-
 	return HealthCheck{
 		Name:   "port_forwarding",
 		Status: "ok",
-		Detail: fmt.Sprintf("443 → %d", routerPort),
+		Detail: fmt.Sprintf("443 → %d (loaded in kernel)", routerPort),
 	}
 }
 
-// processOnPort returns a description of the process listening on the given
-// TCP port, or "" if it can't be determined.
-func processOnPort(port int) string {
+// looksLikeRouter is used as a soft fallback when we couldn't read launchd's
+// PID (e.g. on Linux when the test environment lacks systemctl). Treats any
+// process name containing "gtl", "git-treeline", or "treeline" as plausibly
+// ours. The previous code only matched "gtl", which produced false alarms
+// for the "git-treeline" binary.
+func looksLikeRouter(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.Contains(lower, "gtl") ||
+		strings.Contains(lower, "git-treeline") ||
+		strings.Contains(lower, "treeline")
+}
+
+// processOnPort returns name + PID of the process listening on the given
+// TCP port, or zero processInfo if it can't be determined.
+func processOnPort(port int) processInfo {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-		return ""
+		return processInfo{}
 	}
 	out, err := exec.Command("lsof", "-i", fmt.Sprintf("TCP:%d", port),
 		"-sTCP:LISTEN", "-n", "-P", "-F", "cn").Output()
 	if err != nil {
-		return ""
+		return processInfo{}
 	}
 
-	var name, pid string
+	var info processInfo
 	for _, line := range strings.Split(string(out), "\n") {
 		if strings.HasPrefix(line, "c") {
-			name = line[1:]
+			info.Name = line[1:]
 		}
 		if strings.HasPrefix(line, "p") {
-			pid = line[1:]
+			var pid int
+			if _, err := fmt.Sscanf(line[1:], "%d", &pid); err == nil {
+				info.PID = pid
+			}
 		}
 	}
-	if name == "" {
-		return ""
+	return info
+}
+
+// httpProbe is the default HTTP liveness implementation. Returns the HTTP
+// status code, or an error if the request couldn't complete.
+func httpProbe(url string, timeout time.Duration) (int, error) {
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Get(url)
+	if err != nil {
+		return 0, err
 	}
-	if pid != "" {
-		return fmt.Sprintf("%s (pid %s)", name, pid)
-	}
-	return name
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode, nil
 }

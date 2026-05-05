@@ -47,7 +47,10 @@ func UninstallPortForward() error {
 	}
 }
 
-// IsPortForwardConfigured checks whether the port 443 redirect is in place.
+// IsPortForwardConfigured checks whether the port 443 redirect is in place
+// on disk (pf.conf or iptables rules saved). Note: this can return true when
+// the rules are not actually loaded into the kernel — see PortForwardActive
+// for an authoritative check.
 func IsPortForwardConfigured() bool {
 	switch runtime.GOOS {
 	case "darwin":
@@ -60,6 +63,134 @@ func IsPortForwardConfigured() bool {
 		return isLinuxPortForwardConfigured()
 	default:
 		return false
+	}
+}
+
+// PortForwardStatus reports whether the port-forwarding rules are not just
+// configured on disk but actually loaded in the kernel right now. This is
+// what determines whether traffic to :443 will reach the router.
+type PortForwardStatus struct {
+	// ConfiguredOnDisk is true when pf.conf (macOS) or saved iptables rules
+	// (Linux) reference our redirect.
+	ConfiguredOnDisk bool
+	// LoadedInKernel is true when the running ruleset includes our redirect.
+	// On macOS this requires both pf to be enabled AND our rdr rule to be
+	// in the active anchor.
+	LoadedInKernel bool
+	// PfEnabled (macOS only) is true when `pfctl -s info` reports pf is
+	// enabled. Meaningless on Linux.
+	PfEnabled bool
+	// Detail is a one-line human-readable summary, or "" when everything is
+	// healthy.
+	Detail string
+}
+
+// CheckPortForward queries the running kernel state of our port-forwarding
+// rules. Requires sudo on macOS for full accuracy; without sudo, falls back
+// to the on-disk check and returns LoadedInKernel = false (unknown).
+//
+// routerPort is the port the rdr should forward to; used to detect a rule
+// that exists but points to the wrong port.
+func CheckPortForward(routerPort int) PortForwardStatus {
+	switch runtime.GOOS {
+	case "darwin":
+		return checkPortForwardDarwin(routerPort)
+	case "linux":
+		return checkPortForwardLinux(routerPort)
+	default:
+		return PortForwardStatus{}
+	}
+}
+
+func checkPortForwardDarwin(routerPort int) PortForwardStatus {
+	st := PortForwardStatus{ConfiguredOnDisk: IsPortForwardConfigured()}
+
+	// pfctl -s info reports the daemon's enabled/disabled state. This call
+	// does not require sudo on macOS.
+	if out, err := runCmdOutput("/sbin/pfctl", "-s", "info"); err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "Status: Enabled") {
+				st.PfEnabled = true
+				break
+			}
+		}
+	}
+
+	// pfctl -a treeline -s nat lists the rules in our anchor. Without sudo
+	// macOS sometimes refuses; in that case we fall back to the main NAT
+	// ruleset (`pfctl -s nat`), which can also reference our anchor via a
+	// `rdr-anchor` line.
+	wantSubstr := fmt.Sprintf("port %d", routerPort)
+	if out, err := runCmdOutput("/sbin/pfctl", "-a", pfAnchorName(), "-s", "nat"); err == nil {
+		if strings.Contains(string(out), wantSubstr) {
+			st.LoadedInKernel = true
+		}
+	}
+	if !st.LoadedInKernel {
+		if out, err := runCmdOutput("/sbin/pfctl", "-s", "nat"); err == nil {
+			body := string(out)
+			if strings.Contains(body, wantSubstr) {
+				st.LoadedInKernel = true
+			}
+		}
+	}
+
+	switch {
+	case !st.ConfiguredOnDisk:
+		st.Detail = "not configured (run 'gtl serve install')"
+	case !st.PfEnabled:
+		st.Detail = "pf disabled — rules will not apply (run 'gtl serve reload-pf')"
+	case !st.LoadedInKernel:
+		st.Detail = fmt.Sprintf("rule not loaded in kernel — pf.conf has it but `pfctl -s nat` doesn't show port %d (run 'gtl serve reload-pf')", routerPort)
+	}
+	return st
+}
+
+func checkPortForwardLinux(routerPort int) PortForwardStatus {
+	st := PortForwardStatus{ConfiguredOnDisk: IsPortForwardConfigured()}
+	out, err := runCmdOutput("/sbin/iptables", "-t", "nat", "-L", "OUTPUT", "-n")
+	if err != nil {
+		if !st.ConfiguredOnDisk {
+			st.Detail = "not configured"
+		} else {
+			st.Detail = "could not read iptables (need root or CAP_NET_ADMIN)"
+		}
+		return st
+	}
+	body := string(out)
+	if strings.Contains(body, "git-treeline") &&
+		strings.Contains(body, fmt.Sprintf("ports %d", routerPort)) {
+		st.LoadedInKernel = true
+	}
+	if !st.LoadedInKernel && st.ConfiguredOnDisk {
+		st.Detail = "iptables rule missing in current ruleset (run 'gtl serve reload-pf')"
+	}
+	return st
+}
+
+// ReloadPortForward re-applies the port-forwarding rules from disk into the
+// running kernel ruleset. Useful after a reboot/network change wiped them
+// without changing pf.conf or iptables-save state.
+//
+// macOS requires sudo. Linux uses the same mechanism as install (currently
+// re-running iptables rules); we delegate to the same install path because
+// it is idempotent.
+func ReloadPortForward() error {
+	switch runtime.GOOS {
+	case "darwin":
+		return reloadPf()
+	case "linux":
+		// Linux installs iptables rules directly; reapplying them is the
+		// only "reload" available. The install function already short-
+		// circuits when rules are present, but we want it to reapply
+		// unconditionally — the linux install path is idempotent so we
+		// just call it again.
+		// We don't have the routerPort here, so the caller should use
+		// InstallPortForward(routerPort) instead. ReloadPortForward is
+		// macOS-focused; on Linux we return a hint.
+		return fmt.Errorf("on Linux, run 'gtl serve install' to reapply iptables rules")
+	default:
+		return fmt.Errorf("port forwarding not supported on %s", runtime.GOOS)
 	}
 }
 
