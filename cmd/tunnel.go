@@ -17,6 +17,7 @@ import (
 	"github.com/git-treeline/cli/internal/style"
 	"github.com/git-treeline/cli/internal/templates"
 	"github.com/git-treeline/cli/internal/tunnel"
+	"github.com/git-treeline/cli/internal/tunneldaemon"
 	"github.com/git-treeline/cli/internal/worktree"
 	"github.com/spf13/cobra"
 )
@@ -83,7 +84,7 @@ Related commands:
 				routeKey := proxy.RouteKey(project, branch)
 				hostname := routeKey + "." + domain
 				printTunnelHint(hostname, domain)
-				return tunnel.RunNamed(tunnelName, domain, routeKey, port)
+				return tunneldaemon.RegisterAndWait(tunnelName, hostname, port, "")
 			}
 
 			fmt.Fprintf(os.Stderr, "Note: using quick tunnel (random URL) because project/branch could not be determined.\n")
@@ -207,13 +208,13 @@ account that owns that zone. gtl stores per-domain credentials automatically.`,
 					return fmt.Errorf("login failed: %w", err)
 				}
 
-			certPath = tunnel.CertPathForDomain(domain)
+				certPath = tunnel.CertPathForDomain(domain)
 				fmt.Println(style.Actionf("Routing %s → tunnel %q", wildcardHost, tunnelName))
 				if err := tunnel.RouteDNSWithCert(tunnelName, wildcardHost, certPath); err != nil {
 					return cliErr(cmd, printDNSManualInstructions(tunnelName, domain, err))
 				}
 
-			if !tunnel.VerifyDNS(testHost, 10*time.Second) {
+				if !tunnel.VerifyDNS(testHost, 10*time.Second) {
 					return cliErr(cmd, printDNSManualInstructions(tunnelName, domain, nil))
 				}
 			} else {
