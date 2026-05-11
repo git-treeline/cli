@@ -87,7 +87,7 @@ func (h *fakeHandle) Stderr() io.Reader { return h.stderr }
 
 func (h *fakeHandle) Stop(_ time.Duration) error {
 	if h.stopped.CompareAndSwap(false, true) {
-		h.stderr.Close()
+		_ = h.stderr.Close()
 		close(h.done)
 	}
 	return nil
@@ -99,7 +99,7 @@ func (h *fakeHandle) Wait() error {
 }
 
 func (h *fakeHandle) Feed(line string) {
-	h.stderr.Write([]byte(line + "\n"))
+	_, _ = h.stderr.Write([]byte(line + "\n"))
 }
 
 // pipeReader is a goroutine-safe in-memory pipe that survives multiple
@@ -300,7 +300,7 @@ func TestDaemon_RegisterStartsCloudflared(t *testing.T) {
 	defer cleanup()
 
 	conn, _ := dialAndRegister(t, sock, "a.example.dev", 3050)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	waitFor(t, "cloudflared start", func() bool { return runner.StartCount() >= 1 })
 
@@ -318,11 +318,11 @@ func TestDaemon_TwoClientsBothInIngress(t *testing.T) {
 	defer cleanup()
 
 	c1, _ := dialAndRegister(t, sock, "a.example.dev", 3050)
-	defer c1.Close()
+	defer func() { _ = c1.Close() }()
 	waitFor(t, "first start", func() bool { return runner.StartCount() >= 1 })
 
 	c2, _ := dialAndRegister(t, sock, "b.example.dev", 3060)
-	defer c2.Close()
+	defer func() { _ = c2.Close() }()
 	waitFor(t, "restart for second client", func() bool { return runner.StartCount() >= 2 })
 
 	got := runner.LastConfig()
@@ -339,13 +339,13 @@ func TestDaemon_DuplicateHostnameRejected(t *testing.T) {
 	defer cleanup()
 
 	c1, _ := dialAndRegister(t, sock, "dup.example.dev", 3050)
-	defer c1.Close()
+	defer func() { _ = c1.Close() }()
 
 	conn, err := net.DialTimeout("unix", sock, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	b, _ := json.Marshal(Register{Op: OpRegister, Hostname: "dup.example.dev", Port: 3060})
 	_, _ = conn.Write(append(b, '\n'))
 	dec := json.NewDecoder(bufio.NewReader(conn))
@@ -365,7 +365,7 @@ func TestDaemon_DisconnectRegeneratesConfig(t *testing.T) {
 
 	c1, _ := dialAndRegister(t, sock, "a.example.dev", 3050)
 	c2, _ := dialAndRegister(t, sock, "b.example.dev", 3060)
-	defer c2.Close()
+	defer func() { _ = c2.Close() }()
 	waitFor(t, "two starts", func() bool { return runner.StartCount() >= 2 })
 
 	_ = c1.Close()
@@ -405,7 +405,7 @@ func TestDaemon_BroadcastsErrorLine(t *testing.T) {
 	defer cleanup()
 
 	conn, dec := dialAndRegister(t, sock, "a.example.dev", 3050)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	waitFor(t, "started", func() bool { return runner.StartCount() >= 1 })
 
 	runner.Current().Feed("2024 ERR cloudflared failed to authenticate")
@@ -432,11 +432,11 @@ func TestDaemon_UnexpectedCloudflaredExitNotifiesClients(t *testing.T) {
 	defer cleanup()
 
 	conn, dec := dialAndRegister(t, sock, "a.example.dev", 3050)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	waitFor(t, "started", func() bool { return runner.StartCount() >= 1 })
 
 	// Simulate cloudflared crashing on its own.
-	runner.Current().Stop(0)
+	_ = runner.Current().Stop(0)
 
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	sawDown := false
@@ -468,11 +468,11 @@ func TestDaemon_ExpectedStopDoesNotBroadcastDown(t *testing.T) {
 	defer cleanup()
 
 	cA, decA := dialAndRegister(t, sock, "a.example.dev", 3050)
-	defer cA.Close()
+	defer func() { _ = cA.Close() }()
 	waitFor(t, "started", func() bool { return runner.StartCount() >= 1 })
 
 	cB, _ := dialAndRegister(t, sock, "b.example.dev", 3060)
-	defer cB.Close()
+	defer func() { _ = cB.Close() }()
 	waitFor(t, "restart for B", func() bool { return runner.StartCount() >= 2 })
 
 	// Client A must NOT see an EventTunnelDown from the routine restart.
@@ -493,9 +493,9 @@ func TestDaemon_RequestLogRoutedByHostname(t *testing.T) {
 	defer cleanup()
 
 	cA, decA := dialAndRegister(t, sock, "a.example.dev", 3050)
-	defer cA.Close()
+	defer func() { _ = cA.Close() }()
 	cB, decB := dialAndRegister(t, sock, "b.example.dev", 3060)
-	defer cB.Close()
+	defer func() { _ = cB.Close() }()
 	waitFor(t, "second start", func() bool { return runner.StartCount() >= 2 })
 
 	runner.Current().Feed("GET https://a.example.dev/health 200 5ms")

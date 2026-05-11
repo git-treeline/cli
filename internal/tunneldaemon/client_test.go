@@ -160,7 +160,7 @@ func TestDialWithSpawn_ReusesExisting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	accepted := make(chan struct{}, 1)
 	go func() {
@@ -214,7 +214,7 @@ func writeFakeDaemonBinary(t *testing.T, sock string) string {
 // and verifies streamEvents returns cleanly on EOF.
 func TestStreamEvents_RendersAndStopsOnEOF(t *testing.T) {
 	server, client := net.Pipe()
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	var wg sync.WaitGroup
 	wg.Add(1)

@@ -460,7 +460,7 @@ func (d *Daemon) shutdown() error {
 func (d *Daemon) Done() <-chan struct{} { return d.done }
 
 func (d *Daemon) logf(format string, args ...any) {
-	fmt.Fprintf(d.LogSink, "tunneldaemon: "+format+"\n", args...)
+	_, _ = fmt.Fprintf(d.LogSink, "tunneldaemon: "+format+"\n", args...)
 }
 
 // --- real cloudflared runner ---

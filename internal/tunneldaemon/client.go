@@ -157,18 +157,18 @@ func streamEvents(conn net.Conn, hostname string, port int) error {
 func renderEvent(ev Event, hostname string, port int) {
 	switch ev.Kind {
 	case EventRegistered:
-		fmt.Fprintf(os.Stdout, "Tunnel: https://%s → http://localhost:%d\n", ev.Hostname, ev.Port)
-		fmt.Fprintln(os.Stdout, "Press Ctrl+C to stop")
-		fmt.Fprintln(os.Stdout)
+		_, _ = fmt.Fprintf(os.Stdout, "Tunnel: https://%s → http://localhost:%d\n", ev.Hostname, ev.Port)
+		_, _ = fmt.Fprintln(os.Stdout, "Press Ctrl+C to stop")
+		_, _ = fmt.Fprintln(os.Stdout)
 	case EventTunnelUp:
 		// Initial cloudflared "Registered tunnel connection" line; surface to
 		// the user so they see the tunnel really came online.
-		fmt.Fprintln(os.Stdout, ev.Line)
+		_, _ = fmt.Fprintln(os.Stdout, ev.Line)
 	case EventLog:
 		if ev.Stream == StreamStderr {
 			fmt.Fprintln(os.Stderr, ev.Line)
 		} else {
-			fmt.Fprintln(os.Stdout, ev.Line)
+			_, _ = fmt.Fprintln(os.Stdout, ev.Line)
 		}
 	case EventError:
 		fmt.Fprintln(os.Stderr, ev.Error)
