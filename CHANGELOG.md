@@ -1,3 +1,7 @@
+## [0.41.1]
+
+- **Restored the `git-treeline` Homebrew formula.** The repo rename from `git-treeline/git-treeline` to `git-treeline/cli` silently changed goreleaser's default `project_name` from `git-treeline` to `cli`, so v0.40.0 through v0.41.0 updated a new `cli.rb` formula in the tap and stopped updating the legacy `git-treeline.rb`. Anyone who installed via `brew install git-treeline/tap/git-treeline` was frozen at v0.39.2 because `brew upgrade` saw no changes. Pinning `project_name: git-treeline` in `.goreleaser.yml` reverts tarball names to `git-treeline_X_*` and resumes updates to `git-treeline.rb`; the orphaned `cli.rb` has been removed from the tap.
+
 ## [0.41.0]
 
 - **Multiplexed `gtl tunnel` across repos sharing a named tunnel.** Two concurrent `gtl tunnel` invocations used to overwrite each other's `~/.cloudflared/gtl-<name>.yml` and spawn competing cloudflared connectors; with Cloudflare's edge load-balancing, each URL only worked roughly half the time. A new lazy-start daemon (`internal/tunneldaemon`) now owns one cloudflared per named tunnel and merges every active `gtl tunnel`'s hostname into a single multi-host ingress. The first invocation forks the hidden `gtl tunnel-daemon` helper; subsequent invocations register over a Unix socket and disconnect cleanly on Ctrl+C. The daemon idle-exits 5s after the last client leaves.
