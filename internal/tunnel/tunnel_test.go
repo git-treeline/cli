@@ -119,15 +119,19 @@ func TestFilterLine_OutputRouting(t *testing.T) {
 	}
 }
 
-func TestWriteTunnelConfig(t *testing.T) {
+func TestWriteMultiHostConfig(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 
-	_ = os.MkdirAll(filepath.Join(dir, ".cloudflared"), 0o700)
-	credPath := filepath.Join(dir, ".cloudflared", "test-tunnel.json")
+	cfDir := filepath.Join(dir, ".cloudflared")
+	_ = os.MkdirAll(cfDir, 0o700)
+	credPath := filepath.Join(cfDir, "test-tunnel.json")
 	_ = os.WriteFile(credPath, []byte(`{"AccountTag":"abc"}`), 0o600)
 
-	path, err := writeTunnelConfig("test-tunnel", "myapp-main.example.dev", 3050)
+	path, err := WriteMultiHostConfig("test-tunnel", []HostRoute{
+		{Hostname: "myapp-main.example.dev", Port: 3050},
+		{Hostname: "other-feature.example.dev", Port: 4050},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,12 +146,36 @@ func TestWriteTunnelConfig(t *testing.T) {
 		`tunnel: "test-tunnel"`,
 		`hostname: "myapp-main.example.dev"`,
 		"http://localhost:3050",
+		`hostname: "other-feature.example.dev"`,
+		"http://localhost:4050",
 		"http_status:404",
 	}
 	for _, check := range checks {
 		if !strings.Contains(s, check) {
 			t.Errorf("config missing %q\nGot:\n%s", check, s)
 		}
+	}
+
+	// Ingress order must match input order.
+	myapp := strings.Index(s, "myapp-main.example.dev")
+	other := strings.Index(s, "other-feature.example.dev")
+	if myapp < 0 || other < 0 || myapp > other {
+		t.Errorf("expected myapp ingress to come before other-feature in config:\n%s", s)
+	}
+
+	// http_status:404 must be the last rule.
+	if !strings.HasSuffix(strings.TrimRight(s, "\n"), "service: http_status:404") {
+		t.Errorf("expected http_status:404 catch-all at the end of ingress:\n%s", s)
+	}
+}
+
+func TestGenerateMultiHostConfig_Empty(t *testing.T) {
+	got := GenerateMultiHostConfig("t", "/tmp/c.json", nil)
+	if !strings.Contains(got, "service: http_status:404") {
+		t.Errorf("expected catch-all even with no routes:\n%s", got)
+	}
+	if strings.Contains(got, "hostname:") {
+		t.Errorf("expected no hostname entries with empty routes:\n%s", got)
 	}
 }
 

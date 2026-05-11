@@ -70,42 +70,6 @@ func ExtractTrycloudflareURL(line string) string {
 	return trycloudflareRe.FindString(line)
 }
 
-// RunNamed starts a named Cloudflare tunnel using a generated config file.
-// The tunnel must already exist (via Setup) and DNS must be routed.
-func RunNamed(tunnelName, domain, routeKey string, port int) error {
-	cfPath, err := ResolveCloudflared()
-	if err != nil {
-		return err
-	}
-
-	hostname := routeKey + "." + domain
-	configPath, err := writeTunnelConfig(tunnelName, hostname, port)
-	if err != nil {
-		return fmt.Errorf("failed to write tunnel config: %w", err)
-	}
-
-	fmt.Printf("Tunnel: https://%s → http://localhost:%d\n", hostname, port)
-	fmt.Println("Press Ctrl+C to stop")
-	fmt.Println()
-
-	cmd := exec.Command(cfPath, "tunnel", "--config", configPath, "run", tunnelName)
-	cmd.Stdout = os.Stdout
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start cloudflared: %w", err)
-	}
-
-	go FilterCloudflaredLogs(stderrPipe)
-
-	return WaitForSignalOrExit(cmd)
-}
-
 // --- Shared cloudflared process management ---
 
 // FilterCloudflaredLogs reads cloudflared stderr and only passes through
@@ -416,25 +380,6 @@ func ConfigDir() string {
 	return filepath.Join(home, ".cloudflared")
 }
 
-// writeTunnelConfig generates a cloudflared config.yml for a named tunnel
-// routing a single hostname to a local port.
-func writeTunnelConfig(tunnelName, hostname string, port int) (string, error) {
-	credPath := findCredentialsFile(tunnelName)
-
-	config := fmt.Sprintf("tunnel: %q\ncredentials-file: %q\n\ningress:\n  - hostname: %q\n    service: http://localhost:%d\n  - service: http_status:404\n",
-		tunnelName, credPath, hostname, port)
-
-	dir := ConfigDir()
-	configPath := filepath.Join(dir, fmt.Sprintf("gtl-%s.yml", tunnelName))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
-		return "", err
-	}
-	return configPath, nil
-}
-
 // findCredentialsFile locates the tunnel credentials JSON in ~/.cloudflared/
 // by looking up the tunnel ID via `cloudflared tunnel list`.
 func findCredentialsFile(tunnelName string) string {
@@ -480,6 +425,42 @@ func parseTunnelListID(data []byte, name string) string {
 func GenerateConfig(tunnelName, hostname string, port int, credPath string) string {
 	return fmt.Sprintf("tunnel: %q\ncredentials-file: %q\n\ningress:\n  - hostname: %q\n    service: http://localhost:%d\n  - service: http_status:404\n",
 		tunnelName, credPath, hostname, port)
+}
+
+// HostRoute is one entry in a multi-hostname ingress config.
+type HostRoute struct {
+	Hostname string
+	Port     int
+}
+
+// GenerateMultiHostConfig produces a cloudflared config.yml whose ingress
+// section routes each hostname to its corresponding local port. Routes are
+// emitted in the order given; the trailing catch-all returns 404.
+func GenerateMultiHostConfig(tunnelName, credPath string, routes []HostRoute) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "tunnel: %q\ncredentials-file: %q\n\ningress:\n", tunnelName, credPath)
+	for _, r := range routes {
+		fmt.Fprintf(&b, "  - hostname: %q\n    service: http://localhost:%d\n", r.Hostname, r.Port)
+	}
+	b.WriteString("  - service: http_status:404\n")
+	return b.String()
+}
+
+// WriteMultiHostConfig writes a multi-hostname cloudflared config to
+// ~/.cloudflared/gtl-{tunnelName}.yml and returns the path.
+func WriteMultiHostConfig(tunnelName string, routes []HostRoute) (string, error) {
+	credPath := findCredentialsFile(tunnelName)
+	config := GenerateMultiHostConfig(tunnelName, credPath, routes)
+
+	dir := ConfigDir()
+	configPath := filepath.Join(dir, fmt.Sprintf("gtl-%s.yml", tunnelName))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		return "", err
+	}
+	return configPath, nil
 }
 
 // WriteShareConfig writes a temporary cloudflared config for a share session.
