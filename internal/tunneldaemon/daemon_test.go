@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -252,13 +251,12 @@ func TestSocketPath_ShortAndDeterministic(t *testing.T) {
 }
 
 func TestSocketPath_UnderUserConfigDir(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	got := SocketPath("gtl")
-	if !strings.Contains(got, ".cloudflared") {
-		t.Errorf("expected socket under ~/.cloudflared, got %q", got)
-	}
-	if strings.HasPrefix(got, "/tmp/") {
-		t.Errorf("socket should not be in /tmp: %q", got)
+	wantDir := filepath.Join(home, ".cloudflared")
+	if filepath.Dir(got) != wantDir {
+		t.Errorf("expected socket under %s, got parent %s (full: %s)", wantDir, filepath.Dir(got), got)
 	}
 }
 
