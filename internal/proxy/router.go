@@ -201,10 +201,10 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	r.proxyTo(w, req, targetPort)
+	r.proxyTo(w, req, subdomain, targetPort)
 }
 
-func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, targetPort int) {
+func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, subdomain string, targetPort int) {
 	backendHost := resolveLocalhost(targetPort)
 	target := &url.URL{
 		Scheme: "http",
@@ -230,8 +230,21 @@ func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, targetPort in
 				pr.Out.Header.Set("X-Forwarded-For", pr.In.RemoteAddr)
 			}
 		},
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+			r.serveBackendStatus(w, subdomain, targetPort)
+		},
 	}
 	proxy.ServeHTTP(w, req)
+}
+
+// serveBackendStatus is invoked when the reverse proxy can't reach the
+// upstream. It probes the supervisor and the port to decide whether the
+// server is still booting, never started, or crashed, then serves a
+// state-specific HTML page.
+func (r *Router) serveBackendStatus(w http.ResponseWriter, subdomain string, port int) {
+	worktreePath := findWorktreeForRoute(r.registry, subdomain)
+	state := classifyBackend(worktreePath, port, nil, nil)
+	renderBackendStatusPage(w, state, subdomain, port)
 }
 
 func (r *Router) refreshRoutes() {
