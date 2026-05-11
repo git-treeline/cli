@@ -1,5 +1,12 @@
 version: 2
 
+# Pin project_name so the rename from github.com/git-treeline/git-treeline
+# to github.com/git-treeline/cli doesn't change the tarball naming or the
+# Homebrew formula filename. Without this, goreleaser defaults to the repo
+# name ("cli"), which silently created a stale cli.rb in the tap and froze
+# users on the legacy git-treeline.rb formula at the pre-rename version.
+project_name: git-treeline
+
 builds:
   - binary: git-treeline
     main: .
