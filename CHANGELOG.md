@@ -1,3 +1,10 @@
+## [0.41.0]
+
+- **Multiplexed `gtl tunnel` across repos sharing a named tunnel.** Two concurrent `gtl tunnel` invocations used to overwrite each other's `~/.cloudflared/gtl-<name>.yml` and spawn competing cloudflared connectors; with Cloudflare's edge load-balancing, each URL only worked roughly half the time. A new lazy-start daemon (`internal/tunneldaemon`) now owns one cloudflared per named tunnel and merges every active `gtl tunnel`'s hostname into a single multi-host ingress. The first invocation forks the hidden `gtl tunnel-daemon` helper; subsequent invocations register over a Unix socket and disconnect cleanly on Ctrl+C. The daemon idle-exits 5s after the last client leaves.
+- **Cloudflared crashes surface to the CLI.** If cloudflared dies on its own — expired cert, auth failure, network blip — the daemon broadcasts `tunnel_down` and closes connected clients so `gtl tunnel` returns with an error instead of pretending the URL is still live.
+- **Daemon socket is user-private.** Lives under `~/.cloudflared/` (mode 0700) and is created `0600` atomically via a scoped `umask` around `net.Listen`. No `/tmp` exposure and no TOCTOU window between bind and chmod.
+- **Go toolchain bumped to 1.26.3** to pick up stdlib security fixes in `net`, `net/http`, and `net/http/httputil` flagged by govulncheck.
+
 ## [0.40.2]
 
 - **`gtl rename <new-name>`** — renames a project across `.treeline.yml`, the registry, user-config keys (port reservations, editor themes/colors, including `project/branch` variants), drops the old worktree databases, and re-runs setup so each worktree comes back up under the new name with a freshly cloned DB. Project names must match `[a-zA-Z_][a-zA-Z0-9_]*` (same rule as Postgres identifiers); the command suggests a sanitized form when given an invalid name.
