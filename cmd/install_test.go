@@ -392,44 +392,79 @@ func TestMaybeOfferServeInstall_DisabledSkipsStaleCheck(t *testing.T) {
 	}
 }
 
-func TestRouterInstallIssuesWith_PortForwardingIsOptional(t *testing.T) {
+func TestRouterInstallIssuesWith(t *testing.T) {
 	tests := []struct {
-		name           string
-		caInstalled    bool
-		serviceRunning bool
-		want           []string
+		name            string
+		caInstalled     bool
+		serviceRunning  bool
+		daemonRequired  bool
+		daemonInstalled bool
+		want            []string
 	}{
 		{
-			name:           "healthy",
-			caInstalled:    true,
-			serviceRunning: true,
-			want:           nil,
+			name:            "healthy, no daemon required (e.g. linux or pf not configured)",
+			caInstalled:     true,
+			serviceRunning:  true,
+			daemonRequired:  false,
+			daemonInstalled: false,
+			want:            nil,
 		},
 		{
-			name:           "missing ca trust",
-			caInstalled:    false,
-			serviceRunning: true,
-			want:           []string{"CA trust"},
+			name:            "healthy with daemon required and installed",
+			caInstalled:     true,
+			serviceRunning:  true,
+			daemonRequired:  true,
+			daemonInstalled: true,
+			want:            nil,
 		},
 		{
-			name:           "missing router service",
-			caInstalled:    true,
-			serviceRunning: false,
-			want:           []string{"router service"},
+			name:            "missing ca trust",
+			caInstalled:     false,
+			serviceRunning:  true,
+			daemonRequired:  false,
+			daemonInstalled: false,
+			want:            []string{"CA trust"},
 		},
 		{
-			name:           "missing both required pieces",
-			caInstalled:    false,
-			serviceRunning: false,
-			want:           []string{"CA trust", "router service"},
+			name:            "missing router service",
+			caInstalled:     true,
+			serviceRunning:  false,
+			daemonRequired:  false,
+			daemonInstalled: false,
+			want:            []string{"router service"},
+		},
+		{
+			name:            "missing pf reload daemon (darwin with pf configured)",
+			caInstalled:     true,
+			serviceRunning:  true,
+			daemonRequired:  true,
+			daemonInstalled: false,
+			want:            []string{"pf reload daemon"},
+		},
+		{
+			name:            "daemon not required, so 'missing' is not flagged (linux)",
+			caInstalled:     true,
+			serviceRunning:  true,
+			daemonRequired:  false,
+			daemonInstalled: false,
+			want:            nil,
+		},
+		{
+			name:            "everything missing",
+			caInstalled:     false,
+			serviceRunning:  false,
+			daemonRequired:  true,
+			daemonInstalled: false,
+			want:            []string{"CA trust", "router service", "pf reload daemon"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			issues := routerInstallIssuesWith(tt.caInstalled, tt.serviceRunning)
+			issues := routerInstallIssuesWith(tt.caInstalled, tt.serviceRunning, tt.daemonRequired, tt.daemonInstalled)
 			if strings.Join(issues, "|") != strings.Join(tt.want, "|") {
-				t.Fatalf("routerInstallIssuesWith(%t, %t) = %v, want %v", tt.caInstalled, tt.serviceRunning, issues, tt.want)
+				t.Fatalf("routerInstallIssuesWith(%t, %t, %t, %t) = %v, want %v",
+					tt.caInstalled, tt.serviceRunning, tt.daemonRequired, tt.daemonInstalled, issues, tt.want)
 			}
 		})
 	}
