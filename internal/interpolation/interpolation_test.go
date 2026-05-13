@@ -145,7 +145,20 @@ func TestInterpolate_RouterURL(t *testing.T) {
 	}
 }
 
-func TestInterpolate_RouterDomain(t *testing.T) {
+func TestInterpolate_RouterHost(t *testing.T) {
+	alloc := Allocation{
+		"port":        float64(3010),
+		"router_host": "prt.dev",
+	}
+	result := Interpolate(".{router_host}", alloc, "", "salt")
+	if result != ".prt.dev" {
+		t.Errorf("expected .prt.dev, got %s", result)
+	}
+}
+
+// {router_domain} is preserved as a deprecated alias for {router_host}
+// so existing env templates keep working.
+func TestInterpolate_RouterDomain_DeprecatedAlias(t *testing.T) {
 	alloc := Allocation{
 		"port":          float64(3010),
 		"router_domain": "prt.dev",
@@ -161,6 +174,36 @@ func TestInterpolate_RouterURL_Missing(t *testing.T) {
 	result := Interpolate("{router_url}", alloc, "", "salt")
 	if result != "" {
 		t.Errorf("expected empty string for missing router_url, got %q", result)
+	}
+}
+
+func TestInterpolate_TunnelURL(t *testing.T) {
+	alloc := Allocation{
+		"port":       float64(3010),
+		"tunnel_url": "https://salt-feature.gtltunnel.dev",
+	}
+	result := Interpolate("{tunnel_url}", alloc, "", "salt")
+	if result != "https://salt-feature.gtltunnel.dev" {
+		t.Errorf("expected https://salt-feature.gtltunnel.dev, got %s", result)
+	}
+}
+
+func TestInterpolate_TunnelHost(t *testing.T) {
+	alloc := Allocation{
+		"port":        float64(3010),
+		"tunnel_host": "gtltunnel.dev",
+	}
+	result := Interpolate(".{tunnel_host}", alloc, "", "salt")
+	if result != ".gtltunnel.dev" {
+		t.Errorf("expected .gtltunnel.dev, got %s", result)
+	}
+}
+
+func TestInterpolate_TunnelURL_Missing(t *testing.T) {
+	alloc := Allocation{"port": float64(3010)}
+	result := Interpolate("{tunnel_url}", alloc, "", "salt")
+	if result != "" {
+		t.Errorf("expected empty string for missing tunnel_url, got %q", result)
 	}
 }
 

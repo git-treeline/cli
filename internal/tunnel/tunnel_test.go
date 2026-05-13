@@ -497,3 +497,23 @@ func TestParseTunnelListID_InvalidJSON(t *testing.T) {
 		t.Error("expected empty string for invalid JSON")
 	}
 }
+
+// TestParseTunnelList_RejectsStderrPollutedJSON pins the regression that
+// broke `gtl tunnel` once cloudflared started warning about an outdated
+// local version. CombinedOutput() used to splice that WRN line into the
+// JSON payload, parseTunnelList* returned false/"" for every tunnel, and
+// every named tunnel showed up as "(not found)" even when it existed.
+// The fix is to capture stdout only; this test documents the failure
+// shape so future refactors don't reintroduce it.
+func TestParseTunnelList_RejectsStderrPollutedJSON(t *testing.T) {
+	polluted := []byte(
+		`[{"id":"abc","name":"gtl"}]` + "\n" +
+			`2026-05-13T13:01:10Z WRN Your version 2026.3.0 is outdated. We recommend upgrading it to 2026.5.0` + "\n",
+	)
+	if parseTunnelListHasName(polluted, "gtl") {
+		t.Error("parser must reject polluted JSON; if you're relying on this case, capture stdout only (Output, not CombinedOutput)")
+	}
+	if parseTunnelListID(polluted, "gtl") != "" {
+		t.Error("parser must reject polluted JSON; capture stdout only")
+	}
+}

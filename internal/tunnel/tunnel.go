@@ -288,12 +288,18 @@ func ParseCertZoneID(certPath string) (string, error) {
 }
 
 // TunnelExists checks whether a named tunnel already exists.
+//
+// Important: capture stdout only, not stderr. cloudflared writes the JSON
+// payload to stdout but also emits warnings (e.g. "your version is
+// outdated") to stderr. Using CombinedOutput would splice those warnings
+// into the JSON and break parsing, making every tunnel look like it
+// doesn't exist.
 func TunnelExists(name string) bool {
 	cfPath, err := ResolveCloudflared()
 	if err != nil {
 		return false
 	}
-	out, err := exec.Command(cfPath, "tunnel", "list", "-o", "json").CombinedOutput()
+	out, err := exec.Command(cfPath, "tunnel", "list", "-o", "json").Output()
 	if err != nil {
 		return false
 	}
@@ -398,7 +404,8 @@ func lookupTunnelID(tunnelName string) string {
 	if err != nil {
 		return ""
 	}
-	out, err := exec.Command(cfPath, "tunnel", "list", "-o", "json").CombinedOutput()
+	// stdout only — see comment on TunnelExists.
+	out, err := exec.Command(cfPath, "tunnel", "list", "-o", "json").Output()
 	if err != nil {
 		return ""
 	}

@@ -583,11 +583,18 @@ func TestInjectRouterTokens(t *testing.T) {
 	if got := alloc["router_url"].(string); got != "https://salt-feature.prt.dev" {
 		t.Errorf("router_url: expected https://salt-feature.prt.dev, got %q", got)
 	}
+	if got := alloc["router_host"].(string); got != "prt.dev" {
+		t.Errorf("router_host: expected prt.dev, got %q", got)
+	}
+	// router_domain is preserved as a backwards-compatible alias.
 	if got := alloc["router_domain"].(string); got != "prt.dev" {
-		t.Errorf("router_domain: expected prt.dev, got %q", got)
+		t.Errorf("router_domain alias: expected prt.dev, got %q", got)
 	}
 	if got := alloc["tunnel_host"].(string); got != "gtltunnel.dev" {
 		t.Errorf("tunnel_host: expected gtltunnel.dev, got %q", got)
+	}
+	if got := alloc["tunnel_url"].(string); got != "https://salt-feature.gtltunnel.dev" {
+		t.Errorf("tunnel_url: expected https://salt-feature.gtltunnel.dev, got %q", got)
 	}
 }
 
@@ -603,6 +610,9 @@ func TestInjectRouterTokens_EmptyBranch(t *testing.T) {
 	if _, ok := alloc["tunnel_host"]; ok {
 		t.Error("tunnel_host should not be set when tunnel domain is empty")
 	}
+	if _, ok := alloc["tunnel_url"]; ok {
+		t.Error("tunnel_url should not be set when tunnel domain is empty")
+	}
 }
 
 func TestInjectRouterTokens_DisabledRouter(t *testing.T) {
@@ -616,6 +626,11 @@ func TestInjectRouterTokens_DisabledRouter(t *testing.T) {
 	}
 	if got := alloc["tunnel_host"].(string); got != "gtltunnel.dev" {
 		t.Errorf("tunnel_host: expected gtltunnel.dev, got %q", got)
+	}
+	// tunnel_url should still work even when the local router is disabled —
+	// the tunnel runs independently and the URL is still meaningful.
+	if got := alloc["tunnel_url"].(string); got != "https://salt-feature.gtltunnel.dev" {
+		t.Errorf("tunnel_url: expected https://salt-feature.gtltunnel.dev, got %q", got)
 	}
 }
 
