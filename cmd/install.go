@@ -234,20 +234,14 @@ func runServeInstall(uc *config.UserConfig) error {
 		fmt.Fprintln(os.Stderr, style.Dimf("  HTTPS will work but browsers will show a certificate warning."))
 	}
 
+	// macOS-only: InstallPortForward bundles the boot-time pf reloader
+	// LaunchDaemon into the same sudo session so the redirect survives
+	// reboots without intervention. The post-install check below treats a
+	// missing daemon as an install failure.
 	if err := service.InstallPortForward(port); err != nil {
 		fmt.Fprintln(os.Stderr, style.Warnf("port forwarding skipped: %v", err))
 		fmt.Fprintln(os.Stderr, style.Dimf("  URLs will require a port number: https://{branch}.%s:%d", domain, port))
 		fmt.Println()
-	} else {
-		// macOS resets pf state on reboot — without our LaunchDaemon, the
-		// rdr rule is on disk but pf is disabled until the user manually
-		// runs `gtl serve reload-pf`. The daemon makes the redirect
-		// survive reboots without intervention. macOS-only; no-op on Linux.
-		if err := service.InstallPfReloadDaemon(); err != nil {
-			fmt.Fprintln(os.Stderr, style.Warnf("boot-time pf reloader install skipped: %v", err))
-			fmt.Fprintln(os.Stderr, style.Dimf("  After reboot, run 'gtl serve reload-pf' manually."))
-			fmt.Println()
-		}
 	}
 
 	if _, err := service.Install(gtlPath, port); err != nil {
@@ -278,16 +272,29 @@ func supportsServeInstall() bool {
 }
 
 func routerInstallIssues() []string {
-	return routerInstallIssuesWith(proxy.IsCAInstalled(), service.IsRunning())
+	// The pf reload daemon is only meaningful on macOS, and only when pf
+	// rules are actually configured (otherwise there's nothing for it to
+	// re-apply at boot). On Linux, IsPfReloadDaemonInstalled returns false
+	// because the daemon doesn't exist there — we must not flag that.
+	daemonRequired := runtime.GOOS == "darwin" && service.IsPortForwardConfigured()
+	return routerInstallIssuesWith(
+		proxy.IsCAInstalled(),
+		service.IsRunning(),
+		daemonRequired,
+		service.IsPfReloadDaemonInstalled(),
+	)
 }
 
-func routerInstallIssuesWith(caInstalled, serviceRunning bool) []string {
+func routerInstallIssuesWith(caInstalled, serviceRunning, daemonRequired, daemonInstalled bool) []string {
 	var issues []string
 	if !caInstalled {
 		issues = append(issues, "CA trust")
 	}
 	if !serviceRunning {
 		issues = append(issues, "router service")
+	}
+	if daemonRequired && !daemonInstalled {
+		issues = append(issues, "pf reload daemon")
 	}
 	return issues
 }

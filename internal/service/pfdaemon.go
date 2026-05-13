@@ -63,6 +63,34 @@ func IsPfReloadDaemonInstalled() bool {
 	return err == nil
 }
 
+// pfReloadDaemonPlistBody returns the static plist body installed at
+// PfReloadDaemonPath(). Used by installDarwinPortForward to write the
+// same plist as part of a combined sudo session, eliminating the second
+// password prompt that previously gated daemon installation.
+func pfReloadDaemonPlistBody() string { return pfReloadDaemonPlist }
+
+// pfReloadDaemonInstallFragment returns a `sh -c` fragment that, when run
+// as root, copies a pre-rendered plist into /Library/LaunchDaemons, fixes
+// ownership/perms, and bootstraps the LaunchDaemon. The fragment ends with
+// `launchctl bootstrap`, whose exit code becomes the fragment's exit code
+// — so a failed bootstrap surfaces as a non-zero exit. The caller writes
+// pfReloadDaemonPlist to tmpPlistPath before invoking the script.
+func pfReloadDaemonInstallFragment(tmpPlistPath string) string {
+	target := PfReloadDaemonPath()
+	return fmt.Sprintf(
+		"/bin/cp '%s' '%s' && "+
+			"/usr/sbin/chown root:wheel '%s' && "+
+			"/bin/chmod 644 '%s' && "+
+			"(/bin/launchctl bootout system/%s 2>/dev/null; true) && "+
+			"/bin/launchctl bootstrap system '%s'",
+		tmpPlistPath, target,
+		target,
+		target,
+		PfReloadDaemonLabel,
+		target,
+	)
+}
+
 // InstallPfReloadDaemon writes the LaunchDaemon plist to
 // /Library/LaunchDaemons and bootstraps it so it runs at every boot.
 // Requires sudo. Idempotent — safe to call when already installed.
@@ -70,6 +98,12 @@ func IsPfReloadDaemonInstalled() bool {
 // macOS-only. On other platforms returns nil (no-op) since iptables on
 // Linux distros generally persist their own rules via netfilter-persistent
 // or iptables-save and don't need a separate boot service.
+//
+// Note: gtl serve install bundles this work into the same sudo session as
+// the pf rules install (see installDarwinPortForward) so users only ever
+// hit a single password prompt and the two stay atomic. This function is
+// retained for callers that need to (re-)install the daemon on its own —
+// e.g. doctor-style repair flows.
 func InstallPfReloadDaemon() error {
 	if runtime.GOOS != "darwin" {
 		return nil
@@ -87,24 +121,9 @@ func InstallPfReloadDaemon() error {
 		return err
 	}
 
-	target := PfReloadDaemonPath()
-	// One sudo session: copy plist, set ownership and perms, then
-	// (re)bootstrap. bootout is best-effort — non-zero when not loaded.
-	script := fmt.Sprintf(
-		"/bin/cp '%s' '%s' && "+
-			"/usr/sbin/chown root:wheel '%s' && "+
-			"/bin/chmod 644 '%s' && "+
-			"/bin/launchctl bootout system/%s 2>/dev/null; "+
-			"/bin/launchctl bootstrap system '%s'",
-		tmp.Name(), target,
-		target,
-		target,
-		PfReloadDaemonLabel,
-		target,
-	)
 	cmd := exec.Command("sudo", "-p",
 		"\nEnter your password to install the boot-time pf reloader: ",
-		"sh", "-c", script)
+		"sh", "-c", pfReloadDaemonInstallFragment(tmp.Name()))
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

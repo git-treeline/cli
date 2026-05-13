@@ -97,3 +97,60 @@ func TestGeneratePfAnchor(t *testing.T) {
 		t.Error("should redirect to port 3001")
 	}
 }
+
+func TestDarwinPortForwardScript(t *testing.T) {
+	script := darwinPortForwardScript(
+		"/tmp/treeline-anchor-xyz",
+		"/tmp/treeline-pfconf-xyz",
+		"/tmp/treeline-pfreload-xyz.plist",
+	)
+
+	// Invariant 1: dry-run validation gates the live pf.conf swap. The
+	// validation must use `|| exit 1` so a broken pf.conf cannot be
+	// installed under any condition.
+	if !strings.Contains(script, "/sbin/pfctl -n -f '/tmp/treeline-pfconf-xyz' 2>&1 || exit 1") {
+		t.Errorf("script must gate validation with `|| exit 1` so a bad pf.conf cannot be installed\nscript: %s", script)
+	}
+
+	// Invariant 2: pfctl -ef is masked because pf is often already
+	// enabled (non-zero exit is expected). Mask must use a brace group,
+	// not a subshell, to match the existing reloadPf style.
+	if !strings.Contains(script, "{ /sbin/pfctl -ef '/etc/pf.conf' 2>/dev/null; true; }") {
+		t.Errorf("pfctl -ef must be masked via brace group `{ ...; true; }`\nscript: %s", script)
+	}
+
+	// Invariant 3 (the whole point of the fix): daemon fragment is
+	// `&&`-joined at the tail so its exit code is the script's exit code.
+	// A `;` here would silently mask daemon-install failures and reopen
+	// the issue #51 bug.
+	daemonFrag := pfReloadDaemonInstallFragment("/tmp/treeline-pfreload-xyz.plist")
+	if !strings.HasSuffix(strings.TrimSpace(script), daemonFrag) {
+		t.Errorf("daemon fragment must be the final segment so its exit code drives the script\nscript: %s", script)
+	}
+	if !strings.Contains(script, "true; } && "+daemonFrag[:30]) {
+		t.Errorf("daemon fragment must be joined to the pfctl-ef mask with `&&`, not `;` — else daemon failure is silently swallowed\nscript: %s", script)
+	}
+}
+
+func TestReloadPfAndInstallDaemonScript(t *testing.T) {
+	script := reloadPfAndInstallDaemonScript("/tmp/treeline-pfreload-xyz.plist")
+
+	// `pfctl -f` (load) failure MUST propagate — a broken pf.conf means
+	// the daemon would re-apply broken rules every boot. Only `pfctl -e`
+	// should be masked (it returns non-zero when pf is already enabled).
+	if !strings.Contains(script, "/sbin/pfctl -f '/etc/pf.conf' 2>/dev/null && ") {
+		t.Errorf("pfctl -f failure must propagate via `&&`, not be masked\nscript: %s", script)
+	}
+	if !strings.Contains(script, "{ /sbin/pfctl -e 2>/dev/null; true; }") {
+		t.Errorf("only pfctl -e should be masked via brace group\nscript: %s", script)
+	}
+
+	// Daemon fragment is the exit gate.
+	daemonFrag := pfReloadDaemonInstallFragment("/tmp/treeline-pfreload-xyz.plist")
+	if !strings.HasSuffix(strings.TrimSpace(script), daemonFrag) {
+		t.Errorf("daemon fragment must be the final segment\nscript: %s", script)
+	}
+	if !strings.Contains(script, "true; } && "+daemonFrag[:30]) {
+		t.Errorf("daemon fragment must be `&&`-joined, not `;`-joined\nscript: %s", script)
+	}
+}

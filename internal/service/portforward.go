@@ -242,10 +242,21 @@ func installDarwinPortForward(routerPort int) error {
 	if _, err := os.Stat(pfAnchorPath()); os.IsNotExist(err) {
 		anchorExists = false
 	}
+	pfConfigured := strings.Contains(string(pfConf), pfMarker()) && anchorExists
+	daemonInstalled := IsPfReloadDaemonInstalled()
 
-	if strings.Contains(string(pfConf), pfMarker()) && anchorExists {
+	if pfConfigured && daemonInstalled {
 		fmt.Println("  Port forwarding already configured (443 → router).")
 		return reloadPf()
+	}
+
+	if pfConfigured && !daemonInstalled {
+		// Rules are on disk but the boot-time reloader isn't — typical for
+		// installs that predate the daemon, or where a previous install
+		// silently lost the second sudo prompt. Reload kernel state and
+		// drop the daemon in one sudo session.
+		fmt.Println("  Port forwarding already configured (443 → router); installing boot-time reloader.")
+		return reloadPfAndInstallDaemon()
 	}
 
 	anchorContent := fmt.Sprintf(
@@ -275,14 +286,22 @@ func installDarwinPortForward(routerPort int) error {
 	}
 	_ = tmpPfConf.Close()
 
-	script := fmt.Sprintf(
-		"/bin/mkdir -p /etc/pf.anchors && /bin/cp '%s' '%s' && /sbin/pfctl -n -f '%s' 2>&1 || exit 1; /bin/cp '%s' '%s' && /bin/cp '%s' '%s' && /sbin/pfctl -ef '%s' 2>/dev/null; true",
-		tmpAnchor.Name(), pfAnchorPath(),
-		tmpPfConf.Name(),
-		pfConfPath, pfBackupPath,
-		tmpPfConf.Name(), pfConfPath,
-		pfConfPath,
-	)
+	tmpPlist, err := os.CreateTemp("", "treeline-pfreload-*.plist")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmpPlist.Name()) }()
+	if _, err := tmpPlist.WriteString(pfReloadDaemonPlistBody()); err != nil {
+		return err
+	}
+	_ = tmpPlist.Close()
+
+	// One sudo session for everything that requires root: validate the new
+	// pf.conf, swap it in, apply the rules, and install the boot-time
+	// reloader. Bundling these together means a single password prompt and
+	// guarantees the daemon either lands on disk or the install fails
+	// loudly — no silent half-installs.
+	script := darwinPortForwardScript(tmpAnchor.Name(), tmpPfConf.Name(), tmpPlist.Name())
 
 	cmd := exec.Command("sudo", "-p",
 		"\nEnter your password (2 of 2): ",
@@ -296,6 +315,76 @@ func installDarwinPortForward(routerPort int) error {
 
 	fmt.Printf("  Port forwarding configured (443 → %d).\n", routerPort)
 	return nil
+}
+
+// reloadPfAndInstallDaemon re-applies pf rules from /etc/pf.conf and
+// installs the boot-time reloader in a single sudo invocation. Used when
+// the user is already configured for port forwarding but the LaunchDaemon
+// is missing — e.g. upgrading from a pre-daemon version, or recovering
+// from a previous install where the daemon's separate sudo prompt
+// silently failed.
+func reloadPfAndInstallDaemon() error {
+	tmpPlist, err := os.CreateTemp("", "treeline-pfreload-*.plist")
+	if err != nil {
+		return fmt.Errorf("creating temp plist: %w", err)
+	}
+	defer func() { _ = os.Remove(tmpPlist.Name()) }()
+	if _, err := tmpPlist.WriteString(pfReloadDaemonPlistBody()); err != nil {
+		return err
+	}
+	if err := tmpPlist.Close(); err != nil {
+		return err
+	}
+
+	script := reloadPfAndInstallDaemonScript(tmpPlist.Name())
+	cmd := exec.Command("sudo", "-p",
+		"\nEnter your password to reload port forwarding and install the boot-time reloader: ",
+		"sh", "-c", script)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("pf reload + daemon install failed: %w", err)
+	}
+	return nil
+}
+
+// darwinPortForwardScript returns the `sh -c` body used by
+// installDarwinPortForward. Extracted so the script structure is
+// testable. Three load-bearing invariants:
+//
+//  1. `pfctl -n -f` (parse-validate the new pf.conf) is gated with
+//     `|| exit 1` — invalid pf.conf must NOT overwrite the live file.
+//  2. `pfctl -ef` (load + enable) is masked with `; true` because pfctl
+//     returns non-zero from `-e` when pf is already running; this is
+//     expected and must not abort the install.
+//  3. The daemon install fragment is `&&`-joined at the tail, so a
+//     failed `launchctl bootstrap` propagates as the script's exit code.
+//     This is the whole point of the bundling: pf rules and daemon
+//     land together or the install fails loudly.
+func darwinPortForwardScript(tmpAnchorPath, tmpPfConfPath, tmpPlistPath string) string {
+	return fmt.Sprintf(
+		"/bin/mkdir -p /etc/pf.anchors && /bin/cp '%s' '%s' && /sbin/pfctl -n -f '%s' 2>&1 || exit 1; "+
+			"/bin/cp '%s' '%s' && /bin/cp '%s' '%s' && { /sbin/pfctl -ef '%s' 2>/dev/null; true; } && %s",
+		tmpAnchorPath, pfAnchorPath(),
+		tmpPfConfPath,
+		pfConfPath, pfBackupPath,
+		tmpPfConfPath, pfConfPath,
+		pfConfPath,
+		pfReloadDaemonInstallFragment(tmpPlistPath),
+	)
+}
+
+// reloadPfAndInstallDaemonScript returns the `sh -c` body used by
+// reloadPfAndInstallDaemon. `pfctl -f` failure must propagate (a broken
+// pf.conf means the daemon would fail on every boot), so only `pfctl -e`
+// is masked. The daemon fragment is the final exit-code gate.
+func reloadPfAndInstallDaemonScript(tmpPlistPath string) string {
+	return fmt.Sprintf(
+		"/sbin/pfctl -f '%s' 2>/dev/null && { /sbin/pfctl -e 2>/dev/null; true; } && %s",
+		pfConfPath,
+		pfReloadDaemonInstallFragment(tmpPlistPath),
+	)
 }
 
 // reloadPf ensures the kernel's pf rules match /etc/pf.conf. The reload
