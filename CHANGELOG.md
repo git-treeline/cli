@@ -1,4 +1,4 @@
-## Unreleased
+## [0.43.1]
 
 - **`gtl serve install` now bundles the pf-reload LaunchDaemon into the same sudo session as the pf rules.** Previously the daemon install was a second `sudo` call (`InstallPfReloadDaemon`) and any failure — a lapsed sudo cache, a Touch ID timeout, a dismissed prompt — left `/Library/LaunchDaemons/dev.treeline.pfreload.plist` missing while everything else looked installed. The boot-time reloader never ran and the 443→router redirect dropped on every reboot. Now both pf rules and the daemon land in one atomic root operation, and the post-install completeness check (`routerInstallIssues`) treats a missing daemon as a hard failure with the same "HTTPS router install incomplete: missing pf reload daemon" message used for CA trust and router service. Existing installs missing the daemon get it auto-installed the next time `gtl serve install` runs (fixes [#51](https://github.com/git-treeline/cli/issues/51)).
 
