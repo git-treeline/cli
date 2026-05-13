@@ -301,16 +301,7 @@ func installDarwinPortForward(routerPort int) error {
 	// reloader. Bundling these together means a single password prompt and
 	// guarantees the daemon either lands on disk or the install fails
 	// loudly — no silent half-installs.
-	script := fmt.Sprintf(
-		"/bin/mkdir -p /etc/pf.anchors && /bin/cp '%s' '%s' && /sbin/pfctl -n -f '%s' 2>&1 || exit 1; "+
-			"/bin/cp '%s' '%s' && /bin/cp '%s' '%s' && (/sbin/pfctl -ef '%s' 2>/dev/null; true) && %s",
-		tmpAnchor.Name(), pfAnchorPath(),
-		tmpPfConf.Name(),
-		pfConfPath, pfBackupPath,
-		tmpPfConf.Name(), pfConfPath,
-		pfConfPath,
-		pfReloadDaemonInstallFragment(tmpPlist.Name()),
-	)
+	script := darwinPortForwardScript(tmpAnchor.Name(), tmpPfConf.Name(), tmpPlist.Name())
 
 	cmd := exec.Command("sudo", "-p",
 		"\nEnter your password (2 of 2): ",
@@ -345,15 +336,7 @@ func reloadPfAndInstallDaemon() error {
 		return err
 	}
 
-	// pfctl -e returns non-zero when pf is already enabled, so we mask its
-	// exit code via `; true`. The daemon install fragment is the gate for
-	// the overall exit code — if bootstrap fails, the script exits non-zero
-	// and the caller surfaces it as an error.
-	script := fmt.Sprintf(
-		"(/sbin/pfctl -f '%s' 2>/dev/null && /sbin/pfctl -e 2>/dev/null; true) && %s",
-		pfConfPath,
-		pfReloadDaemonInstallFragment(tmpPlist.Name()),
-	)
+	script := reloadPfAndInstallDaemonScript(tmpPlist.Name())
 	cmd := exec.Command("sudo", "-p",
 		"\nEnter your password to reload port forwarding and install the boot-time reloader: ",
 		"sh", "-c", script)
@@ -364,6 +347,44 @@ func reloadPfAndInstallDaemon() error {
 		return fmt.Errorf("pf reload + daemon install failed: %w", err)
 	}
 	return nil
+}
+
+// darwinPortForwardScript returns the `sh -c` body used by
+// installDarwinPortForward. Extracted so the script structure is
+// testable. Three load-bearing invariants:
+//
+//  1. `pfctl -n -f` (parse-validate the new pf.conf) is gated with
+//     `|| exit 1` — invalid pf.conf must NOT overwrite the live file.
+//  2. `pfctl -ef` (load + enable) is masked with `; true` because pfctl
+//     returns non-zero from `-e` when pf is already running; this is
+//     expected and must not abort the install.
+//  3. The daemon install fragment is `&&`-joined at the tail, so a
+//     failed `launchctl bootstrap` propagates as the script's exit code.
+//     This is the whole point of the bundling: pf rules and daemon
+//     land together or the install fails loudly.
+func darwinPortForwardScript(tmpAnchorPath, tmpPfConfPath, tmpPlistPath string) string {
+	return fmt.Sprintf(
+		"/bin/mkdir -p /etc/pf.anchors && /bin/cp '%s' '%s' && /sbin/pfctl -n -f '%s' 2>&1 || exit 1; "+
+			"/bin/cp '%s' '%s' && /bin/cp '%s' '%s' && { /sbin/pfctl -ef '%s' 2>/dev/null; true; } && %s",
+		tmpAnchorPath, pfAnchorPath(),
+		tmpPfConfPath,
+		pfConfPath, pfBackupPath,
+		tmpPfConfPath, pfConfPath,
+		pfConfPath,
+		pfReloadDaemonInstallFragment(tmpPlistPath),
+	)
+}
+
+// reloadPfAndInstallDaemonScript returns the `sh -c` body used by
+// reloadPfAndInstallDaemon. `pfctl -f` failure must propagate (a broken
+// pf.conf means the daemon would fail on every boot), so only `pfctl -e`
+// is masked. The daemon fragment is the final exit-code gate.
+func reloadPfAndInstallDaemonScript(tmpPlistPath string) string {
+	return fmt.Sprintf(
+		"/sbin/pfctl -f '%s' 2>/dev/null && { /sbin/pfctl -e 2>/dev/null; true; } && %s",
+		pfConfPath,
+		pfReloadDaemonInstallFragment(tmpPlistPath),
+	)
 }
 
 // reloadPf ensures the kernel's pf rules match /etc/pf.conf. The reload
