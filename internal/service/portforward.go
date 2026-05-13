@@ -291,7 +291,7 @@ func installDarwinPortForward(routerPort int) error {
 		return err
 	}
 	defer func() { _ = os.Remove(tmpPlist.Name()) }()
-	if _, err := tmpPlist.WriteString(PfReloadDaemonPlistBody()); err != nil {
+	if _, err := tmpPlist.WriteString(pfReloadDaemonPlistBody()); err != nil {
 		return err
 	}
 	_ = tmpPlist.Close()
@@ -338,7 +338,7 @@ func reloadPfAndInstallDaemon() error {
 		return fmt.Errorf("creating temp plist: %w", err)
 	}
 	defer func() { _ = os.Remove(tmpPlist.Name()) }()
-	if _, err := tmpPlist.WriteString(PfReloadDaemonPlistBody()); err != nil {
+	if _, err := tmpPlist.WriteString(pfReloadDaemonPlistBody()); err != nil {
 		return err
 	}
 	if err := tmpPlist.Close(); err != nil {

@@ -42,7 +42,7 @@ func TestPfReloadDaemonInstallFragment(t *testing.T) {
 }
 
 func TestPfReloadDaemonPlistBody(t *testing.T) {
-	body := PfReloadDaemonPlistBody()
+	body := pfReloadDaemonPlistBody()
 	for _, want := range []string{
 		"<key>Label</key>",
 		"<string>dev.treeline.pfreload</string>",

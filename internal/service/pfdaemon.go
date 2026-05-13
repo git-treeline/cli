@@ -63,12 +63,11 @@ func IsPfReloadDaemonInstalled() bool {
 	return err == nil
 }
 
-// PfReloadDaemonPlistBody returns the static plist body installed at
-// PfReloadDaemonPath(). Exposed so callers in this package (notably
-// installDarwinPortForward) can write the same plist as part of a combined
-// sudo session, eliminating the second password prompt that previously
-// gated daemon installation.
-func PfReloadDaemonPlistBody() string { return pfReloadDaemonPlist }
+// pfReloadDaemonPlistBody returns the static plist body installed at
+// PfReloadDaemonPath(). Used by installDarwinPortForward to write the
+// same plist as part of a combined sudo session, eliminating the second
+// password prompt that previously gated daemon installation.
+func pfReloadDaemonPlistBody() string { return pfReloadDaemonPlist }
 
 // pfReloadDaemonInstallFragment returns a `sh -c` fragment that, when run
 // as root, copies a pre-rendered plist into /Library/LaunchDaemons, fixes
