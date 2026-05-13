@@ -89,9 +89,10 @@ type Daemon struct {
 // cloudflaredSession bundles a running cloudflared with the metadata we
 // need to tell intentional stops apart from unexpected exits.
 type cloudflaredSession struct {
-	handle   CloudflaredHandle
-	done     chan struct{} // closed when handle.Wait returns
-	expected atomic.Bool   // set before any clean stop
+	handle      CloudflaredHandle
+	done        chan struct{} // closed when handle.Wait returns
+	stderrDrain chan struct{} // closed when pumpStderr finishes consuming stderr
+	expected    atomic.Bool   // set before any clean stop
 }
 
 type client struct {
@@ -275,12 +276,16 @@ func (d *Daemon) applyRoutes(routes []tunnel.HostRoute) error {
 	if err != nil {
 		return fmt.Errorf("start cloudflared: %w", err)
 	}
-	sess := &cloudflaredSession{handle: handle, done: make(chan struct{})}
+	sess := &cloudflaredSession{
+		handle:      handle,
+		done:        make(chan struct{}),
+		stderrDrain: make(chan struct{}),
+	}
 	d.mu.Lock()
 	d.session = sess
 	d.mu.Unlock()
 
-	go d.pumpStderr(handle.Stderr())
+	go d.pumpStderr(handle.Stderr(), sess.stderrDrain)
 	go d.watchSession(sess)
 	return nil
 }
@@ -289,9 +294,20 @@ func (d *Daemon) applyRoutes(routes []tunnel.HostRoute) error {
 // active one and wasn't marked as an expected stop, that's an unexpected
 // exit (auth failure, crash, network blip) — notify clients and drop their
 // connections so the CLI returns instead of pretending the tunnel is live.
+// Waits for pumpStderr to drain first so cloudflared's last error lines
+// reach the connected clients before we close their connections.
 func (d *Daemon) watchSession(sess *cloudflaredSession) {
 	_ = sess.handle.Wait()
 	close(sess.done)
+
+	// Drain stderr with a deadline so a misbehaving pipe can't hang the
+	// daemon. Two seconds is plenty for any reasonable cloudflared exit
+	// message.
+	select {
+	case <-sess.stderrDrain:
+	case <-time.After(2 * time.Second):
+	}
+
 	if sess.expected.Load() {
 		return
 	}
@@ -345,8 +361,11 @@ func (d *Daemon) stopCloudflaredLocked() {
 // pumpStderr fans out cloudflared stderr lines to connected clients,
 // filtering by relevance. Errors/warnings broadcast to everyone; request
 // logs route only to the client whose hostname appears in the line; INF
-// spam is dropped.
-func (d *Daemon) pumpStderr(r io.Reader) {
+// spam is dropped. The drained channel is closed when the underlying
+// reader returns — used by watchSession to wait for cloudflared's death
+// rattle before tearing down client connections.
+func (d *Daemon) pumpStderr(r io.Reader, drained chan<- struct{}) {
+	defer close(drained)
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {

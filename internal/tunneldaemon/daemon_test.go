@@ -423,6 +423,52 @@ func TestDaemon_BroadcastsErrorLine(t *testing.T) {
 	}
 }
 
+// TestDaemon_StderrDrainsBeforeTunnelDown pins the fix for the Blake
+// scenario: cloudflared exited with a useful error message, but the
+// daemon closed client connections the instant handle.Wait returned —
+// before pumpStderr had finished consuming the stderr pipe. The client
+// only ever saw "cloudflared exited unexpectedly" and never the real
+// error. The fix is to wait for pumpStderr to drain before broadcasting
+// tunnel_down and closing connections. This test feeds an error line,
+// then stops cloudflared, and asserts the error event lands on the wire
+// BEFORE the tunnel_down event.
+func TestDaemon_StderrDrainsBeforeTunnelDown(t *testing.T) {
+	_, runner, sock, cleanup := startDaemon(t)
+	defer cleanup()
+
+	conn, dec := dialAndRegister(t, sock, "a.example.dev", 3050)
+	defer func() { _ = conn.Close() }()
+	waitFor(t, "started", func() bool { return runner.StartCount() >= 1 })
+
+	// Feed an error line, then immediately stop cloudflared to mimic an
+	// unexpected exit right after the error is logged.
+	runner.Current().Feed("2024 ERR auth failed: 403 Forbidden")
+	_ = runner.Current().Stop(0)
+
+	var sawErr, sawDown bool
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for !sawDown {
+		var ev Event
+		if err := dec.Decode(&ev); err != nil {
+			break
+		}
+		switch ev.Kind {
+		case EventLog:
+			if !sawDown && contains(ev.Line, "auth failed") {
+				sawErr = true
+			}
+		case EventTunnelDown:
+			sawDown = true
+		}
+	}
+	if !sawErr {
+		t.Error("client did not receive the cloudflared error line before tunnel_down")
+	}
+	if !sawDown {
+		t.Error("client did not receive tunnel_down event")
+	}
+}
+
 // TestDaemon_UnexpectedCloudflaredExitNotifiesClients verifies that when
 // cloudflared dies on its own (auth fail, crash, network), the daemon
 // broadcasts EventTunnelDown and drops all client connections so the CLI
