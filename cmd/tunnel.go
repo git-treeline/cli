@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -32,8 +33,12 @@ func init() {
 	tunnelCmd.AddCommand(tunnelStatusCmd)
 	tunnelCmd.AddCommand(tunnelDefaultCmd)
 	tunnelCmd.AddCommand(tunnelRemoveCmd)
+	tunnelCmd.AddCommand(tunnelResetCmd)
+	tunnelResetCmd.Flags().BoolVarP(&tunnelResetYes, "yes", "y", false, "skip confirmation prompt")
 	rootCmd.AddCommand(tunnelCmd)
 }
+
+var tunnelResetYes bool
 
 var tunnelCmd = &cobra.Command{
 	Use:   "tunnel [port]",
@@ -161,6 +166,26 @@ account that owns that zone. gtl stores per-domain credentials automatically.`,
 			if err := tunnel.CreateTunnel(tunnelName); err != nil {
 				return fmt.Errorf("failed to create tunnel: %w", err)
 			}
+		} else if !tunnel.HasTunnelCredentials(tunnelName) {
+			// Adopting an existing tunnel that we didn't create — the
+			// connector credentials only live on the machine where
+			// `cloudflared tunnel create` originally ran. Granting
+			// Cloudflare account access shares the tunnel definition but
+			// NOT the credentials. Refuse to save a broken config.
+			return cliErr(cmd, &CliError{
+				Message: fmt.Sprintf("Tunnel %q exists in your Cloudflare account, but its connector credentials aren't on this machine.", tunnelName),
+				Hint: fmt.Sprintf(`Cloudflare doesn't distribute connector credentials through the API — they
+only exist on the machine that originally ran 'cloudflared tunnel create'.
+
+Two ways forward:
+  1. Get %s from the user who created the tunnel
+     (securely — it contains an API token) and place it at the same path
+     on this machine, then re-run 'gtl tunnel setup'.
+  2. Pick a different tunnel name to create a new tunnel here. Heads up:
+     wildcard DNS for a domain points to one tunnel at a time — creating
+     a new one will overwrite the routing for everyone else on that
+     domain.`, tunnel.CredentialsPath(tunnelName)),
+			})
 		}
 
 		existingDomain := uc.TunnelDomain("")
@@ -406,6 +431,108 @@ tunnels (random *.trycloudflare.com URLs).`,
 	},
 }
 
+var tunnelResetCmd = &cobra.Command{
+	Use:   "reset",
+	Short: "Clear all gtl tunnel state and Cloudflare credentials on this machine",
+	Long: `Removes all gtl tunnel configuration entries, the default Cloudflare
+cert.pem, per-domain cert-*.pem files, and tunnel credential JSONs.
+
+Use this when tunnel state on this machine is wedged — most commonly
+when you authenticated with a Cloudflare account that doesn't have
+the permissions you need, and subsequent 'gtl tunnel setup' runs
+keep reusing the same dead cert.pem.
+
+Does NOT delete the actual Cloudflare-side tunnel definitions; for
+that, run 'cloudflared tunnel delete <name>' once your account has
+the right permissions.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		uc := config.LoadUserConfig("")
+		configs := uc.TunnelConfigs()
+		configNames := sortedKeys(configs)
+
+		defaultCert := tunnel.DefaultCertPath()
+		hasDefaultCert := fileExistsForReset(defaultCert)
+		domainCerts := tunnel.FindDomainCerts()
+		credentials := tunnel.FindTunnelCredentialFiles(configNames)
+
+		if !hasDefaultCert && len(configs) == 0 && len(domainCerts) == 0 && len(credentials) == 0 {
+			fmt.Println("Nothing to reset — no gtl tunnel state on this machine.")
+			return nil
+		}
+
+		fmt.Println("This will reset gtl's Cloudflare tunnel state:")
+		if len(configs) > 0 {
+			fmt.Printf("  • Remove %d tunnel configuration(s): %s\n", len(configs), strings.Join(configNames, ", "))
+		}
+		if hasDefaultCert {
+			fmt.Printf("  • Delete default cert: %s\n", defaultCert)
+		}
+		for _, c := range domainCerts {
+			fmt.Printf("  • Delete domain cert: %s\n", c)
+		}
+		for _, c := range credentials {
+			fmt.Printf("  • Delete tunnel credentials: %s\n", c)
+		}
+
+		fmt.Println()
+		fmt.Println("Cloudflare-side tunnel definitions are NOT deleted. To remove them:")
+		if len(configs) == 0 {
+			fmt.Println("  cloudflared tunnel delete <name>")
+		} else {
+			for _, name := range configNames {
+				fmt.Printf("  cloudflared tunnel delete %s\n", name)
+			}
+		}
+		fmt.Println()
+		fmt.Println("After reset, run 'gtl tunnel setup' to authenticate fresh.")
+
+		if !tunnelResetYes {
+			fmt.Println()
+			if !confirm.Prompt("Continue?", false, nil) {
+				return cliErr(cmd, &CliError{Message: "Aborted."})
+			}
+		}
+
+		for _, name := range configNames {
+			uc.DeleteTunnel(name)
+		}
+		if len(configs) > 0 {
+			if err := uc.Save(); err != nil {
+				return fmt.Errorf("save user config: %w", err)
+			}
+		}
+
+		toDelete := append([]string{}, credentials...)
+		toDelete = append(toDelete, domainCerts...)
+		if hasDefaultCert {
+			toDelete = append(toDelete, defaultCert)
+		}
+		removed := tunnel.DeleteCloudflaredFiles(toDelete)
+
+		fmt.Println()
+		fmt.Printf("%s removed %d file(s) and %d tunnel config(s).\n",
+			style.Successf("Reset complete."), len(removed), len(configs))
+		return nil
+	},
+}
+
+func fileExistsForReset(p string) bool {
+	info, err := os.Stat(p)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir()
+}
+
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func tunnelConfigNames(configs map[string]string) []string {
 	names := make([]string, 0, len(configs))
 	for name := range configs {
@@ -425,6 +552,23 @@ func validateTunnelPrereqs(tunnelName string) error {
 		return &CliError{
 			Message: fmt.Sprintf("Tunnel %q not found.", tunnelName),
 			Hint:    "Run 'gtl tunnel setup' to create it.",
+		}
+	}
+	if !tunnel.HasTunnelCredentials(tunnelName) {
+		// The tunnel exists in Cloudflare but its connector credentials
+		// JSON isn't on this machine. Without it cloudflared will refuse
+		// to start; surface the real error here instead of letting the
+		// daemon report "cloudflared exited unexpectedly".
+		return &CliError{
+			Message: fmt.Sprintf("Tunnel %q exists, but its connector credentials are missing on this machine (looked for %s).", tunnelName, tunnel.CredentialsPath(tunnelName)),
+			Hint: `Cloudflare doesn't share connector credentials through the API — only the
+machine that ran 'cloudflared tunnel create' has them.
+
+To fix:
+  • Get the credentials JSON from the tunnel's creator (securely — it
+    contains an API token) and place it at the path above; OR
+  • Run 'gtl tunnel reset' followed by 'gtl tunnel setup' to create
+    your own tunnel under a different name.`,
 		}
 	}
 	return nil
