@@ -145,7 +145,20 @@ func TestInterpolate_RouterURL(t *testing.T) {
 	}
 }
 
-func TestInterpolate_RouterDomain(t *testing.T) {
+func TestInterpolate_RouterHost(t *testing.T) {
+	alloc := Allocation{
+		"port":        float64(3010),
+		"router_host": "prt.dev",
+	}
+	result := Interpolate(".{router_host}", alloc, "", "salt")
+	if result != ".prt.dev" {
+		t.Errorf("expected .prt.dev, got %s", result)
+	}
+}
+
+// {router_domain} is preserved as a deprecated alias for {router_host}
+// so existing env templates keep working.
+func TestInterpolate_RouterDomain_DeprecatedAlias(t *testing.T) {
 	alloc := Allocation{
 		"port":          float64(3010),
 		"router_domain": "prt.dev",

@@ -583,8 +583,12 @@ func TestInjectRouterTokens(t *testing.T) {
 	if got := alloc["router_url"].(string); got != "https://salt-feature.prt.dev" {
 		t.Errorf("router_url: expected https://salt-feature.prt.dev, got %q", got)
 	}
+	if got := alloc["router_host"].(string); got != "prt.dev" {
+		t.Errorf("router_host: expected prt.dev, got %q", got)
+	}
+	// router_domain is preserved as a backwards-compatible alias.
 	if got := alloc["router_domain"].(string); got != "prt.dev" {
-		t.Errorf("router_domain: expected prt.dev, got %q", got)
+		t.Errorf("router_domain alias: expected prt.dev, got %q", got)
 	}
 	if got := alloc["tunnel_host"].(string); got != "gtltunnel.dev" {
 		t.Errorf("tunnel_host: expected gtltunnel.dev, got %q", got)
