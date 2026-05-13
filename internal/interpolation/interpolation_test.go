@@ -164,6 +164,36 @@ func TestInterpolate_RouterURL_Missing(t *testing.T) {
 	}
 }
 
+func TestInterpolate_TunnelURL(t *testing.T) {
+	alloc := Allocation{
+		"port":       float64(3010),
+		"tunnel_url": "https://salt-feature.gtltunnel.dev",
+	}
+	result := Interpolate("{tunnel_url}", alloc, "", "salt")
+	if result != "https://salt-feature.gtltunnel.dev" {
+		t.Errorf("expected https://salt-feature.gtltunnel.dev, got %s", result)
+	}
+}
+
+func TestInterpolate_TunnelHost(t *testing.T) {
+	alloc := Allocation{
+		"port":        float64(3010),
+		"tunnel_host": "gtltunnel.dev",
+	}
+	result := Interpolate(".{tunnel_host}", alloc, "", "salt")
+	if result != ".gtltunnel.dev" {
+		t.Errorf("expected .gtltunnel.dev, got %s", result)
+	}
+}
+
+func TestInterpolate_TunnelURL_Missing(t *testing.T) {
+	alloc := Allocation{"port": float64(3010)}
+	result := Interpolate("{tunnel_url}", alloc, "", "salt")
+	if result != "" {
+		t.Errorf("expected empty string for missing tunnel_url, got %q", result)
+	}
+}
+
 func TestInterpolateWithResolver_NilResolver(t *testing.T) {
 	alloc := Allocation{"port": 3000}
 	result, err := InterpolateWithResolver("{resolve:api}", alloc, "redis://localhost:6379", "test", nil)

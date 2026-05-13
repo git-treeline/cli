@@ -260,22 +260,24 @@ func (s *Setup) buildEnvVars(alloc interpolation.Allocation, redisURL string) (m
 	return BuildEnvVars(s.ProjectConfig, alloc, redisURL), nil
 }
 
-// InjectRouterTokens adds router_url, router_domain, and tunnel_host to an
-// allocation map so the corresponding env tokens can be resolved.
+// InjectRouterTokens adds router_url, router_domain, tunnel_host, and
+// tunnel_url to an allocation map so the corresponding env tokens can be
+// resolved. router_* tokens are blank when the local router is disabled;
+// tunnel_* tokens are blank when no tunnel domain is configured.
 func InjectRouterTokens(alloc interpolation.Allocation, project, branch, routerDomain, tunnelDomain string) {
+	routeKey := proxy.RouteKey(project, branch)
+
 	if routerDomain == "" {
 		alloc["router_url"] = ""
 		alloc["router_domain"] = ""
-		if tunnelDomain != "" {
-			alloc["tunnel_host"] = tunnelDomain
-		}
-		return
+	} else {
+		alloc["router_url"] = fmt.Sprintf("https://%s.%s", routeKey, routerDomain)
+		alloc["router_domain"] = routerDomain
 	}
-	routeKey := proxy.RouteKey(project, branch)
-	alloc["router_url"] = fmt.Sprintf("https://%s.%s", routeKey, routerDomain)
-	alloc["router_domain"] = routerDomain
+
 	if tunnelDomain != "" {
 		alloc["tunnel_host"] = tunnelDomain
+		alloc["tunnel_url"] = fmt.Sprintf("https://%s.%s", routeKey, tunnelDomain)
 	}
 }
 
