@@ -20,6 +20,9 @@ builds:
       - arm64
     ldflags:
       - -s -w -X github.com/git-treeline/cli/cmd.Version={{ .Version }}
+    hooks:
+      post:
+        - cmd: sh -c 'if [ "{{ .Os }}" = "darwin" ]; then codesign --sign "$APPLE_SIGNING_IDENTITY" --options runtime --timestamp --force "{{ .Path }}" && codesign --verify --verbose "{{ .Path }}"; fi'
 
 archives:
   - formats: [tar.gz]

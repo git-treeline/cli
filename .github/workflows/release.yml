@@ -4,13 +4,14 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   goreleaser:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
         with:
@@ -18,10 +19,90 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+
+      - name: Import Developer ID signing certificate
+        env:
+          P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+          CERT_PATH="$RUNNER_TEMP/cert.p12"
+
+          echo "$P12_BASE64" | base64 --decode > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+          rm "$CERT_PATH"
+
+          # Sanity check: confirm the cert is usable for codesigning
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Store notarization credentials
+        env:
+          NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          KEY_PATH="$RUNNER_TEMP/notary_key.p8"
+          echo "$NOTARY_KEY_BASE64" | base64 --decode > "$KEY_PATH"
+
+          xcrun notarytool store-credentials "treeline-notary" \
+            --key "$KEY_PATH" \
+            --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER_ID"
+
+          rm "$KEY_PATH"
+
+      - name: Compute GoReleaser args
+        id: goreleaser_args
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "args=release --clean --snapshot --skip=publish,announce" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=release --clean" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
-          args: release --clean
+          args: ${{ steps.goreleaser_args.outputs.args }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          APPLE_SIGNING_IDENTITY: "Developer ID Application: Product Matter LLC (YF4L4H3726)"
+
+      - name: Notarize darwin binaries
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/notarize"
+          mkdir -p "$WORK"
+
+          for tarball in dist/git-treeline_*_darwin_*.tar.gz; do
+            echo "::group::Notarizing $tarball"
+            name="$(basename "$tarball" .tar.gz)"
+            workdir="$WORK/$name"
+            mkdir -p "$workdir"
+
+            tar -xzf "$tarball" -C "$workdir"
+
+            binary="$workdir/git-treeline"
+            if [ ! -f "$binary" ]; then
+              echo "Expected binary at $binary, got:" >&2
+              ls -la "$workdir" >&2
+              exit 1
+            fi
+
+            zip_path="$workdir/git-treeline.zip"
+            ditto -c -k --keepParent "$binary" "$zip_path"
+
+            xcrun notarytool submit "$zip_path" \
+              --keychain-profile "treeline-notary" \
+              --wait
+            echo "::endgroup::"
+          done
