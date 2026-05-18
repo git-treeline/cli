@@ -2,6 +2,7 @@ package tunnel
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -422,6 +423,33 @@ func TestVerifyDNS_RetryThenSucceed(t *testing.T) {
 	}
 	if attempts < 3 {
 		t.Errorf("expected at least 3 attempts, got %d", attempts)
+	}
+}
+
+// lookupHostVia must dial the provided resolver and ignore the OS resolver.
+// We point it at a UDP port that's bound but never replies, so a correct
+// implementation hits its own timeout. A regression that wired the system
+// resolver back in would succeed (or fail with a different error shape).
+func TestLookupHostVia_UsesGivenResolverNotSystem(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer pc.Close()
+	resolver := pc.LocalAddr().String()
+
+	// example.com would resolve fine via the system resolver. If our
+	// implementation accidentally falls back to it, this lookup will
+	// succeed and the assertion below will fail.
+	start := time.Now()
+	_, err = lookupHostVia("example.com.", resolver, 200*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected lookup to fail when resolver is unresponsive, got success — system resolver may be in the path")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("lookup took %v — expected to time out near 200ms", elapsed)
 	}
 }
 

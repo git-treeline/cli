@@ -4,6 +4,7 @@ package tunnel
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -357,10 +358,42 @@ func RouteDNSWithCert(tunnelName, hostname, certPath string) error {
 	return cmd.Run()
 }
 
-// VerifyDNS checks if a hostname resolves (has DNS records).
-// Returns true if the hostname resolves within the timeout.
+// PublicDNSResolver is the authoritative resolver VerifyDNS queries.
+// Cloudflare's 1.1.1.1 is appropriate since we're verifying records hosted
+// on Cloudflare and it's a public anycast resolver.
+const PublicDNSResolver = "1.1.1.1:53"
+
+// VerifyDNS polls an authoritative public resolver until the hostname
+// resolves or the timeout elapses.
+//
+// Why not net.LookupHost: that goes through the OS resolver. On macOS,
+// mDNSResponder caches NXDOMAIN responses for several minutes; any earlier
+// lookup of the hostname (browser, shell completion, or gtl itself during
+// setup) pins the negative answer and a 10–30s wait can't outlast it. We
+// dial 1.1.1.1 directly to bypass that cache.
 func VerifyDNS(hostname string, timeout time.Duration) bool {
-	return verifyDNSWith(hostname, timeout, net.LookupHost, 2*time.Second)
+	return verifyDNSWith(hostname, timeout, lookupHostPublic, 2*time.Second)
+}
+
+func lookupHostPublic(hostname string) ([]string, error) {
+	return lookupHostVia(hostname, PublicDNSResolver, 5*time.Second)
+}
+
+// lookupHostVia is the test seam — it dials `resolver` directly instead of
+// going through the OS resolver. PreferGo + a non-nil Dial guarantees Go's
+// pure resolver is used regardless of GODEBUG/netdns settings, which is the
+// whole point: we must not touch mDNSResponder's cache.
+func lookupHostVia(hostname, resolver string, timeout time.Duration) ([]string, error) {
+	r := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			d := net.Dialer{Timeout: timeout}
+			return d.DialContext(ctx, network, resolver)
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return r.LookupHost(ctx, hostname)
 }
 
 func verifyDNSWith(hostname string, timeout time.Duration, lookup func(string) ([]string, error), interval time.Duration) bool {

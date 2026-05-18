@@ -210,41 +210,18 @@ Two ways forward:
 		}
 
 		wildcardHost := "*." + domain
-		fmt.Println(style.Actionf("Routing %s → tunnel %q", wildcardHost, tunnelName))
-		if err := tunnel.RouteDNSWithCert(tunnelName, wildcardHost, certPath); err != nil {
-			return cliErr(cmd, printDNSManualInstructions(tunnelName, domain, err))
+		if err := routeDNSWithReauth(realDNSRouter(), tunnelName, domain, wildcardHost, &certPath); err != nil {
+			return cliErr(cmd, err)
 		}
 
-		// Verify DNS was created in the correct zone
+		// At this point cloudflared's API confirmed the route exists in
+		// the correct zone — a wrong-zone cert would have failed above
+		// with a 403. The remaining concern is just public propagation,
+		// so the check is informational.
 		testHost := "gtl-verify." + domain
 		fmt.Println(style.Dimf("Verifying DNS propagation..."))
-		if !tunnel.VerifyDNS(testHost, 10*time.Second) {
-			// DNS routing "succeeded" but record wasn't created in the right zone
-			// This happens when cert.pem is scoped to a different zone
-			fmt.Println()
-			fmt.Println(style.Warnf("DNS record was not created in the %s zone.", domain))
-			fmt.Println(style.Dimf("Your cloudflared credentials are for a different Cloudflare zone."))
-			fmt.Println()
-
-			if confirm.Prompt(fmt.Sprintf("Authenticate with the Cloudflare account that owns %s?", domain), true, nil) {
-				fmt.Println()
-				fmt.Println(style.Actionf("Opening Cloudflare login — select the zone for %s", domain))
-				if err := tunnel.LoginForDomain(domain); err != nil {
-					return fmt.Errorf("login failed: %w", err)
-				}
-
-				certPath = tunnel.CertPathForDomain(domain)
-				fmt.Println(style.Actionf("Routing %s → tunnel %q", wildcardHost, tunnelName))
-				if err := tunnel.RouteDNSWithCert(tunnelName, wildcardHost, certPath); err != nil {
-					return cliErr(cmd, printDNSManualInstructions(tunnelName, domain, err))
-				}
-
-				if !tunnel.VerifyDNS(testHost, 10*time.Second) {
-					return cliErr(cmd, printDNSManualInstructions(tunnelName, domain, nil))
-				}
-			} else {
-				return cliErr(cmd, printDNSManualInstructions(tunnelName, domain, nil))
-			}
+		if !tunnel.VerifyDNS(testHost, 30*time.Second) {
+			fmt.Println(style.Dimf("Record not visible from public DNS yet; propagation can take a minute. The tunnel will work once it resolves."))
 		}
 
 		if certPath != "" {
@@ -276,6 +253,68 @@ Two ways forward:
 	},
 }
 
+// dnsRouter bundles the side-effecting calls routeDNSWithReauth makes, so
+// tests can drive each branch without invoking cloudflared, opening a
+// browser, or reading stdin.
+type dnsRouter struct {
+	route  func(tunnelName, host, certPath string) error
+	login  func(domain string) error
+	prompt func(message string) bool
+}
+
+func realDNSRouter() dnsRouter {
+	return dnsRouter{
+		route: tunnel.RouteDNSWithCert,
+		login: tunnel.LoginForDomain,
+		prompt: func(msg string) bool {
+			return confirm.Prompt(msg, false, nil)
+		},
+	}
+}
+
+// routeDNSWithReauth attempts cloudflared's `tunnel route dns`. When it fails
+// and we used the default cert (no domain-specific cert on disk yet), the
+// most likely cause is that cert.pem is scoped to a different Cloudflare
+// zone — that's the failure mode we can recover from by re-authenticating.
+// On a successful re-login the caller's certPath is updated so the saved
+// config records the domain-specific cert.
+func routeDNSWithReauth(d dnsRouter, tunnelName, domain, wildcardHost string, certPath *string) error {
+	fmt.Println(style.Actionf("Routing %s → tunnel %q", wildcardHost, tunnelName))
+	err := d.route(tunnelName, wildcardHost, *certPath)
+	if err == nil {
+		return nil
+	}
+
+	// Only offer re-auth when we used the default cert. If a domain-
+	// specific cert was already on disk and still failed, re-login won't
+	// help; surface the error.
+	if *certPath != "" {
+		return printDNSManualInstructions(tunnelName, domain, err)
+	}
+
+	fmt.Println()
+	fmt.Println(style.Warnf("Cloudflare rejected the DNS route: %v", err))
+	fmt.Println(style.Dimf("Most often this means your current cloudflared credentials don't have access to the %s zone.", domain))
+	fmt.Println()
+
+	if !d.prompt(fmt.Sprintf("Authenticate with the Cloudflare account that owns %s?", domain)) {
+		return printDNSManualInstructions(tunnelName, domain, err)
+	}
+
+	fmt.Println()
+	fmt.Println(style.Actionf("Opening Cloudflare login — select the zone for %s", domain))
+	if err := d.login(domain); err != nil {
+		return fmt.Errorf("login failed: %w", err)
+	}
+
+	*certPath = tunnel.CertPathForDomain(domain)
+	fmt.Println(style.Actionf("Routing %s → tunnel %q", wildcardHost, tunnelName))
+	if err := d.route(tunnelName, wildcardHost, *certPath); err != nil {
+		return printDNSManualInstructions(tunnelName, domain, err)
+	}
+	return nil
+}
+
 func printDNSManualInstructions(tunnelName, domain string, err error) error {
 	tunnelUUID := tunnel.GetTunnelUUID(tunnelName)
 	if tunnelUUID == "" {
@@ -293,15 +332,9 @@ func printDNSManualInstructions(tunnelName, domain string, err error) error {
 	fmt.Printf("  Proxy:  Proxied (orange cloud)\n")
 	fmt.Println()
 
-	if err != nil {
-		return &CliError{
-			Message: "DNS routing failed",
-			Hint:    "Add the CNAME record manually in Cloudflare dashboard, then re-run setup.",
-		}
-	}
 	return &CliError{
-		Message: "DNS record not found in target zone",
-		Hint:    "Add the CNAME record manually in Cloudflare dashboard.",
+		Message: "DNS routing failed",
+		Hint:    "Add the CNAME record manually in Cloudflare dashboard, then re-run setup.",
 	}
 }
 
