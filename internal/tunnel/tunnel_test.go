@@ -435,7 +435,7 @@ func TestLookupHostVia_UsesGivenResolverNotSystem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer pc.Close()
+	defer func() { _ = pc.Close() }()
 	resolver := pc.LocalAddr().String()
 
 	// example.com would resolve fine via the system resolver. If our
