@@ -3,13 +3,144 @@ package cmd
 import (
 	"bytes"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/git-treeline/cli/internal/config"
 )
+
+// startFakeSupervisor stands up a unix-socket listener that responds to a single
+// supervisor command with the given reply, then optionally removes the socket
+// to mimic a real supervisor exiting after "shutdown". Returns the chosen path.
+// Uses a short path under /tmp because macOS caps unix-socket paths at ~104 bytes,
+// which the default t.TempDir() blows past.
+func startFakeSupervisor(t *testing.T, reply string, removeAfter bool) string {
+	t.Helper()
+	f, err := os.CreateTemp("/tmp", "gtl-test-*.sock")
+	if err != nil {
+		t.Fatalf("create temp sock path: %v", err)
+	}
+	sockPath := f.Name()
+	_ = f.Close()
+	_ = os.Remove(sockPath)
+	t.Cleanup(func() { _ = os.Remove(sockPath) })
+
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	// By default UnixListener.Close() unlinks the socket file. For the
+	// "supervisor is wedged" case we want the file to stay so the wait loop
+	// actually has something to spin on.
+	if !removeAfter {
+		ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		buf := make([]byte, 64)
+		_, _ = conn.Read(buf)
+		_, _ = conn.Write([]byte(reply))
+		if removeAfter {
+			_ = ln.Close()
+		}
+	}()
+	return sockPath
+}
+
+func TestStopOtherSupervisor_Success(t *testing.T) {
+	sockPath := startFakeSupervisor(t, "ok", true)
+
+	if err := stopOtherSupervisor(sockPath, 2*time.Second); err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
+		t.Errorf("expected socket gone, stat err: %v", err)
+	}
+}
+
+func TestStopOtherSupervisor_NoSocket(t *testing.T) {
+	sockPath := filepath.Join(t.TempDir(), "missing.sock")
+	err := stopOtherSupervisor(sockPath, 500*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected error when socket is missing")
+	}
+	if !strings.Contains(err.Error(), "Could not stop") {
+		t.Errorf("expected 'Could not stop' error, got: %v", err)
+	}
+}
+
+func TestStopOtherSupervisor_SocketLingers(t *testing.T) {
+	// Supervisor responds ok but never removes the socket — wait should time out.
+	sockPath := startFakeSupervisor(t, "ok", false)
+
+	err := stopOtherSupervisor(sockPath, 300*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout error when socket lingers")
+	}
+	if !strings.Contains(err.Error(), "didn't shut down") {
+		t.Errorf("expected timeout phrasing, got: %v", err)
+	}
+}
+
+func TestRestartViaSupervisor_Success(t *testing.T) {
+	sockPath := startFakeSupervisor(t, "ok", false)
+	if err := restartViaSupervisor(sockPath); err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+}
+
+func TestRestartViaSupervisor_ErrorResponse(t *testing.T) {
+	sockPath := startFakeSupervisor(t, "error: child crashed", false)
+	err := restartViaSupervisor(sockPath)
+	if err == nil {
+		t.Fatal("expected error when supervisor replies with error:")
+	}
+	if !strings.Contains(err.Error(), "child crashed") {
+		t.Errorf("expected supervisor error in message, got: %v", err)
+	}
+}
+
+func TestRestartViaSupervisor_NoSocket(t *testing.T) {
+	sockPath := filepath.Join(t.TempDir(), "missing.sock")
+	err := restartViaSupervisor(sockPath)
+	if err == nil {
+		t.Fatal("expected error when socket is missing")
+	}
+	if !strings.Contains(err.Error(), "Could not reach supervisor") {
+		t.Errorf("expected 'Could not reach supervisor' error, got: %v", err)
+	}
+}
+
+func TestPromptRunningElsewhere_DefaultIsMove(t *testing.T) {
+	// Empty input → confirm.Select returns the default (index 0 = Move).
+	got := promptRunningElsewhere(strings.NewReader("\n"))
+	if got != runningActionMove {
+		t.Errorf("expected runningActionMove on empty input, got %v", got)
+	}
+}
+
+func TestPromptRunningElsewhere_PickRestart(t *testing.T) {
+	got := promptRunningElsewhere(strings.NewReader("2\n"))
+	if got != runningActionRestart {
+		t.Errorf("expected runningActionRestart, got %v", got)
+	}
+}
+
+func TestPromptRunningElsewhere_PickCancel(t *testing.T) {
+	got := promptRunningElsewhere(strings.NewReader("3\n"))
+	if got != runningActionCancel {
+		t.Errorf("expected runningActionCancel, got %v", got)
+	}
+}
 
 // captureStderr runs fn and returns everything written to os.Stderr.
 func captureStderr(t *testing.T, fn func()) string {

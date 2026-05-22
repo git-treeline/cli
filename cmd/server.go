@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/confirm"
 	"github.com/git-treeline/cli/internal/detect"
 	"github.com/git-treeline/cli/internal/format"
 	"github.com/git-treeline/cli/internal/interpolation"
@@ -80,30 +81,51 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 		// Resume path — supervisor already running, no hooks re-fired
 		resp, err := supervisor.Send(sockPath, "status")
 		if err == nil {
-			if len(activeHooks) > 0 {
-				fmt.Fprintln(os.Stderr, style.Warnf("--with ignored: supervisor already running. Hooks only run on fresh start."))
-			}
 			if resp == "running" {
+				// --await is for scripts: just wait for readiness, no prompt.
 				if startAwait {
 					return cliErr(cmd, awaitReady(sockPath))
 				}
-				return cliErr(cmd, errServerAlreadyRunning())
+				// Non-interactive (agent, piped stdin) — keep the legacy error.
+				if !stdinIsTTY() {
+					return cliErr(cmd, errServerAlreadyRunning())
+				}
+				action := promptRunningElsewhere(nil)
+				switch action {
+				case runningActionCancel:
+					return nil
+				case runningActionRestart:
+					if len(activeHooks) > 0 {
+						fmt.Fprintln(os.Stderr, style.Warnf("--with ignored: supervisor already running. Hooks only run on fresh start."))
+					}
+					return cliErr(cmd, restartViaSupervisor(sockPath))
+				case runningActionMove:
+					if err := stopOtherSupervisor(sockPath, 15*time.Second); err != nil {
+						return cliErr(cmd, err)
+					}
+					fmt.Println(style.Dimf("Stopped the server in the other terminal — starting fresh here."))
+					// Fall through to the fresh-start path below.
+				}
+			} else {
+				if len(activeHooks) > 0 {
+					fmt.Fprintln(os.Stderr, style.Warnf("--with ignored: supervisor already running. Hooks only run on fresh start."))
+				}
+				resp, err = supervisor.Send(sockPath, "start")
+				if err != nil {
+					return err
+				}
+				if strings.HasPrefix(resp, "error") {
+					return cliErr(cmd, &CliError{
+						Message: fmt.Sprintf("Server error: %s", resp),
+						Hint:    "Check the server logs, or run 'gtl stop' and try again.",
+					})
+				}
+				fmt.Println("Server resumed.")
+				if startAwait {
+					return cliErr(cmd, awaitReady(sockPath))
+				}
+				return nil
 			}
-			resp, err = supervisor.Send(sockPath, "start")
-			if err != nil {
-				return err
-			}
-			if strings.HasPrefix(resp, "error") {
-				return cliErr(cmd, &CliError{
-					Message: fmt.Sprintf("Server error: %s", resp),
-					Hint:    "Check the server logs, or run 'gtl stop' and try again.",
-				})
-			}
-			fmt.Println("Server resumed.")
-			if startAwait {
-				return cliErr(cmd, awaitReady(sockPath))
-			}
-			return nil
 		}
 
 		// Fresh start — check for project name drift before proceeding
@@ -505,6 +527,93 @@ func readHooksState(sockPath string) []string {
 
 func cleanHooksState(sockPath string) {
 	_ = os.Remove(hooksStatePath(sockPath))
+}
+
+// stdinIsTTY reports whether stdin is connected to a terminal device.
+// Used to gate interactive prompts so scripts/agents keep getting structured
+// errors instead of hanging on a read.
+func stdinIsTTY() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+type runningAction int
+
+const (
+	runningActionCancel runningAction = iota
+	runningActionMove
+	runningActionRestart
+)
+
+// promptRunningElsewhere asks the user what to do when 'gtl start' finds the
+// server already running under a supervisor owned by another terminal.
+// reader is the input source for confirm.Select (nil = os.Stdin).
+func promptRunningElsewhere(reader io.Reader) runningAction {
+	fmt.Println(style.Warnf("Server is already running, attached to another terminal."))
+	idx := confirm.Select(
+		"What would you like to do?",
+		[]string{
+			"Stop it and start fresh in this terminal",
+			"Restart in place (logs stay in the other terminal)",
+			"Cancel",
+		},
+		0,
+		reader,
+	)
+	switch idx {
+	case 0:
+		return runningActionMove
+	case 1:
+		return runningActionRestart
+	default:
+		return runningActionCancel
+	}
+}
+
+// stopOtherSupervisor shuts the existing supervisor down and waits for its
+// socket to disappear, so the caller can start a fresh supervisor without
+// racing the old one's cleanup. timeout caps the wait for socket cleanup.
+func stopOtherSupervisor(sockPath string, timeout time.Duration) error {
+	if _, err := supervisor.Send(sockPath, "shutdown"); err != nil {
+		return &CliError{
+			Message: fmt.Sprintf("Could not stop the running server: %s", err),
+			Hint:    "Try 'gtl stop --kill' manually, then re-run 'gtl start'.",
+		}
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(sockPath); os.IsNotExist(err) {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return &CliError{
+		Message: fmt.Sprintf("The other supervisor didn't shut down within %s.", timeout),
+		Hint:    "Run 'gtl stop --kill' from this directory, then re-run 'gtl start'.",
+	}
+}
+
+// restartViaSupervisor sends a restart over the socket. Used when the user
+// picks "restart in place" from the running-elsewhere prompt.
+func restartViaSupervisor(sockPath string) error {
+	resp, err := supervisor.Send(sockPath, "restart")
+	if err != nil {
+		return &CliError{
+			Message: fmt.Sprintf("Could not reach supervisor: %s", err),
+			Hint:    "The other terminal may have exited. Run 'gtl start' again.",
+		}
+	}
+	if strings.HasPrefix(resp, "error") {
+		return &CliError{
+			Message: fmt.Sprintf("Server error: %s", resp),
+			Hint:    "The server may have crashed. Try 'gtl stop --kill' then 'gtl start'.",
+		}
+	}
+	fmt.Println("Server restarted in the other terminal.")
+	return nil
 }
 
 func awaitReady(sockPath string) error {
