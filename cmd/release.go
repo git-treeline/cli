@@ -75,6 +75,31 @@ func runReleaseSingle(args []string) error {
 	reg := registry.New("")
 	alloc := reg.Find(absPath)
 	if alloc == nil {
+		if releaseRemoveWorktree {
+			if _, err := os.Stat(absPath); err == nil {
+				mainRepo := worktree.DetectMainRepo(absPath)
+				if mainRepo != absPath {
+					unpushed := worktree.UnpushedCommitCount(absPath)
+					if unpushed > 0 {
+						branch := worktree.CurrentBranch(absPath)
+						fmt.Println()
+						fmt.Println(style.Warnf("Branch %q has %d unpushed commit(s).", branch, unpushed))
+						fmt.Println(style.Dimf("  These commits may be lost if you remove the worktree."))
+						fmt.Println()
+					}
+					if releaseDryRun {
+						fmt.Printf("Would remove worktree %s. (dry-run)\n", filepath.Base(absPath))
+						return nil
+					}
+					if !confirm.Prompt("Remove worktree?", releaseForce, nil) {
+						fmt.Println("Aborted.")
+						return nil
+					}
+					removeWorktreeDir(absPath, releaseForce)
+					return nil
+				}
+			}
+		}
 		return errNoAllocation(absPath)
 	}
 
