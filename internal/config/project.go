@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -136,6 +137,35 @@ func (pc *ProjectConfig) DatabaseTemplate() string {
 		return s
 	}
 	return ""
+}
+
+// DatabaseConnArgs builds connection flag arguments for psql/createdb/dropdb
+// from optional database.host, database.port, and database.user config values.
+// Setting host: localhost forces TCP connections, which avoids Postgres.app's
+// Unix socket authorization dialog when gtl is invoked from a native macOS app.
+func (pc *ProjectConfig) DatabaseConnArgs() []string {
+	var args []string
+	if host, ok := Dig(pc.Data, "database", "host").(string); ok && host != "" {
+		args = append(args, "-h", host)
+	}
+	switch p := Dig(pc.Data, "database", "port").(type) {
+	case string:
+		if p != "" {
+			args = append(args, "-p", p)
+		}
+	case float64:
+		if p != 0 {
+			args = append(args, "-p", strconv.Itoa(int(p)))
+		}
+	case int:
+		if p != 0 {
+			args = append(args, "-p", strconv.Itoa(p))
+		}
+	}
+	if user, ok := Dig(pc.Data, "database", "user").(string); ok && user != "" {
+		args = append(args, "-U", user)
+	}
+	return args
 }
 
 func (pc *ProjectConfig) DatabasePattern() string {

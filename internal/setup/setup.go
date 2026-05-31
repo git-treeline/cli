@@ -406,7 +406,7 @@ func updateOrAppend(file, key, value string) error {
 
 func (s *Setup) cloneDatabase(alloc *allocator.Allocation) error {
 	adapterName := s.ProjectConfig.DatabaseAdapter()
-	adapter, err := database.ForAdapter(adapterName)
+	adapter, err := database.ForAdapter(adapterName, s.ProjectConfig.DatabaseConnArgs())
 	if err != nil {
 		return err
 	}

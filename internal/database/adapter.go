@@ -21,10 +21,12 @@ type Adapter interface {
 
 // ForAdapter returns the adapter for the given name.
 // Defaults to PostgreSQL for empty string (backward compatibility).
-func ForAdapter(name string) (Adapter, error) {
+// connArgs are connection flags (e.g. ["-h", "localhost"]) prepended to every
+// pg tool invocation; pass nil when no explicit connection is needed.
+func ForAdapter(name string, connArgs []string) (Adapter, error) {
 	switch name {
 	case "postgresql", "":
-		return &PostgreSQL{}, nil
+		return &PostgreSQL{ConnArgs: connArgs}, nil
 	case "sqlite":
 		return &SQLite{}, nil
 	default:

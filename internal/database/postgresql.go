@@ -23,32 +23,39 @@ var templateLocks sync.Map
 // PostgreSQL implements the Adapter interface for PostgreSQL databases.
 // Clone uses createdb --template, Drop uses dropdb --if-exists.
 type PostgreSQL struct {
+	// ConnArgs are prepended to every pg tool invocation (e.g. ["-h", "localhost", "-p", "5432"]).
+	// Setting -h forces TCP instead of Unix socket, which avoids Postgres.app's
+	// socket authorization dialog when gtl is invoked from a native macOS app.
+	ConnArgs   []string
 	execRun    func(name string, args ...string) error
 	execOutput func(name string, args ...string) ([]byte, error)
 }
 
 func (pg *PostgreSQL) run(name string, args ...string) error {
+	all := append(pg.ConnArgs, args...)
 	if pg.execRun != nil {
-		return pg.execRun(name, args...)
+		return pg.execRun(name, all...)
 	}
-	cmd := exec.Command(name, args...)
+	cmd := exec.Command(name, all...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
 func (pg *PostgreSQL) runSilent(name string, args ...string) error {
+	all := append(pg.ConnArgs, args...)
 	if pg.execRun != nil {
-		return pg.execRun(name, args...)
+		return pg.execRun(name, all...)
 	}
-	return exec.Command(name, args...).Run()
+	return exec.Command(name, all...).Run()
 }
 
 func (pg *PostgreSQL) output(name string, args ...string) ([]byte, error) {
+	all := append(pg.ConnArgs, args...)
 	if pg.execOutput != nil {
-		return pg.execOutput(name, args...)
+		return pg.execOutput(name, all...)
 	}
-	return exec.Command(name, args...).Output()
+	return exec.Command(name, all...).Output()
 }
 
 func (pg *PostgreSQL) Exists(name string) (bool, error) {

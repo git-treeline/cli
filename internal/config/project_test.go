@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -911,6 +912,62 @@ func TestProjectConfig_Validate(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), c.wantErr) {
 				t.Errorf("expected error containing %q, got: %v", c.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestDatabaseConnArgs(t *testing.T) {
+	tests := []struct {
+		name     string
+		yaml     string
+		wantArgs []string
+	}{
+		{
+			name:     "no connection config",
+			yaml:     "project: test\n",
+			wantArgs: nil,
+		},
+		{
+			name:     "host only forces TCP",
+			yaml:     "project: test\ndatabase:\n  host: localhost\n",
+			wantArgs: []string{"-h", "localhost"},
+		},
+		{
+			name:     "host and port as integer",
+			yaml:     "project: test\ndatabase:\n  host: localhost\n  port: 5432\n",
+			wantArgs: []string{"-h", "localhost", "-p", "5432"},
+		},
+		{
+			name:     "host and port as string",
+			yaml:     "project: test\ndatabase:\n  host: localhost\n  port: \"5433\"\n",
+			wantArgs: []string{"-h", "localhost", "-p", "5433"},
+		},
+		{
+			name:     "host, port, and user",
+			yaml:     "project: test\ndatabase:\n  host: localhost\n  port: 5432\n  user: myuser\n",
+			wantArgs: []string{"-h", "localhost", "-p", "5432", "-U", "myuser"},
+		},
+		{
+			name:     "user without host",
+			yaml:     "project: test\ndatabase:\n  user: myuser\n",
+			wantArgs: []string{"-U", "myuser"},
+		},
+		{
+			name:     "empty host ignored",
+			yaml:     "project: test\ndatabase:\n  host: \"\"\n",
+			wantArgs: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(tt.yaml), 0o644)
+			pc := LoadProjectConfig(dir)
+			got := pc.DatabaseConnArgs()
+			if !reflect.DeepEqual(got, tt.wantArgs) {
+				t.Errorf("DatabaseConnArgs() = %v, want %v", got, tt.wantArgs)
 			}
 		})
 	}

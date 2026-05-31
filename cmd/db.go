@@ -192,7 +192,7 @@ func resolveDB() (*dbInfo, error) {
 	}
 
 	adapterName := pc.DatabaseAdapter()
-	adapter, err := database.ForAdapter(adapterName)
+	adapter, err := database.ForAdapter(adapterName, pc.DatabaseConnArgs())
 	if err != nil {
 		return nil, err
 	}

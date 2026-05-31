@@ -79,7 +79,7 @@ func DropDatabases(allocs []Allocation) {
 			continue
 		}
 		adapterName := GetStr(a, "database_adapter")
-		adapter, err := database.ForAdapter(adapterName)
+		adapter, err := database.ForAdapter(adapterName, nil)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: %s, skipping database drop for %s\n", err, db)
 			continue
@@ -102,7 +102,7 @@ func DropSingleDB(alloc Allocation, worktreePath string) {
 		return
 	}
 	adapterName := GetStr(alloc, "database_adapter")
-	adapter, err := database.ForAdapter(adapterName)
+	adapter, err := database.ForAdapter(adapterName, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: %s, skipping database drop\n", err)
 		return

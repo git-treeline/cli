@@ -154,7 +154,7 @@ func dropDatabases(adapterName string, entries []registry.Allocation) {
 	if len(entries) == 0 {
 		return
 	}
-	adapter, err := database.ForAdapter(adapterName)
+	adapter, err := database.ForAdapter(adapterName, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  warning: %v\n", err)
 		return

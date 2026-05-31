@@ -405,7 +405,7 @@ func TestForAdapter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			adapter, err := ForAdapter(tt.name)
+			adapter, err := ForAdapter(tt.name, nil)
 			if tt.wantErr {
 				if err == nil {
 					t.Error("expected error")
@@ -419,5 +419,143 @@ func TestForAdapter(t *testing.T) {
 				t.Fatal("expected non-nil adapter")
 			}
 		})
+	}
+}
+
+func TestForAdapter_ConnArgsPropagated(t *testing.T) {
+	connArgs := []string{"-h", "localhost", "-p", "5432"}
+	adapter, err := ForAdapter("postgresql", connArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pg, ok := adapter.(*PostgreSQL)
+	if !ok {
+		t.Fatal("expected *PostgreSQL")
+	}
+	if len(pg.ConnArgs) != len(connArgs) {
+		t.Fatalf("ConnArgs = %v, want %v", pg.ConnArgs, connArgs)
+	}
+	for i, v := range connArgs {
+		if pg.ConnArgs[i] != v {
+			t.Errorf("ConnArgs[%d] = %q, want %q", i, pg.ConnArgs[i], v)
+		}
+	}
+}
+
+// --- ConnArgs prepend tests ---
+
+func testPgWithConnArgs(t *testing.T, connArgs []string) (*PostgreSQL, *[]cmdCall) {
+	t.Helper()
+	var calls []cmdCall
+	pg := &PostgreSQL{
+		ConnArgs: connArgs,
+		execRun: func(name string, args ...string) error {
+			calls = append(calls, cmdCall{name, args})
+			return nil
+		},
+		execOutput: func(name string, args ...string) ([]byte, error) {
+			calls = append(calls, cmdCall{name, args})
+			return []byte(" myapp_dev | user | UTF8\n"), nil
+		},
+	}
+	return pg, &calls
+}
+
+func TestPostgreSQL_ConnArgs_PrependedToExists(t *testing.T) {
+	pg, calls := testPgWithConnArgs(t, []string{"-h", "localhost", "-p", "5432"})
+
+	_, err := pg.Exists("myapp_dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(*calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(*calls))
+	}
+	args := (*calls)[0].args
+	if len(args) < 3 || args[0] != "-h" || args[1] != "localhost" || args[2] != "-p" {
+		t.Errorf("expected ConnArgs prepended, got: %v", args)
+	}
+}
+
+func TestPostgreSQL_ConnArgs_PrependedToClone(t *testing.T) {
+	pg, calls := testPgWithConnArgs(t, []string{"-h", "localhost"})
+
+	err := pg.Clone("myapp_dev", "myapp_feat")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(*calls) != 2 {
+		t.Fatalf("expected 2 calls, got %d: %v", len(*calls), *calls)
+	}
+	// Both psql (terminate) and createdb should have ConnArgs prepended
+	for i, call := range *calls {
+		if len(call.args) == 0 || call.args[0] != "-h" {
+			t.Errorf("call[%d] %s: expected -h as first arg, got %v", i, call.name, call.args)
+		}
+	}
+	// createdb args: [-h localhost myapp_feat --template myapp_dev]
+	createdbCall := (*calls)[1]
+	if createdbCall.name != "createdb" {
+		t.Fatalf("expected createdb, got %s", createdbCall.name)
+	}
+	// ConnArgs are [-h localhost], so target is at index 2
+	connOffset := 2
+	if createdbCall.args[connOffset] != "myapp_feat" {
+		t.Errorf("createdb target = %q, want myapp_feat (args: %v)", createdbCall.args[connOffset], createdbCall.args)
+	}
+}
+
+func TestPostgreSQL_ConnArgs_PrependedToDrop(t *testing.T) {
+	pg, calls := testPgWithConnArgs(t, []string{"-h", "localhost"})
+
+	err := pg.Drop("myapp_feat")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(*calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(*calls))
+	}
+	args := (*calls)[0].args
+	if len(args) == 0 || args[0] != "-h" {
+		t.Errorf("expected ConnArgs prepended to dropdb, got: %v", args)
+	}
+}
+
+func TestPostgreSQL_ConnArgs_PrependedToRestore(t *testing.T) {
+	dir := t.TempDir()
+	dumpFile := filepath.Join(dir, "dump.sql")
+	_ = os.WriteFile(dumpFile, []byte("CREATE TABLE foo;"), 0o644)
+
+	pg, calls := testPgWithConnArgs(t, []string{"-h", "localhost"})
+
+	err := pg.Restore("myapp_feat", dumpFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(*calls) != 2 {
+		t.Fatalf("expected 2 calls, got %d", len(*calls))
+	}
+	for i, call := range *calls {
+		if len(call.args) == 0 || call.args[0] != "-h" {
+			t.Errorf("call[%d] %s: expected -h as first arg, got %v", i, call.name, call.args)
+		}
+	}
+}
+
+func TestPostgreSQL_NoConnArgs_UnchangedBehavior(t *testing.T) {
+	pg, calls := testPg(t, " myapp_dev | user | UTF8\n", "")
+
+	err := pg.Clone("myapp_dev", "myapp_feat")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	createdbCall := (*calls)[1]
+	if createdbCall.args[0] != "myapp_feat" {
+		t.Errorf("without ConnArgs, first createdb arg should be target, got: %v", createdbCall.args)
 	}
 }
