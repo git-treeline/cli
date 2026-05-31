@@ -87,6 +87,14 @@ func runReleaseSingle(args []string) error {
 						fmt.Println(style.Dimf("  These commits may be lost if you remove the worktree."))
 						fmt.Println()
 					}
+					if releaseDryRun {
+						fmt.Printf("Would remove worktree %s. (dry-run)\n", filepath.Base(absPath))
+						return nil
+					}
+					if !confirm.Prompt("Remove worktree?", releaseForce, nil) {
+						fmt.Println("Aborted.")
+						return nil
+					}
 					removeWorktreeDir(absPath, releaseForce)
 					return nil
 				}
