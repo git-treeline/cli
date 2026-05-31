@@ -1,3 +1,7 @@
+## [0.43.6]
+
+- **Native macOS apps (e.g. Treeline.app) no longer get a Postgres.app permission dialog when creating worktree databases.** When `gtl` is spawned from a native app rather than a shell, `psql`/`createdb`/`dropdb` fell back to Unix socket connections, and Postgres.app's bundle-authorization dialog fired because the connection was attributed to the parent app's process family. Adding `host: localhost` (or any explicit host) to the `database:` block in `.treeline.yml` now forces TCP connections instead — bypassing the socket authorization entirely. `database.port` and `database.user` are also supported for full connection control.
+
 ## [0.43.5]
 
 - **`gtl release --remove-worktree` now works on unmanaged worktrees.** Previously, if a worktree was created outside of GTL (e.g. by Conductor's agent runner via `git worktree add` directly), `gtl release <path> --remove-worktree` would return "No allocation found" and do nothing — leaving the directory on disk and the entry in git's worktree list. Now, when `--remove-worktree` is passed and the path is a valid linked git worktree with no allocation record, GTL removes it via `git worktree remove`, warns about unpushed commits beforehand, and honors `--force` and `--dry-run`. Worktrees with an allocation record follow the existing path unchanged.
