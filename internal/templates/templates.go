@@ -53,6 +53,9 @@ func nextJS(project, templateDB string, det *detect.Result) string {
 		fmt.Fprintf(&b, "  adapter: postgresql\n")
 		fmt.Fprintf(&b, "  template: %s\n", templateDB)
 		fmt.Fprintf(&b, "  pattern: \"{template}_{worktree}\"\n")
+		fmt.Fprintf(&b, "  host: localhost\n")
+		fmt.Fprintf(&b, "  # port: 5432\n")
+		fmt.Fprintf(&b, "  # user: postgres\n")
 	}
 
 	if emit {
@@ -104,6 +107,9 @@ func rails(project, templateDB string, det *detect.Result) string {
 	} else {
 		fmt.Fprintf(&b, "  template: %s\n", templateDB)
 		fmt.Fprintf(&b, "  pattern: \"{template}_{worktree}\"\n")
+		fmt.Fprintf(&b, "  host: localhost\n")
+		fmt.Fprintf(&b, "  # port: 5432\n")
+		fmt.Fprintf(&b, "  # user: postgres\n")
 	}
 
 	b.WriteString("\ncopy_files:\n")
@@ -173,6 +179,9 @@ func phoenix(project, templateDB string, det *detect.Result) string {
 		}
 		fmt.Fprintf(&b, "  template: %s\n", tdb)
 		fmt.Fprintf(&b, "  pattern: \"{template}_{worktree}\"\n")
+		fmt.Fprintf(&b, "  host: localhost\n")
+		fmt.Fprintf(&b, "  # port: 5432\n")
+		fmt.Fprintf(&b, "  # user: postgres\n")
 	}
 
 	if emit {
