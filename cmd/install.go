@@ -80,7 +80,7 @@ What it does:
 		}
 
 		// Step 3: setup (allocate ports, write env, copy files)
-		if err := checkDriftOrAbort(worktreeRoot); err != nil {
+		if err := checkDriftOrAbortForSetup(worktreeRoot); err != nil {
 			return cliErr(cmd, err)
 		}
 

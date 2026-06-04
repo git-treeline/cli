@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/detect"
+	"github.com/git-treeline/cli/internal/registry"
 	setupPkg "github.com/git-treeline/cli/internal/setup"
 )
 
@@ -176,6 +178,48 @@ func TestInstallCmd_HappyPathInstallsHookAndAllocates(t *testing.T) {
 	}
 	if !uc.HasExplicitRouterDomain() {
 		t.Error("expected install-created config to persist router.domain explicitly")
+	}
+}
+
+func TestInstallCmd_DriftResolveReallocates(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	t.Chdir(dir)
+	t.Setenv("GTL_HOME", filepath.Join(t.TempDir(), "gtl-home"))
+	t.Setenv("GTL_HEADLESS", "1")
+
+	oldRegistryPath := setupPkg.RegistryPath
+	setupPkg.RegistryPath = ""
+	t.Cleanup(func() { setupPkg.RegistryPath = oldRegistryPath })
+
+	yml := "project: new_name\nport_count: 1\nenv_file: .env.test\nenv:\n  PORT: \"{port}\"\n"
+	if err := os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := registry.New("")
+	if err := reg.Allocate(registry.Allocation{
+		"worktree": dir,
+		"project":  "old_name",
+		"port":     float64(41000),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	origInput := driftReader
+	driftReader = bufio.NewReader(strings.NewReader("3\ny\n"))
+	t.Cleanup(func() { driftReader = origInput })
+
+	if err := installCmd.RunE(installCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	alloc := reg.Find(dir)
+	if alloc == nil {
+		t.Fatal("expected install to reallocate after drift resolve")
+	}
+	if got := registry.GetString(alloc, "project"); got != "new_name" {
+		t.Errorf("expected reallocated project new_name, got %q", got)
 	}
 }
 

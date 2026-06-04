@@ -38,6 +38,18 @@ func (m *mockAdapter) Exists(name string) (bool, error) {
 	return m.existing[name], nil
 }
 
+func (m *mockAdapter) Rename(oldName, newName string) error {
+	m.calls = append(m.calls, fmt.Sprintf("rename:%s->%s", oldName, newName))
+	if m.failOn == "rename" {
+		return fmt.Errorf("rename failed")
+	}
+	if m.existing[oldName] {
+		delete(m.existing, oldName)
+		m.existing[newName] = true
+	}
+	return nil
+}
+
 func (m *mockAdapter) Restore(target, dumpFile string) error {
 	m.calls = append(m.calls, fmt.Sprintf("restore:%s<-%s", target, dumpFile))
 	if m.failOn == "restore" {
