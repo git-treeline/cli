@@ -6,6 +6,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,6 +18,16 @@ import (
 
 	"github.com/git-treeline/cli/internal/platform"
 )
+
+// launchctlExitCode extracts the numeric exit code from a launchctl error,
+// returning -1 if the error is nil or not an exec.ExitError.
+func launchctlExitCode(err error) int {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
+}
 
 // runCmd executes a command and returns its error. Overridable for tests so
 // service-management code can be exercised without touching launchctl/systemctl.
@@ -294,8 +305,11 @@ func bounceLaunchAgent(wait time.Duration) error {
 	return waitForFreshVersion(before, wait)
 }
 
+// plistPathFn returns the plist path. Overridable in tests.
+var plistPathFn = PlistPath
+
 func reloadLaunchAgent(wait time.Duration) error {
-	plist := PlistPath()
+	plist := plistPathFn()
 	if _, err := os.Stat(plist); err != nil {
 		return fmt.Errorf("plist not found at %s — run 'gtl serve install' first", plist)
 	}
@@ -305,8 +319,24 @@ func reloadLaunchAgent(wait time.Duration) error {
 	// because it returns non-zero when the service isn't currently
 	// loaded — that's fine, we're about to bootstrap.
 	_ = runCmd("launchctl", "bootout", target)
-	if err := runCmd("launchctl", "bootstrap", launchDomain(), plist); err != nil {
-		return fmt.Errorf("launchctl bootstrap %s: %w", plist, err)
+
+	// On some macOS versions launchd needs a moment to settle after bootout
+	// before it will accept a bootstrap for the same label. Retry a few times
+	// on exit 5 ("already loaded / I/O error"), re-running bootout each time.
+	const maxRetries = 3
+	var bootstrapErr error
+	for i := 0; i < maxRetries; i++ {
+		if i > 0 {
+			sleepFn(500 * time.Millisecond)
+			_ = runCmd("launchctl", "bootout", target)
+		}
+		bootstrapErr = runCmd("launchctl", "bootstrap", launchDomain(), plist)
+		if bootstrapErr == nil || launchctlExitCode(bootstrapErr) != 5 {
+			break
+		}
+	}
+	if bootstrapErr != nil {
+		return fmt.Errorf("launchctl bootstrap %s: %w", plist, bootstrapErr)
 	}
 	return waitForFreshVersion(before, wait)
 }

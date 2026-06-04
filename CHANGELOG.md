@@ -1,3 +1,9 @@
+## [0.43.7]
+
+- **`gtl setup` and `gtl install` can now resolve project-name drift without throwing away local data.** When `.treeline.yml` has been renamed but the registry still has the old project name, setup/install now offer a Resolve path that keeps the YAML name, resets the registry entry, and either renames, drops, or leaves the existing worktree database based on an explicit prompt. Database operations fail closed: invalid prompt input, adapter errors, existence-check failures, drop failures, and SQLite rename collisions preserve the registry entry so the user can retry safely.
+- **`gtl serve install` is more tolerant of transient macOS launchd reload failures.** LaunchAgent bootstrap now retries the narrow `launchctl` exit-code-5 case after re-running bootout, which covers the common "just unloaded but launchd still thinks it is loaded" race without retrying unrelated failures.
+- **Go toolchain bumped to 1.26.4** to pick up standard-library security fixes flagged by `govulncheck`.
+
 ## [0.43.6]
 
 - **Native macOS apps (e.g. Treeline.app) no longer get a Postgres.app permission dialog when creating worktree databases.** When `gtl` is spawned from a native app rather than a shell, `psql`/`createdb`/`dropdb` fell back to Unix socket connections, and Postgres.app's bundle-authorization dialog fired because the connection was attributed to the parent app's process family. Adding `host: localhost` (or any explicit host) to the `database:` block in `.treeline.yml` now forces TCP connections instead — bypassing the socket authorization entirely. `database.port` and `database.user` are also supported for full connection control.

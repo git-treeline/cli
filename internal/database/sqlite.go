@@ -64,6 +64,22 @@ func (s *SQLite) Drop(target string) error {
 	return nil
 }
 
+func (s *SQLite) Rename(oldPath, newPath string) error {
+	if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+		return fmt.Errorf("creating target directory: %w", err)
+	}
+	if _, err := os.Stat(newPath); err == nil {
+		return fmt.Errorf("target database already exists: %s", newPath)
+	}
+	if err := os.Rename(oldPath, newPath); err != nil {
+		return err
+	}
+	// Best-effort rename of WAL mode companion files.
+	_ = os.Rename(oldPath+"-wal", newPath+"-wal")
+	_ = os.Rename(oldPath+"-shm", newPath+"-shm")
+	return nil
+}
+
 func (s *SQLite) Restore(target, dumpFile string) error {
 	if err := s.Drop(target); err != nil {
 		return err

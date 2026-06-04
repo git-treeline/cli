@@ -221,3 +221,72 @@ func TestSQLite_Restore_CommandFailure(t *testing.T) {
 		t.Errorf("expected 'restoring' in error, got: %v", err)
 	}
 }
+
+func TestSQLite_Rename_MovesFile(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "old.db")
+	newPath := filepath.Join(dir, "new.db")
+	walPath := oldPath + "-wal"
+	shmPath := oldPath + "-shm"
+
+	_ = os.WriteFile(oldPath, []byte("data"), 0o644)
+	_ = os.WriteFile(walPath, []byte("wal"), 0o644)
+	_ = os.WriteFile(shmPath, []byte("shm"), 0o644)
+
+	s := &SQLite{}
+	if err := s.Rename(oldPath, newPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(newPath); err != nil {
+		t.Errorf("expected new path to exist: %v", err)
+	}
+	if _, err := os.Stat(newPath + "-wal"); err != nil {
+		t.Errorf("expected new wal path to exist: %v", err)
+	}
+	if _, err := os.Stat(oldPath); err == nil {
+		t.Error("expected old path to be gone")
+	}
+}
+
+func TestSQLite_Rename_TargetExists_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "old.db")
+	newPath := filepath.Join(dir, "new.db")
+
+	_ = os.WriteFile(oldPath, []byte("old data"), 0o644)
+	_ = os.WriteFile(newPath, []byte("existing data"), 0o644)
+
+	s := &SQLite{}
+	err := s.Rename(oldPath, newPath)
+	if err == nil {
+		t.Fatal("expected error when target exists")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("expected 'already exists' in error, got: %v", err)
+	}
+
+	// Original file must be untouched.
+	data, _ := os.ReadFile(newPath)
+	if string(data) != "existing data" {
+		t.Error("existing target was clobbered")
+	}
+}
+
+func TestSQLite_Rename_MissingSource_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "missing.db")
+	newPath := filepath.Join(dir, "new.db")
+
+	s := &SQLite{}
+	err := s.Rename(oldPath, newPath)
+	if err == nil {
+		t.Fatal("expected error when source is missing")
+	}
+	if !os.IsNotExist(err) {
+		t.Errorf("expected not-exist error, got: %v", err)
+	}
+	if _, statErr := os.Stat(newPath); !os.IsNotExist(statErr) {
+		t.Errorf("target should not be created, stat err=%v", statErr)
+	}
+}

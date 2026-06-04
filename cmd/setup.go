@@ -60,7 +60,7 @@ var setupCmd = &cobra.Command{
 		}
 
 		setupAbs, _ := filepath.Abs(path)
-		if err := checkDriftOrAbort(setupAbs); err != nil {
+		if err := checkDriftOrAbortForSetup(setupAbs); err != nil {
 			return cliErr(cmd, err)
 		}
 

@@ -121,6 +121,26 @@ func (pg *PostgreSQL) Drop(target string) error {
 	return pg.runSilent("dropdb", "--if-exists", target)
 }
 
+func (pg *PostgreSQL) Rename(oldName, newName string) error {
+	if !dbIdentifierRe.MatchString(oldName) {
+		return fmt.Errorf("invalid database identifier: %q", oldName)
+	}
+	if !dbIdentifierRe.MatchString(newName) {
+		return fmt.Errorf("invalid database identifier: %q", newName)
+	}
+	// Terminate active connections before renaming — ALTER DATABASE RENAME TO
+	// requires no other sessions connected to the target database.
+	// SAFETY: oldName is validated by dbIdentifierRe above.
+	terminateSQL := fmt.Sprintf(
+		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '%s' AND pid <> pg_backend_pid();",
+		oldName,
+	)
+	_ = pg.runSilent("psql", "-d", "postgres", "-c", terminateSQL)
+	// SAFETY: both identifiers are validated by dbIdentifierRe above.
+	renameSQL := fmt.Sprintf("ALTER DATABASE %s RENAME TO %s", oldName, newName)
+	return pg.runSilent("psql", "-d", "postgres", "-c", renameSQL)
+}
+
 func (pg *PostgreSQL) Restore(target, dumpFile string) error {
 	if !dbIdentifierRe.MatchString(target) {
 		return fmt.Errorf("invalid database identifier: %q", target)
