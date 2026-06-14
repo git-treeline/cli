@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -173,6 +174,87 @@ func (pc *ProjectConfig) DatabasePattern() string {
 		return v
 	}
 	return "{template}_{worktree}"
+}
+
+// DBSourceConfig is one configured remote source under database.sources.<env>.
+type DBSourceConfig struct {
+	Via    string // "fly" | "url"
+	App    string // fly: Fly app name
+	Var    string // fly: env var to read (default DATABASE_URL)
+	URLEnv string // url: local env var holding a postgres:// URL (the `env:` key)
+}
+
+// DatabaseSourceSpec returns the configured source for a named env (e.g.
+// "production"), and whether it exists.
+func (pc *ProjectConfig) DatabaseSourceSpec(env string) (DBSourceConfig, bool) {
+	raw, ok := Dig(pc.Data, "database", "sources", env).(map[string]any)
+	if !ok {
+		return DBSourceConfig{}, false
+	}
+	cfg := DBSourceConfig{}
+	if v, ok := raw["via"].(string); ok {
+		cfg.Via = v
+	}
+	if v, ok := raw["app"].(string); ok {
+		cfg.App = v
+	}
+	if v, ok := raw["var"].(string); ok {
+		cfg.Var = v
+	}
+	if v, ok := raw["env"].(string); ok {
+		cfg.URLEnv = v
+	}
+	return cfg, true
+}
+
+// DatabaseSourceEnvs returns the configured source env names, sorted. Used to
+// list available envs in error messages.
+func (pc *ProjectConfig) DatabaseSourceEnvs() []string {
+	raw, ok := Dig(pc.Data, "database", "sources").(map[string]any)
+	if !ok {
+		return nil
+	}
+	envs := make([]string, 0, len(raw))
+	for k := range raw {
+		envs = append(envs, k)
+	}
+	sort.Strings(envs)
+	return envs
+}
+
+// DatabaseExtensionsRequire returns extensions to pre-create before a restore.
+func (pc *ProjectConfig) DatabaseExtensionsRequire() []string {
+	return pc.databaseStringList("extensions", "require")
+}
+
+// DatabaseExtensionsStrip returns extensions to comment out of the restore TOC.
+func (pc *ProjectConfig) DatabaseExtensionsStrip() []string {
+	return pc.databaseStringList("extensions", "strip")
+}
+
+func (pc *ProjectConfig) databaseStringList(keys ...string) []string {
+	path := append([]string{"database"}, keys...)
+	raw, ok := Dig(pc.Data, path...).([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// DatabaseSSLMode returns the explicit sslmode from config, or "" when unset.
+// The dbsource layer applies the "require" default; returning "" here lets an
+// sslmode embedded in a connection URL take effect when config doesn't override.
+func (pc *ProjectConfig) DatabaseSSLMode() string {
+	if v, ok := Dig(pc.Data, "database", "sslmode").(string); ok {
+		return v
+	}
+	return ""
 }
 
 // HasEnvFileConfig returns true if the config explicitly declares an env_file block.

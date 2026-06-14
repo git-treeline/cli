@@ -1,6 +1,7 @@
 # Binary
 git-treeline
 gtl
+/cli
 /dist/
 
 # OS

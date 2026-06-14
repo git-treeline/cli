@@ -322,6 +322,42 @@ gtl db drop                          # just drop the database
 
 `db restore` auto-detects the dump format (pg_dump custom format vs plain SQL) and uses `pg_restore` or `psql` accordingly.
 
+#### Pull a remote database into the worktree
+
+`gtl db pull` fetches a production/staging database into the **current worktree's** database — handy for developing migrations against realistic data. The template (db root) is never touched.
+
+```bash
+gtl db pull production               # dump remote, restore into the worktree db, keep the dump
+gtl db pull production --dry-run     # resolve + print the plan (password redacted), change nothing
+gtl db pull production --debug       # echo each command run (passwords redacted)
+gtl db refresh                       # reset the worktree db from the last pulled sample (no network)
+gtl db refresh production            # reset from a specific retained sample
+```
+
+`pull` does dump → drop/recreate → restore in one shot, retaining the dump under the worktree's `tmp/gtl-db/<env>.dump`. `refresh` re-imports that retained dump without re-downloading — the tight inner loop when iterating on a migration: build it, let it mangle the data, `gtl db refresh` back to the clean sample, retry. Dumps live in the worktree's `tmp/` and are removed when the worktree is torn down. Add `-f`/`--force` to skip the confirmation prompt. Postgres only.
+
+Configure remote sources under `database.sources` in `.treeline.yml`:
+
+```yaml
+database:
+  adapter: postgresql
+  template: club_value_development
+  sources:
+    production:
+      via: fly                # read creds via `fly ssh console -a <app> -C 'printenv'`
+      app: cv-prod
+      var: DATABASE_URL       # optional (default); falls back to discrete PG* vars
+    staging:
+      via: url                # universal escape hatch
+      env: STAGING_DATABASE_URL   # a local env var holding postgres://...
+  extensions:
+    require: [pg_trgm, citext]    # CREATE EXTENSION IF NOT EXISTS before restore
+    strip:   [pgaudit]            # commented out of the restore TOC (cloud-only extensions)
+  sslmode: require                # optional; defaults to require
+```
+
+Source types (`via:`) are `fly` (reads the Fly app's environment) and `url` (reads a local environment variable). Both require the remote host to be directly reachable from your machine — managed/hosted Postgres such as Crunchy Bridge, Fly-hosted, or RDS with a public endpoint. Internal-only hosts (e.g. `*.internal`/`*.flycast`) aren't supported yet; `pull` reports this clearly when it can't connect.
+
 ### 17. Resolve cross-worktree services
 
 ```bash
