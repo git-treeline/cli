@@ -972,3 +972,71 @@ func TestDatabaseConnArgs(t *testing.T) {
 		})
 	}
 }
+
+func TestDatabaseSources(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(`
+project: club
+database:
+  template: club_development
+  sources:
+    production:
+      via: fly
+      app: cv-prod
+      var: APP_DATABASE_URL
+    staging:
+      via: url
+      env: STAGING_DATABASE_URL
+  extensions:
+    require: [pg_trgm, citext]
+    strip: [pgaudit]
+  sslmode: disable
+`), 0o644)
+	pc := LoadProjectConfig(dir)
+
+	prod, ok := pc.DatabaseSourceSpec("production")
+	if !ok {
+		t.Fatal("production source missing")
+	}
+	if prod.Via != "fly" || prod.App != "cv-prod" || prod.Var != "APP_DATABASE_URL" {
+		t.Errorf("production = %+v", prod)
+	}
+	stg, ok := pc.DatabaseSourceSpec("staging")
+	if !ok {
+		t.Fatal("staging source missing")
+	}
+	if stg.Via != "url" || stg.URLEnv != "STAGING_DATABASE_URL" {
+		t.Errorf("staging = %+v", stg)
+	}
+	if _, ok := pc.DatabaseSourceSpec("nope"); ok {
+		t.Error("nonexistent env should return false")
+	}
+	if envs := pc.DatabaseSourceEnvs(); !reflect.DeepEqual(envs, []string{"production", "staging"}) {
+		t.Errorf("envs = %v", envs)
+	}
+	if req := pc.DatabaseExtensionsRequire(); !reflect.DeepEqual(req, []string{"pg_trgm", "citext"}) {
+		t.Errorf("require = %v", req)
+	}
+	if strip := pc.DatabaseExtensionsStrip(); !reflect.DeepEqual(strip, []string{"pgaudit"}) {
+		t.Errorf("strip = %v", strip)
+	}
+	if ssl := pc.DatabaseSSLMode(); ssl != "disable" {
+		t.Errorf("sslmode = %q, want disable", ssl)
+	}
+}
+
+func TestDatabaseSources_Absent(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: club\ndatabase:\n  template: club_development\n"), 0o644)
+	pc := LoadProjectConfig(dir)
+
+	if envs := pc.DatabaseSourceEnvs(); envs != nil {
+		t.Errorf("expected nil envs, got %v", envs)
+	}
+	if pc.DatabaseExtensionsRequire() != nil || pc.DatabaseExtensionsStrip() != nil {
+		t.Error("expected nil extension lists")
+	}
+	if pc.DatabaseSSLMode() != "" {
+		t.Error("expected empty sslmode when unset")
+	}
+}

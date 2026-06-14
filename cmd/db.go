@@ -19,10 +19,17 @@ var dbNameJSON bool
 func init() {
 	dbResetCmd.Flags().StringVar(&dbResetFrom, "from", "", "Clone from this database instead of the configured template")
 	dbNameCmd.Flags().BoolVar(&dbNameJSON, "json", false, "Output as JSON")
+	dbPullCmd.Flags().BoolVarP(&dbPullForce, "force", "f", false, "Skip the confirmation prompt")
+	dbPullCmd.Flags().BoolVar(&dbPullDryRun, "dry-run", false, "Resolve and print the plan without making changes")
+	dbPullCmd.Flags().BoolVar(&dbPullDebug, "debug", false, "Echo each command (passwords redacted)")
+	dbRefreshCmd.Flags().BoolVarP(&dbRefreshForce, "force", "f", false, "Skip the confirmation prompt")
+	dbRefreshCmd.Flags().BoolVar(&dbRefreshDebug, "debug", false, "Echo each command (passwords redacted)")
 	dbCmd.AddCommand(dbResetCmd)
 	dbCmd.AddCommand(dbRestoreCmd)
 	dbCmd.AddCommand(dbNameCmd)
 	dbCmd.AddCommand(dbDropCmd)
+	dbCmd.AddCommand(dbPullCmd)
+	dbCmd.AddCommand(dbRefreshCmd)
 	rootCmd.AddCommand(dbCmd)
 }
 
@@ -151,9 +158,11 @@ pg_dump file. Supports both custom format and plain SQL dumps.`,
 }
 
 type dbInfo struct {
-	target   string
-	template string
-	adapter  database.Adapter
+	target      string
+	template    string
+	adapter     database.Adapter
+	adapterName string
+	worktreeDir string
 }
 
 // resolveDBPaths returns the resolved target and template paths for a database
@@ -201,8 +210,10 @@ func resolveDB() (*dbInfo, error) {
 	target, tmpl := resolveDBPaths(adapterName, absPath, mainRepo, dbName, template)
 
 	return &dbInfo{
-		target:   target,
-		template: tmpl,
-		adapter:  adapter,
+		target:      target,
+		template:    tmpl,
+		adapter:     adapter,
+		adapterName: adapterName,
+		worktreeDir: absPath,
 	}, nil
 }
