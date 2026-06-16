@@ -481,6 +481,18 @@ func (pc *ProjectConfig) StartCommand() string {
 	return ""
 }
 
+func (pc *ProjectConfig) MigrateCommand() string {
+	if v, ok := Dig(pc.Data, "commands", "migrate").(string); ok {
+		return v
+	}
+	return ""
+}
+
+func (pc *ProjectConfig) DatabaseSyncOnCreate() bool {
+	v, ok := Dig(pc.Data, "database", "sync_on_create").(bool)
+	return ok && v
+}
+
 // MergeTarget returns the branch that prune --merged checks against.
 func (pc *ProjectConfig) MergeTarget() string {
 	if v, ok := pc.Data["merge_target"].(string); ok {
