@@ -1,3 +1,7 @@
+## [0.43.10]
+
+- **`gtl rename` is now safe when worktrees are on different branches.** Previously, rename tried to drop databases and reallocate all registered worktrees immediately, but those worktrees still had the old project name in their branch's `.treeline.yml`, causing every reallocation to fail. `gtl rename` now only updates `.treeline.yml` in the current branch and migrates user config keys, then lists the worktrees that need re-provisioning. Each worktree self-heals on the next `gtl setup` run after rebasing: setup detects the project name mismatch between its registry entry and `.treeline.yml`, drops the old database, releases the stale registry entry, and allocates fresh under the new name.
+
 ## [0.43.9]
 
 - **`database.sources` now supports `via: heroku` and renames `via: url` to `via: env`.** `via: heroku` fetches the connection URL directly from a Heroku app's config vars (`heroku config:get DATABASE_URL -a <app>`) — no local env var needed, same zero-secrets-in-config philosophy as `via: fly`. `via: url` is removed; use `via: env` with `var: VAR_NAME` as the escape hatch for platforms without native support (1Password-injected env, bastion tunnels, Neon, RDS, etc.) — the config stores only the env var name, never the URL itself. `database.sources.<env>.var` is now the unified field name across all source types (previously `env:` for the url source, `var:` for fly).
