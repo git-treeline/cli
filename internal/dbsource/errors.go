@@ -12,6 +12,10 @@ var (
 	ErrFlyNotInstalled = errors.New("fly CLI not found on PATH")
 	// ErrFlyNotAuthed means fly could not authenticate against the app.
 	ErrFlyNotAuthed = errors.New("fly CLI is not authenticated")
+	// ErrHerokuNotInstalled means the heroku CLI is not on PATH.
+	ErrHerokuNotInstalled = errors.New("heroku CLI not found on PATH")
+	// ErrHerokuNotAuthed means heroku could not authenticate against the app.
+	ErrHerokuNotAuthed = errors.New("heroku CLI is not authenticated")
 	// ErrMissingURL means an expected postgres:// URL was empty or unset.
 	ErrMissingURL = errors.New("postgres URL is empty or missing")
 )

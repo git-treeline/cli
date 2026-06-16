@@ -12,21 +12,26 @@ func TestNew_Dispatch(t *testing.T) {
 	} else if _, ok := s.(*flySource); !ok {
 		t.Errorf("fly → %T, want *flySource", s)
 	}
-	if s, err := New(Spec{Via: "url"}, deps); err != nil {
-		t.Fatalf("url: %v", err)
-	} else if _, ok := s.(*urlSource); !ok {
-		t.Errorf("url → %T, want *urlSource", s)
+	if s, err := New(Spec{Via: "heroku"}, deps); err != nil {
+		t.Fatalf("heroku: %v", err)
+	} else if _, ok := s.(*herokuSource); !ok {
+		t.Errorf("heroku → %T, want *herokuSource", s)
+	}
+	if s, err := New(Spec{Via: "env"}, deps); err != nil {
+		t.Fatalf("env: %v", err)
+	} else if _, ok := s.(*envSource); !ok {
+		t.Errorf("env → %T, want *envSource", s)
 	}
 	var ue *UnknownViaError
-	if _, err := New(Spec{Via: "heroku", Env: "production"}, deps); !errors.As(err, &ue) {
-		t.Errorf("heroku → %v, want *UnknownViaError", err)
+	if _, err := New(Spec{Via: "unknown", Env: "production"}, deps); !errors.As(err, &ue) {
+		t.Errorf("unknown → %v, want *UnknownViaError", err)
 	}
 }
 
-func TestUrlSource_Resolve(t *testing.T) {
+func TestEnvSource_Resolve(t *testing.T) {
 	env := map[string]string{"STAGING_DATABASE_URL": "postgres://u:p@h/club"}
-	src := &urlSource{
-		spec: Spec{Env: "staging", Via: "url", URLEnv: "STAGING_DATABASE_URL"},
+	src := &envSource{
+		spec: Spec{Env: "staging", Via: "env", Var: "STAGING_DATABASE_URL"},
 		deps: Deps{Getenv: func(k string) string { return env[k] }},
 	}
 	ci, err := src.Resolve()
@@ -38,9 +43,9 @@ func TestUrlSource_Resolve(t *testing.T) {
 	}
 }
 
-func TestUrlSource_MissingEnv(t *testing.T) {
-	src := &urlSource{
-		spec: Spec{Env: "staging", URLEnv: "STAGING_DATABASE_URL"},
+func TestEnvSource_MissingVar(t *testing.T) {
+	src := &envSource{
+		spec: Spec{Env: "staging", Var: "STAGING_DATABASE_URL"},
 		deps: Deps{Getenv: func(string) string { return "" }},
 	}
 	if _, err := src.Resolve(); !errors.Is(err, ErrMissingURL) {
@@ -48,8 +53,8 @@ func TestUrlSource_MissingEnv(t *testing.T) {
 	}
 }
 
-func TestUrlSource_NoEnvConfigured(t *testing.T) {
-	src := &urlSource{spec: Spec{Env: "staging", Via: "url"}, deps: Deps{}}
+func TestEnvSource_NoVarConfigured(t *testing.T) {
+	src := &envSource{spec: Spec{Env: "staging", Via: "env"}, deps: Deps{}}
 	var se *SpecError
 	if _, err := src.Resolve(); !errors.As(err, &se) {
 		t.Errorf("want *SpecError, got %v", err)

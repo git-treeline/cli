@@ -27,10 +27,9 @@ type ConnInfo struct {
 // database.sources.<env> block.
 type Spec struct {
 	Env     string // logical env name, e.g. "production"
-	Via     string // "fly" | "url"
-	App     string // fly: the Fly app name
-	Var     string // fly: env var to read (default DATABASE_URL)
-	URLEnv  string // url: local env var holding a postgres:// URL
+	Via     string // "fly" | "heroku" | "env"
+	App     string // fly/heroku: the app name
+	Var     string // fly/heroku: env var to read on the platform (default DATABASE_URL); env: local env var name
 	SSLMode string // explicit config sslmode ("" when unset); see resolveSSLMode
 }
 
@@ -39,22 +38,27 @@ type Source interface {
 	Resolve() (*ConnInfo, error)
 }
 
-// Deps holds injectable seams so resolution can be tested without a real fly
-// binary or process environment.
+// Deps holds injectable seams so resolution can be tested without a real
+// platform CLI or process environment.
 type Deps struct {
 	// RunFly runs the fly CLI with args and returns its combined output.
 	RunFly func(args ...string) ([]byte, error)
+	// RunHeroku runs the heroku CLI with args and returns its combined output.
+	RunHeroku func(args ...string) ([]byte, error)
 	// Getenv reads a local environment variable.
 	Getenv func(string) string
 	// LookPath reports whether a binary is on PATH.
 	LookPath func(string) (string, error)
 }
 
-// DefaultDeps wires Deps to the real fly binary and process environment.
+// DefaultDeps wires Deps to the real platform CLIs and process environment.
 func DefaultDeps() Deps {
 	return Deps{
 		RunFly: func(args ...string) ([]byte, error) {
 			return exec.Command("fly", args...).CombinedOutput()
+		},
+		RunHeroku: func(args ...string) ([]byte, error) {
+			return exec.Command("heroku", args...).CombinedOutput()
 		},
 		Getenv:   os.Getenv,
 		LookPath: exec.LookPath,
@@ -66,8 +70,10 @@ func New(s Spec, deps Deps) (Source, error) {
 	switch s.Via {
 	case "fly":
 		return &flySource{spec: s, deps: deps}, nil
-	case "url":
-		return &urlSource{spec: s, deps: deps}, nil
+	case "heroku":
+		return &herokuSource{spec: s, deps: deps}, nil
+	case "env":
+		return &envSource{spec: s, deps: deps}, nil
 	default:
 		return nil, &UnknownViaError{Via: s.Via, Env: s.Env}
 	}

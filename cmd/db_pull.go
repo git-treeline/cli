@@ -223,7 +223,6 @@ func buildSourceSpec(pc *config.ProjectConfig, env string) (dbsource.Spec, error
 		Via:     cfg.Via,
 		App:     cfg.App,
 		Var:     cfg.Var,
-		URLEnv:  cfg.URLEnv,
 		SSLMode: pc.DatabaseSSLMode(),
 	}, nil
 }
@@ -290,6 +289,10 @@ func classifySourceError(spec dbsource.Spec, err error) error {
 		return errFlyNotInstalled()
 	case errors.Is(err, dbsource.ErrFlyNotAuthed):
 		return errFlyNotAuthed(spec.App)
+	case errors.Is(err, dbsource.ErrHerokuNotInstalled):
+		return errHerokuNotInstalled()
+	case errors.Is(err, dbsource.ErrHerokuNotAuthed):
+		return errHerokuNotAuthed(spec.App)
 	}
 	var ve *dbsource.VarNotFoundError
 	if errors.As(err, &ve) {

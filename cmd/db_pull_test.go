@@ -158,8 +158,8 @@ database:
   template: club_development
   sources:
     staging:
-      via: url
-      env: STAGING_DATABASE_URL
+      via: env
+      var: STAGING_DATABASE_URL
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -198,8 +198,8 @@ database:
   template: club_development
   sources:
     staging:
-      via: url
-      env: STAGING_DATABASE_URL
+      via: env
+      var: STAGING_DATABASE_URL
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
