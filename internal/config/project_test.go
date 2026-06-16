@@ -1040,3 +1040,54 @@ func TestDatabaseSources_Absent(t *testing.T) {
 		t.Error("expected empty sslmode when unset")
 	}
 }
+
+func TestMigrateCommand(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("returns empty when not set", func(t *testing.T) {
+		_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: myapp\n"), 0o644)
+		pc := LoadProjectConfig(dir)
+		if pc.MigrateCommand() != "" {
+			t.Errorf("expected empty, got %q", pc.MigrateCommand())
+		}
+	})
+
+	t.Run("returns configured command", func(t *testing.T) {
+		yml := "project: myapp\ncommands:\n  migrate: bin/rails db:migrate\n"
+		_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+		pc := LoadProjectConfig(dir)
+		if pc.MigrateCommand() != "bin/rails db:migrate" {
+			t.Errorf("expected bin/rails db:migrate, got %q", pc.MigrateCommand())
+		}
+	})
+}
+
+func TestDatabaseSyncOnCreate(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("false when not set", func(t *testing.T) {
+		_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: myapp\n"), 0o644)
+		pc := LoadProjectConfig(dir)
+		if pc.DatabaseSyncOnCreate() {
+			t.Error("expected false when sync_on_create not set")
+		}
+	})
+
+	t.Run("true when set", func(t *testing.T) {
+		yml := "project: myapp\ndatabase:\n  sync_on_create: true\n"
+		_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+		pc := LoadProjectConfig(dir)
+		if !pc.DatabaseSyncOnCreate() {
+			t.Error("expected true when sync_on_create: true")
+		}
+	})
+
+	t.Run("false when explicitly false", func(t *testing.T) {
+		yml := "project: myapp\ndatabase:\n  sync_on_create: false\n"
+		_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+		pc := LoadProjectConfig(dir)
+		if pc.DatabaseSyncOnCreate() {
+			t.Error("expected false when sync_on_create: false")
+		}
+	})
+}

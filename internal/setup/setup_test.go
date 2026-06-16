@@ -993,3 +993,156 @@ func TestRunHookCommands_RunsInSpecifiedDirectory(t *testing.T) {
 		t.Error("expected proof file to exist, command did not run in specified directory")
 	}
 }
+
+// --- syncTemplateDatabase tests ---
+
+// gitInitRepo initialises a git repo at dir with an initial empty commit.
+func gitInitRepo(t *testing.T, dir string) {
+	t.Helper()
+	cmds := [][]string{
+		{"git", "init", dir},
+		{"git", "-C", dir, "config", "user.email", "test@example.com"},
+		{"git", "-C", dir, "config", "user.name", "Test"},
+		{"git", "-C", dir, "commit", "--allow-empty", "-m", "init"},
+	}
+	for _, args := range cmds {
+		if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", args, out)
+		}
+	}
+}
+
+func TestSyncTemplateDatabase_SkipsWhenNoMigrateCommand(t *testing.T) {
+	s, _, _ := testSetup(t, `
+project: test
+env_file:
+  target: .env
+  source: .env
+database:
+  sync_on_create: true
+`)
+	err := s.syncTemplateDatabase()
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	log := plainOutput(s)
+	if !strings.Contains(log, "commands.migrate is not configured") {
+		t.Errorf("expected warning about missing migrate command, got: %q", log)
+	}
+}
+
+func TestSyncTemplateDatabase_RunsMigrateInMainRepo(t *testing.T) {
+	dir := t.TempDir()
+	mainRepo := filepath.Join(dir, "main")
+	worktreeDir := filepath.Join(dir, "worktree")
+	_ = os.MkdirAll(mainRepo, 0o755)
+	_ = os.MkdirAll(worktreeDir, 0o755)
+
+	gitInitRepo(t, mainRepo)
+
+	// Local bare repo acts as origin
+	bareRepo := filepath.Join(dir, "bare.git")
+	if out, err := exec.Command("git", "clone", "--bare", mainRepo, bareRepo).CombinedOutput(); err != nil {
+		t.Fatalf("git clone --bare: %s", out)
+	}
+	if out, err := exec.Command("git", "-C", mainRepo, "remote", "add", "origin", bareRepo).CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %s", out)
+	}
+
+	yml := "project: test\nmerge_target: main\ncommands:\n  migrate: touch migrate_ran\n"
+	_ = os.WriteFile(filepath.Join(mainRepo, ".treeline.yml"), []byte(yml), 0o644)
+
+	pc := config.LoadProjectConfig(mainRepo)
+	s := &Setup{
+		WorktreePath:  worktreeDir,
+		MainRepo:      mainRepo,
+		ProjectConfig: pc,
+		Log:           &bytes.Buffer{},
+	}
+
+	if err := s.syncTemplateDatabase(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(mainRepo, "migrate_ran")); err != nil {
+		t.Error("expected migrate command to have run in main repo")
+	}
+}
+
+func TestRun_SyncOnCreate_SQLite(t *testing.T) {
+	dir := t.TempDir()
+	mainRepo := filepath.Join(dir, "main")
+	worktreeDir := filepath.Join(dir, "worktree")
+	_ = os.MkdirAll(mainRepo, 0o755)
+	_ = os.MkdirAll(worktreeDir, 0o755)
+
+	gitInitRepo(t, mainRepo)
+	bareRepo := filepath.Join(dir, "bare.git")
+	if out, err := exec.Command("git", "clone", "--bare", mainRepo, bareRepo).CombinedOutput(); err != nil {
+		t.Fatalf("git clone --bare: %s", out)
+	}
+	if out, err := exec.Command("git", "-C", mainRepo, "remote", "add", "origin", bareRepo).CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %s", out)
+	}
+
+	yml := `project: test
+merge_target: main
+env_file:
+  target: .env
+  source: .env
+database:
+  adapter: sqlite
+  template: db/development.sqlite3
+  pattern: "db/{worktree}.sqlite3"
+  sync_on_create: true
+commands:
+  migrate: touch migrate_ran
+env:
+  PORT: "{port}"
+`
+	_ = os.WriteFile(filepath.Join(mainRepo, ".treeline.yml"), []byte(yml), 0o644)
+	_ = os.WriteFile(filepath.Join(mainRepo, ".env"), []byte(""), 0o644)
+	_ = os.MkdirAll(filepath.Join(mainRepo, "db"), 0o755)
+	_ = os.WriteFile(filepath.Join(mainRepo, "db", "development.sqlite3"), []byte("sqlite-data"), 0o644)
+
+	regPath := filepath.Join(dir, "registry.json")
+	confPath := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(confPath, []byte(`{"port":{"base":3000,"increment":10},"redis":{"strategy":"prefixed","url":"redis://localhost:6379"}}`), 0o644)
+
+	uc := config.LoadUserConfig(confPath)
+	pc := config.LoadProjectConfig(mainRepo)
+	reg := registry.New(regPath)
+	al := allocator.New(uc, pc, reg)
+
+	s := &Setup{
+		WorktreePath:  worktreeDir,
+		MainRepo:      mainRepo,
+		UserConfig:    uc,
+		ProjectConfig: pc,
+		Registry:      reg,
+		Allocator:     al,
+		Log:           &bytes.Buffer{},
+	}
+
+	alloc, err := s.Run()
+	if err != nil {
+		t.Fatalf("Run() failed: %v", err)
+	}
+	if alloc.Database == "" {
+		t.Fatal("expected database name to be set")
+	}
+
+	// migrate command ran in main repo
+	if _, err := os.Stat(filepath.Join(mainRepo, "migrate_ran")); err != nil {
+		t.Error("expected migrate command to have run")
+	}
+
+	// SQLite DB was cloned into worktree
+	clonedPath := filepath.Join(worktreeDir, alloc.Database)
+	data, err := os.ReadFile(clonedPath)
+	if err != nil {
+		t.Fatalf("expected cloned SQLite file at %s: %v", clonedPath, err)
+	}
+	if string(data) != "sqlite-data" {
+		t.Errorf("expected cloned content, got %q", string(data))
+	}
+}
