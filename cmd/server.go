@@ -63,6 +63,10 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 			return cliErr(cmd, errNoStartCommand())
 		}
 
+		if err := ensureAllocation(cmd, absPath); err != nil {
+			return err
+		}
+
 		warnPortWiring(startCommand, absPath)
 		if service.IsRunning() {
 			warnRouterVersionMismatch()
@@ -306,6 +310,32 @@ func warnStaleCommand(w io.Writer, running, configured string) {
 // resolveEnvVars looks up the worktree's allocation from the registry and
 // interpolates the env template from the project config, including {resolve:...}
 // cross-worktree tokens. Returns nil if there's no allocation or no env template.
+// ensureAllocation checks whether the current directory has a registry entry.
+// If not and stdin is a TTY, it warns and offers to run setup interactively.
+// If not and stdin is not a TTY, it returns a clear error immediately.
+func ensureAllocation(cmd *cobra.Command, absPath string) error {
+	reg := registry.New("")
+	if reg.Find(absPath) != nil {
+		return nil
+	}
+
+	if !stdinIsTTY() {
+		return cliErr(cmd, errNoAllocation(absPath))
+	}
+
+	fmt.Fprintln(os.Stderr, style.Warnf("No allocation found for this directory — 'gtl setup' has not been run."))
+	if !confirm.Prompt("Run 'gtl setup' now?", false, nil) {
+		return cliErr(cmd, errNoAllocation(absPath))
+	}
+
+	uc := config.LoadUserConfig("")
+	s := setup.New(absPath, "", uc)
+	if _, err := s.Run(); err != nil {
+		return cliErr(cmd, errSetupFailed(err))
+	}
+	return nil
+}
+
 func resolveEnvVars(pc *config.ProjectConfig, absPath string) map[string]string {
 	reg := registry.New("")
 	alloc := reg.Find(absPath)
