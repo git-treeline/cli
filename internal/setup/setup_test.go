@@ -1000,7 +1000,7 @@ func TestRunHookCommands_RunsInSpecifiedDirectory(t *testing.T) {
 func gitInitRepo(t *testing.T, dir string) {
 	t.Helper()
 	cmds := [][]string{
-		{"git", "init", dir},
+		{"git", "init", "--initial-branch=main", dir},
 		{"git", "-C", dir, "config", "user.email", "test@example.com"},
 		{"git", "-C", dir, "config", "user.name", "Test"},
 		{"git", "-C", dir, "commit", "--allow-empty", "-m", "init"},
