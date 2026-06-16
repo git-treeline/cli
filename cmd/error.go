@@ -160,10 +160,24 @@ func errSourceVarNotFound(env, varName string) error {
 	}
 }
 
+func errHerokuNotInstalled() error {
+	return &CliError{
+		Message: "The heroku CLI is not installed.",
+		Hint:    "Install it: 'brew tap heroku/brew && brew install heroku' (see https://devcenter.heroku.com/articles/heroku-cli).",
+	}
+}
+
+func errHerokuNotAuthed(app string) error {
+	return &CliError{
+		Message: fmt.Sprintf("heroku could not access app '%s' — not authenticated.", app),
+		Hint:    "Run 'heroku login', and confirm the app name in database.sources.<env>.app.",
+	}
+}
+
 func errUnknownVia(env, via string) error {
 	return &CliError{
 		Message: fmt.Sprintf("Source '%s' uses unsupported type 'via: %s'.", env, via),
-		Hint:    "Supported source types are 'fly' and 'url'.",
+		Hint:    "Supported source types are 'fly', 'heroku', and 'env'.",
 	}
 }
 

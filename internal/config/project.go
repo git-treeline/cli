@@ -178,10 +178,9 @@ func (pc *ProjectConfig) DatabasePattern() string {
 
 // DBSourceConfig is one configured remote source under database.sources.<env>.
 type DBSourceConfig struct {
-	Via    string // "fly" | "url"
-	App    string // fly: Fly app name
-	Var    string // fly: env var to read (default DATABASE_URL)
-	URLEnv string // url: local env var holding a postgres:// URL (the `env:` key)
+	Via string // "fly" | "heroku" | "env"
+	App string // fly/heroku: app name
+	Var string // fly/heroku: platform env var to read (default DATABASE_URL); env: local env var name
 }
 
 // DatabaseSourceSpec returns the configured source for a named env (e.g.
@@ -200,9 +199,6 @@ func (pc *ProjectConfig) DatabaseSourceSpec(env string) (DBSourceConfig, bool) {
 	}
 	if v, ok := raw["var"].(string); ok {
 		cfg.Var = v
-	}
-	if v, ok := raw["env"].(string); ok {
-		cfg.URLEnv = v
 	}
 	return cfg, true
 }

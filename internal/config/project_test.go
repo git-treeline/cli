@@ -985,8 +985,8 @@ database:
       app: cv-prod
       var: APP_DATABASE_URL
     staging:
-      via: url
-      env: STAGING_DATABASE_URL
+      via: env
+      var: STAGING_DATABASE_URL
   extensions:
     require: [pg_trgm, citext]
     strip: [pgaudit]
@@ -1005,7 +1005,7 @@ database:
 	if !ok {
 		t.Fatal("staging source missing")
 	}
-	if stg.Via != "url" || stg.URLEnv != "STAGING_DATABASE_URL" {
+	if stg.Via != "env" || stg.Var != "STAGING_DATABASE_URL" {
 		t.Errorf("staging = %+v", stg)
 	}
 	if _, ok := pc.DatabaseSourceSpec("nope"); ok {
