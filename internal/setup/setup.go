@@ -87,6 +87,9 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	if err := s.ProjectConfig.Validate(); err != nil {
 		return nil, err
 	}
+	if err := s.handleProjectRename(); err != nil {
+		return nil, err
+	}
 	if pruned, err := s.Registry.Prune(); err == nil && pruned > 0 {
 		s.log("Reclaimed %d stale allocation(s)", pruned)
 	}
@@ -439,6 +442,39 @@ func (s *Setup) syncTemplateDatabase() error {
 		return fmt.Errorf("migrate command failed: %w", err)
 	}
 
+	return nil
+}
+
+func (s *Setup) handleProjectRename() error {
+	entry := s.Registry.Find(s.WorktreePath)
+	if entry == nil {
+		return nil
+	}
+	entryProject := registry.GetString(entry, "project")
+	if entryProject == s.ProjectConfig.Project() {
+		return nil
+	}
+	oldDB := registry.GetString(entry, "database")
+	if oldDB != "" {
+		s.log("Project renamed %s → %s, dropping database %s", entryProject, s.ProjectConfig.Project(), oldDB)
+		adapterName := registry.GetString(entry, "database_adapter")
+		if adapter, err := database.ForAdapter(adapterName, nil); err == nil {
+			dbPath := oldDB
+			if adapterName == "sqlite" {
+				dbPath = filepath.Join(s.WorktreePath, oldDB)
+			}
+			if exists, err := adapter.Exists(dbPath); err == nil && exists {
+				if err := adapter.Drop(dbPath); err != nil {
+					s.warn("failed to drop %s: %v", oldDB, err)
+				}
+			}
+		}
+	} else {
+		s.log("Project renamed %s → %s, re-provisioning", entryProject, s.ProjectConfig.Project())
+	}
+	if _, err := s.Registry.Release(s.WorktreePath); err != nil {
+		return fmt.Errorf("releasing stale registry entry: %w", err)
+	}
 	return nil
 }
 
