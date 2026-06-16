@@ -6,9 +6,7 @@ import (
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/confirm"
-	"github.com/git-treeline/cli/internal/database"
 	"github.com/git-treeline/cli/internal/registry"
-	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/style"
 	"github.com/git-treeline/cli/internal/worktree"
 	"github.com/spf13/cobra"
@@ -101,80 +99,17 @@ and router keys.`,
 			fmt.Println(style.Actionf("Migrated %d user-config key(s)", migrated))
 		}
 
-		dropDatabases(pc.DatabaseAdapter(), entries)
-
-		var paths []string
-		for _, e := range entries {
-			wt := registry.GetString(e, "worktree")
-			if wt == "" {
-				continue
-			}
-			if _, err := reg.Release(wt); err != nil {
-				fmt.Fprintf(os.Stderr, "  warning: failed to release %s: %v\n", wt, err)
-			}
-			if info, statErr := os.Stat(wt); statErr == nil && info.IsDir() {
-				paths = append(paths, wt)
-			}
-		}
-
-		successes := 0
-		var failures []string
-		if len(paths) > 0 {
+		if len(entries) > 0 {
 			fmt.Println()
-			fmt.Println("Reallocating worktrees under new project name...")
-		}
-		for _, p := range paths {
-			fmt.Printf("\n→ %s\n", p)
-			s := setup.New(p, "", uc)
-			if _, err := s.Run(); err != nil {
-				fmt.Fprintf(os.Stderr, "  ✗ %v\n", err)
-				failures = append(failures, p)
-				continue
+			fmt.Println("Commit this change and rebase each worktree, then run `gtl setup` to re-provision:")
+			for _, e := range entries {
+				wt := registry.GetString(e, "worktree")
+				if wt != "" {
+					fmt.Printf("  %s\n", wt)
+				}
 			}
-			successes++
 		}
 
-		fmt.Println()
-		fmt.Printf("Rename complete: %d worktree(s) reallocated", successes)
-		if len(failures) > 0 {
-			fmt.Printf(", %d failed", len(failures))
-		}
-		fmt.Println(".")
-		if len(failures) > 0 {
-			return fmt.Errorf("%d reallocation(s) failed", len(failures))
-		}
 		return nil
 	},
-}
-
-// dropDatabases drops every database name listed in the registry entries,
-// using the configured adapter. Errors are reported but don't abort the
-// rename — the worktree re-allocation step will surface any real problem.
-func dropDatabases(adapterName string, entries []registry.Allocation) {
-	if len(entries) == 0 {
-		return
-	}
-	adapter, err := database.ForAdapter(adapterName, nil)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "  warning: %v\n", err)
-		return
-	}
-	for _, e := range entries {
-		dbName := registry.GetString(e, "database")
-		if dbName == "" {
-			continue
-		}
-		exists, err := adapter.Exists(dbName)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  warning: checking %s: %v\n", dbName, err)
-			continue
-		}
-		if !exists {
-			continue
-		}
-		fmt.Printf("==> Dropping %s\n", dbName)
-		if err := adapter.Drop(dbName); err != nil {
-			fmt.Fprintf(os.Stderr, "  warning: dropping %s: %v\n", dbName, err)
-		}
-	}
 }

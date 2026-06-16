@@ -1040,7 +1040,6 @@ func TestSyncTemplateDatabase_RunsMigrateInMainRepo(t *testing.T) {
 
 	gitInitRepo(t, mainRepo)
 
-	// Local bare repo acts as origin
 	bareRepo := filepath.Join(dir, "bare.git")
 	if out, err := exec.Command("git", "clone", "--bare", mainRepo, bareRepo).CombinedOutput(); err != nil {
 		t.Fatalf("git clone --bare: %s", out)
@@ -1131,12 +1130,10 @@ env:
 		t.Fatal("expected database name to be set")
 	}
 
-	// migrate command ran in main repo
 	if _, err := os.Stat(filepath.Join(mainRepo, "migrate_ran")); err != nil {
 		t.Error("expected migrate command to have run")
 	}
 
-	// SQLite DB was cloned into worktree
 	clonedPath := filepath.Join(worktreeDir, alloc.Database)
 	data, err := os.ReadFile(clonedPath)
 	if err != nil {
@@ -1144,5 +1141,178 @@ env:
 	}
 	if string(data) != "sqlite-data" {
 		t.Errorf("expected cloned content, got %q", string(data))
+	}
+}
+
+// --- handleProjectRename tests ---
+
+func testSetupWithRegistry(t *testing.T, yamlContent string) (*Setup, string, string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	mainRepo := filepath.Join(dir, "main")
+	worktreePath := filepath.Join(dir, "worktree")
+	_ = os.MkdirAll(mainRepo, 0o755)
+	_ = os.MkdirAll(worktreePath, 0o755)
+
+	_ = os.WriteFile(filepath.Join(mainRepo, ".treeline.yml"), []byte(yamlContent), 0o644)
+
+	regPath := filepath.Join(dir, "registry.json")
+	confPath := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(confPath, []byte(`{"port":{"base":3000,"increment":10},"redis":{"strategy":"prefixed","url":"redis://localhost:6379"}}`), 0o644)
+
+	uc := config.LoadUserConfig(confPath)
+	pc := config.LoadProjectConfig(mainRepo)
+	reg := registry.New(regPath)
+	al := allocator.New(uc, pc, reg)
+
+	s := &Setup{
+		WorktreePath:  worktreePath,
+		MainRepo:      mainRepo,
+		UserConfig:    uc,
+		ProjectConfig: pc,
+		Registry:      reg,
+		Allocator:     al,
+		Log:           &bytes.Buffer{},
+	}
+
+	return s, mainRepo, worktreePath, regPath
+}
+
+func TestHandleProjectRename_NoExistingEntry(t *testing.T) {
+	s, mainRepo, _, _ := testSetupWithRegistry(t, `
+project: myapp
+env_file:
+  target: .env.local
+  source: .env.local
+env:
+  PORT: "{port}"
+`)
+	_ = os.WriteFile(filepath.Join(mainRepo, ".env.local"), []byte(""), 0o644)
+
+	alloc, err := s.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alloc.Port == 0 {
+		t.Error("expected a port to be allocated")
+	}
+	if alloc.Reused {
+		t.Error("expected a fresh allocation, not reused")
+	}
+}
+
+func TestHandleProjectRename_MatchingProject_Reuses(t *testing.T) {
+	s, mainRepo, worktreePath, _ := testSetupWithRegistry(t, `
+project: myapp
+env_file:
+  target: .env.local
+  source: .env.local
+env:
+  PORT: "{port}"
+`)
+	_ = os.WriteFile(filepath.Join(mainRepo, ".env.local"), []byte(""), 0o644)
+
+	_ = s.Registry.Allocate(registry.Allocation{
+		"project":  "myapp",
+		"worktree": worktreePath,
+		"port":     3010,
+		"ports":    []any{float64(3010)},
+	})
+
+	alloc, err := s.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !alloc.Reused {
+		t.Error("expected allocation to be reused when project name matches")
+	}
+	if alloc.Port != 3010 {
+		t.Errorf("expected port 3010, got %d", alloc.Port)
+	}
+}
+
+func TestHandleProjectRename_MismatchedProject_ReleasesEntry(t *testing.T) {
+	s, mainRepo, worktreePath, _ := testSetupWithRegistry(t, `
+project: myapp_new
+env_file:
+  target: .env.local
+  source: .env.local
+env:
+  PORT: "{port}"
+`)
+	_ = os.WriteFile(filepath.Join(mainRepo, ".env.local"), []byte(""), 0o644)
+
+	_ = s.Registry.Allocate(registry.Allocation{
+		"project":  "myapp_old",
+		"worktree": worktreePath,
+		"port":     3010,
+		"ports":    []any{float64(3010)},
+	})
+
+	alloc, err := s.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if alloc.Reused {
+		t.Error("expected fresh allocation after project rename, not reused")
+	}
+
+	if s.Registry.Find(worktreePath) != nil {
+		entry := s.Registry.Find(worktreePath)
+		if proj, _ := entry["project"].(string); proj == "myapp_old" {
+			t.Error("expected stale registry entry to be released")
+		}
+	}
+
+	plain := ansiRE.ReplaceAllString(s.Log.(*bytes.Buffer).String(), "")
+	if !strings.Contains(plain, "myapp_old") || !strings.Contains(plain, "myapp_new") {
+		t.Errorf("expected rename message in log, got: %q", plain)
+	}
+}
+
+func TestHandleProjectRename_MismatchedProject_DropsSQLiteDB(t *testing.T) {
+	s, mainRepo, worktreePath, _ := testSetupWithRegistry(t, `
+project: myapp_new
+env_file:
+  target: .env
+  source: .env
+database:
+  adapter: sqlite
+  template: db/development.sqlite3
+  pattern: "db/{worktree}.sqlite3"
+env:
+  PORT: "{port}"
+  DATABASE_PATH: "{database}"
+`)
+	_ = os.WriteFile(filepath.Join(mainRepo, ".env"), []byte(""), 0o644)
+	_ = os.MkdirAll(filepath.Join(mainRepo, "db"), 0o755)
+	_ = os.WriteFile(filepath.Join(mainRepo, "db", "development.sqlite3"), []byte("sqlite-data"), 0o644)
+
+	oldDBRelPath := "db/myapp_old_wt.sqlite3"
+	oldDBAbsPath := filepath.Join(worktreePath, oldDBRelPath)
+	_ = os.MkdirAll(filepath.Join(worktreePath, "db"), 0o755)
+	_ = os.WriteFile(oldDBAbsPath, []byte("old-data"), 0o644)
+
+	_ = s.Registry.Allocate(registry.Allocation{
+		"project":          "myapp_old",
+		"worktree":         worktreePath,
+		"port":             3010,
+		"ports":            []any{float64(3010)},
+		"database":         oldDBRelPath,
+		"database_adapter": "sqlite",
+	})
+
+	alloc, err := s.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if alloc.Reused {
+		t.Error("expected fresh allocation, not reused")
+	}
+
+	if _, err := os.Stat(oldDBAbsPath); err == nil {
+		t.Error("expected old SQLite database file to be dropped")
 	}
 }
