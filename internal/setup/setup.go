@@ -178,6 +178,11 @@ func (s *Setup) runPostAllocation(alloc *allocator.Allocation, redisURL string) 
 	}
 
 	if alloc.Database != "" && !alloc.Reused {
+		if s.ProjectConfig.DatabaseSyncOnCreate() {
+			if err := s.syncTemplateDatabase(); err != nil {
+				return err
+			}
+		}
 		if err := s.cloneDatabase(alloc); err != nil {
 			return err
 		}
@@ -402,6 +407,39 @@ func updateOrAppend(file, key, value string) error {
 	}
 
 	return os.WriteFile(file, []byte(content), 0o644)
+}
+
+func (s *Setup) syncTemplateDatabase() error {
+	migrateCmd := s.ProjectConfig.MigrateCommand()
+	if migrateCmd == "" {
+		s.warn("database.sync_on_create is set but commands.migrate is not configured in .treeline.yml — skipping template sync")
+		return nil
+	}
+
+	mergeTarget := s.ProjectConfig.MergeTarget()
+	if mergeTarget == "" {
+		mergeTarget = "main"
+	}
+
+	s.log("Syncing template database (pulling %s + migrating)", mergeTarget)
+
+	pull := exec.Command("git", "pull", "origin", mergeTarget)
+	pull.Dir = s.MainRepo
+	pull.Stdout = s.Log
+	pull.Stderr = s.Log
+	if err := pull.Run(); err != nil {
+		return fmt.Errorf("git pull in root repo: %w", err)
+	}
+
+	migrate := exec.Command("sh", "-c", migrateCmd)
+	migrate.Dir = s.MainRepo
+	migrate.Stdout = s.Log
+	migrate.Stderr = s.Log
+	if err := migrate.Run(); err != nil {
+		return fmt.Errorf("migrate command failed: %w", err)
+	}
+
+	return nil
 }
 
 func (s *Setup) cloneDatabase(alloc *allocator.Allocation) error {
