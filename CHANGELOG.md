@@ -1,3 +1,7 @@
+## [0.43.11]
+
+- **`gtl version --json` outputs structured CLI and router version info.** Returns `{"cli": "0.43.11", "router": "0.43.11"}` — or `"router": null` when no router is running. Designed as a clean, stable contract for tooling (e.g. GTLRuntimeInstaller) to read the running router version without scraping human-readable output.
+
 ## [0.43.10]
 
 - **`gtl rename` is now safe when worktrees are on different branches.** Previously, rename tried to drop databases and reallocate all registered worktrees immediately, but those worktrees still had the old project name in their branch's `.treeline.yml`, causing every reallocation to fail. `gtl rename` now only updates `.treeline.yml` in the current branch and migrates user config keys, then lists the worktrees that need re-provisioning. Each worktree self-heals on the next `gtl setup` run after rebasing: setup detects the project name mismatch between its registry entry and `.treeline.yml`, drops the old database, releases the stale registry entry, and allocates fresh under the new name.
