@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -126,6 +127,65 @@ func TestRenameCmd_ListsAffectedWorktrees(t *testing.T) {
 	}
 	if !strings.Contains(out, "gtl setup") {
 		t.Errorf("expected 'gtl setup' instructions in output, got: %q", out)
+	}
+}
+
+func TestRenameCmd_SameNameUpdatesStaleWorktree(t *testing.T) {
+	mainRepo, _ := makeRenameEnv(t)
+	writeRenameConfig(t, mainRepo, "myapp")
+
+	// Set up a real git repo with an initial commit so we can add a worktree.
+	gitCmds := [][]string{
+		{"init", "--initial-branch=main"},
+		{"config", "user.email", "test@example.com"},
+		{"config", "user.name", "Test"},
+		{"add", ".treeline.yml"},
+		{"commit", "-m", "init"},
+	}
+	for _, args := range gitCmds {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = mainRepo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %s", args, out)
+		}
+	}
+
+	// Add a linked worktree.
+	worktreeDir := filepath.Join(t.TempDir(), "feat-branch")
+	cmd := exec.Command("git", "worktree", "add", "-b", "feat-branch", worktreeDir)
+	cmd.Dir = mainRepo
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %s", out)
+	}
+
+	// Write a stale .treeline.yml with the old (invalid) name to the worktree.
+	writeRenameConfig(t, worktreeDir, "myapp-old")
+
+	t.Chdir(worktreeDir)
+	renameYes = true
+	t.Cleanup(func() { renameYes = false })
+
+	out := captureStdout(t, func() {
+		if err := renameCmd.RunE(renameCmd, []string{"myapp"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	if !strings.Contains(out, "Updated") {
+		t.Errorf("expected 'Updated' message for stale worktree, got: %q", out)
+	}
+	if strings.Contains(out, "Nothing to do") {
+		t.Errorf("expected worktree to be updated, not 'Nothing to do', got: %q", out)
+	}
+
+	wpc := config.LoadProjectConfig(worktreeDir)
+	if wpc.Project() != "myapp" {
+		t.Errorf("expected worktree project to be 'myapp', got %q", wpc.Project())
+	}
+	// Main repo should still be myapp.
+	mpc := config.LoadProjectConfig(mainRepo)
+	if mpc.Project() != "myapp" {
+		t.Errorf("expected main repo project to still be 'myapp', got %q", mpc.Project())
 	}
 }
 

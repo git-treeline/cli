@@ -56,6 +56,20 @@ and router keys.`,
 
 		oldName := pc.Project()
 		if oldName == newName {
+			// Main repo is already correct. If we're in a linked worktree whose own
+			// .treeline.yml still has a stale name (e.g. branch predates a rename),
+			// update it so that `gtl setup` stops failing.
+			worktreeRoot := worktree.DetectRepoRoot(cwd)
+			if worktreeRoot != mainRepo {
+				wpc := config.LoadProjectConfig(worktreeRoot)
+				if wpc.Exists() && wpc.Project() != newName {
+					if err := wpc.SetProject(newName); err != nil {
+						return fmt.Errorf("rewriting %s in worktree: %w", config.ProjectConfigFile, err)
+					}
+					fmt.Println(style.Actionf("Updated %s in current worktree (main repo was already up-to-date)", config.ProjectConfigFile))
+					return nil
+				}
+			}
 			fmt.Printf("Project is already named %q. Nothing to do.\n", newName)
 			return nil
 		}
