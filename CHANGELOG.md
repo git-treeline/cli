@@ -1,3 +1,7 @@
+## [0.43.12]
+
+- **`gtl rename` now fixes stale worktree configs when the main repo was already renamed.** When a project is renamed in the main repo and a linked worktree's branch predates the rename, running `gtl rename <new-name>` from that worktree would find the main repo already correct and exit with "Nothing to do" — leaving the worktree's `.treeline.yml` untouched, causing `gtl setup` and `gtl install` to keep failing with the invalid-name validation error. Now when the main repo already has the target name, `rename` detects the stale worktree config and updates it.
+
 ## [0.43.11]
 
 - **`gtl version --json` outputs structured CLI and router version info.** Returns `{"cli": "0.43.11", "router": "0.43.11"}` — or `"router": null` when no router is running. Designed as a clean, stable contract for tooling (e.g. GTLRuntimeInstaller) to read the running router version without scraping human-readable output.
