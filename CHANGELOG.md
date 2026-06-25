@@ -1,3 +1,7 @@
+## [0.43.13]
+
+- **`gtl start` is more resilient to orphaned server processes and dead terminals.** The supervisor now handles SIGHUP for graceful shutdown, so it exits cleanly when Conductor or any terminal emulator closes its window rather than surviving as an unresponsive zombie that blocks all subsequent `gtl start`/`gtl stop` commands. A write deadline on socket responses prevents a hung client from holding the supervisor's internal lock indefinitely. When a supervisor is alive but its server is stopped (original terminal gone after an app restart), `gtl start` now kills the orphaned supervisor and starts fresh in the current terminal so output appears where you're looking. A port pre-flight check detects when a previous server escaped cleanup and is still occupying the allocated port — it identifies the process via `tmp/pids/server.pid`, confirms it's the culprit, and prompts to kill it before startup rather than letting `bin/dev` fail with a cryptic framework error.
+
 ## [0.43.12]
 
 - **`gtl rename` now fixes stale worktree configs when the main repo was already renamed.** When a project is renamed in the main repo and a linked worktree's branch predates the rename, running `gtl rename <new-name>` from that worktree would find the main repo already correct and exit with "Nothing to do" — leaving the worktree's `.treeline.yml` untouched, causing `gtl setup` and `gtl install` to keep failing with the invalid-name validation error. Now when the main repo already has the target name, `rename` detects the stale worktree config and updates it.
