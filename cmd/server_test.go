@@ -622,7 +622,7 @@ func TestClearOrphanedPortProcess_PortFree(t *testing.T) {
 
 func TestClearOrphanedPortProcess_OccupiedNoPidFile(t *testing.T) {
 	ln, port := listenFreePort(t)
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	err := clearOrphanedPortProcess(port, t.TempDir())
 	if err == nil {
@@ -636,7 +636,7 @@ func TestClearOrphanedPortProcess_OccupiedNoPidFile(t *testing.T) {
 func TestClearOrphanedPortProcess_StalePidFile(t *testing.T) {
 	// Port is occupied but PID file points to a dead process.
 	ln, port := listenFreePort(t)
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	dir := t.TempDir()
 	pidFile := writePidFile(t, dir, 999999999) // guaranteed dead
@@ -651,7 +651,7 @@ func TestClearOrphanedPortProcess_StalePidFile(t *testing.T) {
 
 func TestClearOrphanedPortProcess_InvalidPidFile(t *testing.T) {
 	ln, port := listenFreePort(t)
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	dir := t.TempDir()
 	pidDir := filepath.Join(dir, "tmp", "pids")
@@ -674,7 +674,7 @@ func TestClearOrphanedPortProcess_LivePidNonTTY(t *testing.T) {
 	livePid := proc.Process.Pid
 
 	ln, port := listenFreePort(t)
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	dir := t.TempDir()
 	writePidFile(t, dir, livePid)
