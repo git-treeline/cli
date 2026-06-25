@@ -1,9 +1,11 @@
 package supervisor
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -286,6 +288,85 @@ func waitForFile(t *testing.T, path string, timeout time.Duration) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("file %s not created within %s", path, timeout)
+}
+
+func TestSupervisor_SIGHUPShutdown(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "test.sock")
+
+	sv := New("sleep 60", dir, sock)
+	sv.Log = func(f string, a ...any) {}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- sv.Run() }()
+
+	waitForSocket(t, sock, 2*time.Second)
+
+	// SIGHUP should trigger graceful shutdown identical to SIGINT/SIGTERM.
+	_ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP)
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Errorf("supervisor returned error on SIGHUP: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("supervisor didn't exit after SIGHUP")
+	}
+
+	if _, err := os.Stat(sock); !os.IsNotExist(err) {
+		t.Error("expected socket to be cleaned up after SIGHUP")
+	}
+}
+
+// TestSupervisor_WriteDeadlineUnblocksLock verifies that a hung client
+// (connects, sends a command, never reads the response) doesn't hold the
+// supervisor's mutex indefinitely. A subsequent "status" query must succeed
+// once the write deadline fires on the stuck connection.
+func TestSupervisor_WriteDeadlineUnblocksLock(t *testing.T) {
+	dir := t.TempDir()
+	// macOS caps unix socket paths at ~104 bytes; t.TempDir() paths exceed that.
+	f, err := os.CreateTemp("/tmp", "gtl-test-*.sock")
+	if err != nil {
+		t.Fatalf("create temp sock: %v", err)
+	}
+	sock := f.Name()
+	_ = f.Close()
+	_ = os.Remove(sock)
+	t.Cleanup(func() { _ = os.Remove(sock) })
+
+	sv := New("sleep 60", dir, sock)
+	sv.Log = func(f string, a ...any) {}
+	sv.ConnWriteDeadline = 200 * time.Millisecond // fast deadline for the test
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- sv.Run() }()
+	waitForSocket(t, sock, 2*time.Second)
+
+	// Connect and send "restart" but never read the response — simulates a
+	// client that disappears mid-command (e.g. gtl stop timing out).
+	hung, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = hung.Close() }()
+	_, _ = hung.Write([]byte("restart"))
+	// Deliberately not reading the response.
+
+	// Wait for the write deadline to fire and the handleConn goroutine to exit.
+	time.Sleep(400 * time.Millisecond)
+
+	// The mutex must be free now — status should respond immediately.
+	resp, err := SendWithTimeout(sock, "status", 2*time.Second)
+	if err != nil {
+		t.Fatalf("status after hung client: %v", err)
+	}
+	if resp != "running" && resp != "stopped" {
+		t.Errorf("unexpected status response: %q", resp)
+	}
+
+	_, _ = Send(sock, "shutdown")
+	<-errCh
 }
 
 func splitNonEmpty(s string) []string {

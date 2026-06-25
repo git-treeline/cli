@@ -3,10 +3,13 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/git-treeline/cli/internal/config"
@@ -111,29 +114,23 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 					// Fall through to the fresh-start path below.
 				}
 			} else {
-				if len(activeHooks) > 0 {
-					fmt.Fprintln(os.Stderr, style.Warnf("--with ignored: supervisor already running. Hooks only run on fresh start."))
+				// Supervisor alive but server stopped — the original terminal is
+				// likely gone (e.g. app restart). Kill the orphaned supervisor and
+				// start fresh here so output appears in the current terminal.
+				if err := stopOtherSupervisor(sockPath, 15*time.Second); err != nil {
+					return cliErr(cmd, err)
 				}
-				resp, err = supervisor.Send(sockPath, "start")
-				if err != nil {
-					return err
-				}
-				if strings.HasPrefix(resp, "error") {
-					return cliErr(cmd, &CliError{
-						Message: fmt.Sprintf("Server error: %s", resp),
-						Hint:    "Check the server logs, or run 'gtl stop' and try again.",
-					})
-				}
-				fmt.Println("Server resumed.")
-				if startAwait {
-					return cliErr(cmd, awaitReady(sockPath))
-				}
-				return nil
+				fmt.Println(style.Dimf("Restarting in this terminal..."))
+				// Fall through to fresh start below.
 			}
 		}
 
 		// Fresh start — check for project name drift before proceeding
 		if err := checkDriftOrAbort(absPath); err != nil {
+			return cliErr(cmd, err)
+		}
+
+		if err := clearOrphanedPortProcess(port, absPath); err != nil {
 			return cliErr(cmd, err)
 		}
 
@@ -663,4 +660,78 @@ func awaitReady(sockPath string) error {
 		Message: fmt.Sprintf("Server not ready: %s", resp),
 		Hint:    "The server started but isn't accepting connections. Check commands.start output.",
 	}
+}
+
+// clearOrphanedPortProcess checks whether the worktree's allocated port is
+// already occupied by a previous server that escaped cleanup. When a PID file
+// in tmp/pids/server.pid identifies the owner and that process is alive, the
+// user is prompted to kill it before the fresh start proceeds.
+func clearOrphanedPortProcess(port int, worktreeDir string) error {
+	if port == 0 {
+		return nil
+	}
+
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 300*time.Millisecond)
+	if err != nil {
+		return nil // port is free
+	}
+	_ = conn.Close()
+
+	// Port is occupied. Check for a server PID file written by a previous run
+	// of this worktree's server (Rails, Django, etc. write these on startup).
+	pidFile := filepath.Join(worktreeDir, "tmp", "pids", "server.pid")
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		// No PID file — port is occupied by something we can't identify.
+		fmt.Fprintln(os.Stderr, style.Warnf("Port %d is in use by an unknown process. Stop it manually, then run 'gtl start'.", port))
+		return &CliError{
+			Message: fmt.Sprintf("Port %d is already in use.", port),
+			Hint:    "Another process is listening on this port. Stop it and try again.",
+		}
+	}
+
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pid <= 0 {
+		return nil
+	}
+
+	// Confirm the PID is still alive before offering to kill it.
+	if err := syscall.Kill(pid, 0); err != nil {
+		// Stale PID file pointing to a dead process; remove it so the next
+		// server can start cleanly.
+		_ = os.Remove(pidFile)
+		return nil
+	}
+
+	// Live process identified from this worktree's PID file — safe to offer a kill.
+	if !stdinIsTTY() {
+		return &CliError{
+			Message: fmt.Sprintf("Port %d is occupied by a previous server (pid: %d).", port, pid),
+			Hint:    fmt.Sprintf("Kill it with: kill %d", pid),
+		}
+	}
+
+	fmt.Fprintln(os.Stderr, style.Warnf("A previous server is still running on port %d (pid: %d).", port, pid))
+	if !confirm.Prompt(fmt.Sprintf("Kill pid %d and continue?", pid), true, nil) {
+		return &CliError{
+			Message: "Aborted.",
+			Hint:    fmt.Sprintf("Kill manually with: kill %d", pid),
+		}
+	}
+
+	// SIGTERM first, escalate to SIGKILL if the port doesn't free in 2s.
+	_ = syscall.Kill(pid, syscall.SIGTERM)
+	for i := 0; i < 20; i++ {
+		time.Sleep(100 * time.Millisecond)
+		c, dialErr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
+		if dialErr != nil {
+			_ = os.Remove(pidFile)
+			return nil
+		}
+		_ = c.Close()
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
+	time.Sleep(200 * time.Millisecond)
+	_ = os.Remove(pidFile)
+	return nil
 }

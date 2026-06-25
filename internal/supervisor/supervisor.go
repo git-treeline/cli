@@ -33,6 +33,9 @@ type Supervisor struct {
 	Port       int
 	Env        map[string]string // extra env vars injected into the child process
 	Log        func(format string, args ...any)
+	// ConnWriteDeadline caps how long handleConn waits to write a response.
+	// Defaults to 15s. Override in tests to avoid slow-test hangs.
+	ConnWriteDeadline time.Duration
 
 	mu           sync.Mutex
 	child        *exec.Cmd
@@ -44,11 +47,12 @@ type Supervisor struct {
 
 func New(command, dir, socketPath string) *Supervisor {
 	return &Supervisor{
-		Command:    command,
-		Dir:        dir,
-		SocketPath: socketPath,
-		Log:        func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) },
-		done:       make(chan struct{}),
+		Command:           command,
+		Dir:               dir,
+		SocketPath:        socketPath,
+		Log:               func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) },
+		ConnWriteDeadline: 15 * time.Second,
+		done:              make(chan struct{}),
 	}
 }
 
@@ -72,7 +76,7 @@ func (s *Supervisor) Run() error {
 	}()
 
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
 	go s.acceptLoop()
 
@@ -196,10 +200,19 @@ func (s *Supervisor) handleConn(conn net.Conn) {
 	if err != nil {
 		return
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 
 	raw := strings.TrimSpace(string(buf[:n]))
 	parts := strings.SplitN(raw, ":", 2)
 	cmd := parts[0]
+
+	// wait-ready manages its own deadline via the timeout embedded in the command.
+	// All other commands must respond quickly — cap the write side to prevent a
+	// hung goroutine from holding s.mu indefinitely if the client disappears.
+	if cmd != "wait-ready" {
+		_ = conn.SetWriteDeadline(time.Now().Add(s.ConnWriteDeadline))
+	}
+
 	switch cmd {
 	case "restart":
 		if err := s.restart(); err != nil {
