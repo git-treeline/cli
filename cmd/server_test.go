@@ -2,10 +2,13 @@ package cmd
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -580,5 +583,128 @@ func TestInterpolateCommand(t *testing.T) {
 				t.Errorf("interpolateCommand(%q, %d) = %q, want %q", tt.cmd, tt.port, got, tt.want)
 			}
 		})
+	}
+}
+
+// --- clearOrphanedPortProcess tests ---
+
+// listenFreePort opens a TCP listener on a random free port and returns
+// the listener (caller must Close) and the chosen port number.
+func listenFreePort(t *testing.T) (net.Listener, int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen free port: %v", err)
+	}
+	return ln, ln.Addr().(*net.TCPAddr).Port
+}
+
+// writePidFile creates tmp/pids/server.pid under dir with the given pid.
+func writePidFile(t *testing.T, dir string, pid int) string {
+	t.Helper()
+	pidDir := filepath.Join(dir, "tmp", "pids")
+	if err := os.MkdirAll(pidDir, 0o755); err != nil {
+		t.Fatalf("mkdir pids: %v", err)
+	}
+	p := filepath.Join(pidDir, "server.pid")
+	if err := os.WriteFile(p, []byte(strconv.Itoa(pid)), 0o644); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+	return p
+}
+
+func TestClearOrphanedPortProcess_PortFree(t *testing.T) {
+	// port == 0 exits immediately; any free port also exits with nil.
+	if err := clearOrphanedPortProcess(0, t.TempDir()); err != nil {
+		t.Fatalf("expected nil for port 0, got %v", err)
+	}
+}
+
+func TestClearOrphanedPortProcess_OccupiedNoPidFile(t *testing.T) {
+	ln, port := listenFreePort(t)
+	defer func() { _ = ln.Close() }()
+
+	err := clearOrphanedPortProcess(port, t.TempDir())
+	if err == nil {
+		t.Fatal("expected error when port is occupied and no PID file exists")
+	}
+	if !strings.Contains(err.Error(), "already in use") {
+		t.Errorf("expected 'already in use' in error, got: %v", err)
+	}
+}
+
+func TestClearOrphanedPortProcess_StalePidFile(t *testing.T) {
+	// Port is occupied but PID file points to a dead process.
+	ln, port := listenFreePort(t)
+	defer func() { _ = ln.Close() }()
+
+	dir := t.TempDir()
+	pidFile := writePidFile(t, dir, 999999999) // guaranteed dead
+
+	if err := clearOrphanedPortProcess(port, dir); err != nil {
+		t.Fatalf("expected nil for stale PID, got %v", err)
+	}
+	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
+		t.Error("expected stale PID file to be removed")
+	}
+}
+
+func TestClearOrphanedPortProcess_InvalidPidFile(t *testing.T) {
+	ln, port := listenFreePort(t)
+	defer func() { _ = ln.Close() }()
+
+	dir := t.TempDir()
+	pidDir := filepath.Join(dir, "tmp", "pids")
+	_ = os.MkdirAll(pidDir, 0o755)
+	_ = os.WriteFile(filepath.Join(pidDir, "server.pid"), []byte("not-a-number"), 0o644)
+
+	// Unreadable PID → skip silently (don't block startup).
+	if err := clearOrphanedPortProcess(port, dir); err != nil {
+		t.Fatalf("expected nil for unreadable PID file, got %v", err)
+	}
+}
+
+func TestClearOrphanedPortProcess_LivePidNonTTY(t *testing.T) {
+	// Start a real background process so we have a live, non-current PID.
+	proc := exec.Command("sleep", "30")
+	if err := proc.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	t.Cleanup(func() { _ = proc.Process.Kill(); _ = proc.Wait() })
+	livePid := proc.Process.Pid
+
+	ln, port := listenFreePort(t)
+	defer func() { _ = ln.Close() }()
+
+	dir := t.TempDir()
+	writePidFile(t, dir, livePid)
+
+	// stdinIsTTY() checks os.Stdin — swap it for a pipe so the non-TTY
+	// code path is taken regardless of whether the test runs in a terminal.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	orig := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() {
+		os.Stdin = orig
+		_ = r.Close()
+		_ = w.Close()
+	})
+
+	got := clearOrphanedPortProcess(port, dir)
+	if got == nil {
+		t.Fatal("expected error for live PID in non-TTY context")
+	}
+	ce, ok := got.(*CliError)
+	if !ok {
+		t.Fatalf("expected *CliError, got %T: %v", got, got)
+	}
+	if !strings.Contains(ce.Message, fmt.Sprintf("pid: %d", livePid)) {
+		t.Errorf("expected PID in message, got: %q", ce.Message)
+	}
+	if !strings.Contains(ce.Hint, fmt.Sprintf("kill %d", livePid)) {
+		t.Errorf("expected kill hint, got: %q", ce.Hint)
 	}
 }
