@@ -217,6 +217,17 @@ supervisor entirely.`,
 
 		resp, err := supervisor.Send(sockPath, command)
 		if err != nil {
+			if stopKill {
+				if killed, killErr := forceKillSupervisor(sockPath); killed {
+					fmt.Println("Supervisor force-killed (was unresponsive).")
+					return nil
+				} else if killErr != nil {
+					return cliErr(cmd, &CliError{
+						Message: fmt.Sprintf("Could not force-kill supervisor: %s", killErr),
+						Hint:    "Find the supervisor PID manually and kill it.",
+					})
+				}
+			}
 			return err
 		}
 		if strings.HasPrefix(resp, "error") {
@@ -598,6 +609,29 @@ func promptRunningElsewhere(reader io.Reader) runningAction {
 	default:
 		return runningActionCancel
 	}
+}
+
+// forceKillSupervisor reads the supervisor's PID file and SIGKILLs the
+// process, then cleans up the socket and PID files. Used as a fallback when
+// the supervisor is alive enough to hold the socket but too hung to respond.
+// Returns (true, nil) on success, (false, nil) if no PID file exists,
+// (false, err) if the kill fails.
+func forceKillSupervisor(sockPath string) (bool, error) {
+	pidPath := supervisor.PidPath(sockPath)
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		return false, nil
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return false, nil
+	}
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+		return false, err
+	}
+	_ = os.Remove(sockPath)
+	_ = os.Remove(pidPath)
+	return true, nil
 }
 
 // stopOtherSupervisor shuts the existing supervisor down and waits for its

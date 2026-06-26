@@ -26,6 +26,11 @@ func SocketPath(worktreePath string) string {
 	return fmt.Sprintf("/tmp/gtl-%x.sock", h[:8])
 }
 
+// PidPath returns the supervisor PID file path corresponding to a socket path.
+func PidPath(socketPath string) string {
+	return strings.TrimSuffix(socketPath, ".sock") + ".pid"
+}
+
 type Supervisor struct {
 	Command    string
 	Dir        string
@@ -70,9 +75,13 @@ func (s *Supervisor) Run() error {
 	}
 	_ = os.Chmod(s.SocketPath, 0600)
 	s.listener = ln
+
+	pidPath := PidPath(s.SocketPath)
+	_ = os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0600)
 	defer func() {
 		_ = ln.Close()
 		_ = os.Remove(s.SocketPath)
+		_ = os.Remove(pidPath)
 	}()
 
 	sigs := make(chan os.Signal, 1)
