@@ -1,3 +1,7 @@
+## [0.43.15]
+
+- **`gtl start`'s port-process detection now correctly restricts `lsof` to TCP listeners.** The previous `lsof -ti :PORT` matched any file whose local or foreign port equaled the number — including established outbound connections — so an unrelated process with a matching remote port could be incorrectly identified and killed. The call is now scoped to `tcp:PORT -sTCP:LISTEN`, matching only processes actively listening on that TCP port.
+
 ## [0.43.14]
 
 - **`gtl start` uses `lsof` to identify and offer to kill unidentified processes blocking the allocated port.** Previously, when a process was occupying the port but had no `tmp/pids/server.pid` to attribute it, `gtl start` refused and required manual intervention. Now it finds the blocking listener's PID via `lsof`, shows the process name, and prompts to kill it before starting.
