@@ -721,7 +721,10 @@ func clearOrphanedPortProcess(port int, worktreeDir string) error {
 
 	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if err != nil || pid <= 0 {
-		return clearUnknownPortProcess(port)
+		// Unreadable PID file — we can't confirm who owns the port, so don't
+		// try to kill an unknown process. Let startup proceed; if the port is
+		// truly occupied the server will fail to bind with a clear message.
+		return nil
 	}
 
 	// Confirm the PID is still alive before offering to kill it.

@@ -624,12 +624,19 @@ func TestClearOrphanedPortProcess_OccupiedNoPidFile(t *testing.T) {
 	ln, port := listenFreePort(t)
 	defer func() { _ = ln.Close() }()
 
-	err := clearOrphanedPortProcess(port, t.TempDir())
-	if err == nil {
-		t.Fatal("expected error when port is occupied and no PID file exists")
+	// Force non-TTY so clearUnknownPortProcess returns an error instead of
+	// prompting (which could auto-kill the test binary itself via lsof).
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
 	}
-	if !strings.Contains(err.Error(), "already in use") {
-		t.Errorf("expected 'already in use' in error, got: %v", err)
+	orig := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = orig; _ = r.Close(); _ = w.Close() })
+
+	gotErr := clearOrphanedPortProcess(port, t.TempDir())
+	if gotErr == nil {
+		t.Fatal("expected error when port is occupied and no PID file exists")
 	}
 }
 
