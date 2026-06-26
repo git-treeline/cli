@@ -1,5 +1,6 @@
 ## [0.43.14]
 
+- **`gtl start` uses `lsof` to identify and offer to kill unidentified processes blocking the allocated port.** Previously, when a process was occupying the port but had no `tmp/pids/server.pid` to attribute it, `gtl start` refused and required manual intervention. Now it finds the blocking listener's PID via `lsof`, shows the process name, and prompts to kill it before starting.
 - **`gtl stop --kill` now escapes the stuck-supervisor state when the socket is unresponsive.** The supervisor writes its PID to a `.pid` file alongside its socket on startup. When `stop --kill` times out waiting for a response (e.g. the supervisor accepted the connection but is hung in shutdown), it falls back to reading that PID file, SIGKILLs the process directly, and cleans up the socket and PID files — printing "Supervisor force-killed (was unresponsive)" rather than leaving the user permanently blocked.
 
 ## [0.43.13]

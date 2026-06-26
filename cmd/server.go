@@ -716,17 +716,12 @@ func clearOrphanedPortProcess(port int, worktreeDir string) error {
 	pidFile := filepath.Join(worktreeDir, "tmp", "pids", "server.pid")
 	raw, err := os.ReadFile(pidFile)
 	if err != nil {
-		// No PID file — port is occupied by something we can't identify.
-		fmt.Fprintln(os.Stderr, style.Warnf("Port %d is in use by an unknown process. Stop it manually, then run 'gtl start'.", port))
-		return &CliError{
-			Message: fmt.Sprintf("Port %d is already in use.", port),
-			Hint:    "Another process is listening on this port. Stop it and try again.",
-		}
+		return clearUnknownPortProcess(port)
 	}
 
 	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if err != nil || pid <= 0 {
-		return nil
+		return clearUnknownPortProcess(port)
 	}
 
 	// Confirm the PID is still alive before offering to kill it.
@@ -768,4 +763,104 @@ func clearOrphanedPortProcess(port int, worktreeDir string) error {
 	time.Sleep(200 * time.Millisecond)
 	_ = os.Remove(pidFile)
 	return nil
+}
+
+// clearUnknownPortProcess is called when the port is occupied but there is no
+// server.pid to identify the owner. It uses lsof to discover the blocking
+// process(es), shows what they are, and offers to kill them.
+func clearUnknownPortProcess(port int) error {
+	pids := lsofPortPIDs(port)
+	if len(pids) == 0 {
+		fmt.Fprintln(os.Stderr, style.Warnf("Port %d is in use by an unknown process. Stop it manually, then run 'gtl start'.", port))
+		return &CliError{
+			Message: fmt.Sprintf("Port %d is already in use.", port),
+			Hint:    "Another process is listening on this port. Stop it and try again.",
+		}
+	}
+
+	// Build a human-readable description of the blocking processes.
+	var descs []string
+	for _, pid := range pids {
+		name := processCommandName(pid)
+		if name != "" {
+			descs = append(descs, fmt.Sprintf("%s (pid: %d)", name, pid))
+		} else {
+			descs = append(descs, fmt.Sprintf("pid: %d", pid))
+		}
+	}
+	desc := strings.Join(descs, ", ")
+
+	if !stdinIsTTY() {
+		return &CliError{
+			Message: fmt.Sprintf("Port %d is occupied by: %s.", port, desc),
+			Hint:    fmt.Sprintf("Kill it with: kill -9 %s", joinPIDs(pids)),
+		}
+	}
+
+	fmt.Fprintln(os.Stderr, style.Warnf("Port %d is in use by: %s.", port, desc))
+	if !confirm.Prompt(fmt.Sprintf("Kill %s and continue?", joinPIDs(pids)), true, nil) {
+		return &CliError{
+			Message: "Aborted.",
+			Hint:    fmt.Sprintf("Kill manually with: kill -9 %s", joinPIDs(pids)),
+		}
+	}
+
+	for _, pid := range pids {
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+	}
+	for i := 0; i < 20; i++ {
+		time.Sleep(100 * time.Millisecond)
+		c, dialErr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
+		if dialErr != nil {
+			return nil
+		}
+		_ = c.Close()
+	}
+	for _, pid := range pids {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+	time.Sleep(200 * time.Millisecond)
+	return nil
+}
+
+// lsofPortPIDs returns the PIDs of processes listening on the given TCP port
+// using lsof. Returns nil if lsof is unavailable or finds nothing.
+func lsofPortPIDs(port int) []int {
+	out, err := exec.Command("lsof", "-ti", fmt.Sprintf("tcp:%d", port), "-sTCP:LISTEN").Output()
+	if err != nil {
+		return nil
+	}
+	var pids []int
+	seen := map[int]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		pid, err := strconv.Atoi(strings.TrimSpace(line))
+		if err != nil || pid <= 0 || seen[pid] {
+			continue
+		}
+		seen[pid] = true
+		pids = append(pids, pid)
+	}
+	return pids
+}
+
+// processCommandName returns the short command name for a PID via ps.
+func processCommandName(pid int) string {
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if err != nil {
+		return ""
+	}
+	// ps returns the full path; trim to basename for readability.
+	name := strings.TrimSpace(string(out))
+	if idx := strings.LastIndex(name, "/"); idx >= 0 {
+		name = name[idx+1:]
+	}
+	return name
+}
+
+func joinPIDs(pids []int) string {
+	parts := make([]string, len(pids))
+	for i, pid := range pids {
+		parts[i] = strconv.Itoa(pid)
+	}
+	return strings.Join(parts, " ")
 }
