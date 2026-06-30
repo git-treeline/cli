@@ -1,3 +1,7 @@
+## [0.43.16]
+
+- **`gtl db template update` now reads `.treeline.yml` from the current worktree instead of the main repo.** Since `.treeline.yml` is branch-specific, the main repo's branch often didn't have `commands.migrate` configured yet — causing a spurious "No migrate command configured" error even when the worktree's config had the command set. The fix reads config from the worktree (matching how `gtl setup` already works) while still running the git pull and migration against the main repo.
+
 ## [0.43.15]
 
 - **`gtl start`'s port-process detection now correctly restricts `lsof` to TCP listeners.** The previous `lsof -ti :PORT` matched any file whose local or foreign port equaled the number — including established outbound connections — so an unrelated process with a matching remote port could be incorrectly identified and killed. The call is now scoped to `tcp:PORT -sTCP:LISTEN`, matching only processes actively listening on that TCP port.
