@@ -37,7 +37,7 @@ updated template.`,
 		}
 
 		mainRepo := worktree.DetectMainRepo(cwd)
-		pc := config.LoadProjectConfig(mainRepo)
+		pc := config.LoadProjectConfig(cwd)
 
 		migrateCmd := pc.MigrateCommand()
 		if migrateCmd == "" {
