@@ -1,3 +1,7 @@
+## [0.43.17]
+
+- **`gtl rename` now reads `.treeline.yml` from the current worktree instead of the main repo.** Running `gtl rename` from a linked worktree would fail with "no .treeline.yml found" when the main repo's branch didn't have the file. The fix mirrors the `db template update` fix from v0.43.16 — config is now loaded from the current worktree root via `DetectRepoRoot`, while `DetectMainRepo` is still used for registry lookups and the stale-name fallback.
+
 ## [0.43.16]
 
 - **`gtl db template update` now reads `.treeline.yml` from the current worktree instead of the main repo.** Since `.treeline.yml` is branch-specific, the main repo's branch often didn't have `commands.migrate` configured yet — causing a spurious "No migrate command configured" error even when the worktree's config had the command set. The fix reads config from the worktree (matching how `gtl setup` already works) while still running the git pull and migration against the main repo.
