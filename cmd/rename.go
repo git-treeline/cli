@@ -45,28 +45,27 @@ and router keys.`,
 		if err != nil {
 			return fmt.Errorf("getting working directory: %w", err)
 		}
-		mainRepo := worktree.DetectMainRepo(cwd)
-		pc := config.LoadProjectConfig(mainRepo)
+		worktreeRoot := worktree.DetectRepoRoot(cwd)
+		mainRepo := worktree.DetectMainRepo(worktreeRoot)
+		pc := config.LoadProjectConfig(worktreeRoot)
 		if !pc.Exists() {
 			return cliErr(cmd, &CliError{
-				Message: fmt.Sprintf("no %s found at %s", config.ProjectConfigFile, mainRepo),
+				Message: fmt.Sprintf("no %s found at %s", config.ProjectConfigFile, worktreeRoot),
 				Hint:    "Run gtl rename inside a treeline project (the main repo or any worktree).",
 			})
 		}
 
 		oldName := pc.Project()
 		if oldName == newName {
-			// Main repo is already correct. If we're in a linked worktree whose own
-			// .treeline.yml still has a stale name (e.g. branch predates a rename),
-			// update it so that `gtl setup` stops failing.
-			worktreeRoot := worktree.DetectRepoRoot(cwd)
+			// Worktree is already correct. If the main repo's .treeline.yml still has a
+			// stale name (e.g. predates a rename applied only here), update it too.
 			if worktreeRoot != mainRepo {
-				wpc := config.LoadProjectConfig(worktreeRoot)
-				if wpc.Exists() && wpc.Project() != newName {
-					if err := wpc.SetProject(newName); err != nil {
-						return fmt.Errorf("rewriting %s in worktree: %w", config.ProjectConfigFile, err)
+				mpc := config.LoadProjectConfig(mainRepo)
+				if mpc.Exists() && mpc.Project() != newName {
+					if err := mpc.SetProject(newName); err != nil {
+						return fmt.Errorf("rewriting %s in main repo: %w", config.ProjectConfigFile, err)
 					}
-					fmt.Println(style.Actionf("Updated %s in current worktree (main repo was already up-to-date)", config.ProjectConfigFile))
+					fmt.Println(style.Actionf("Updated %s in main repo (current worktree was already up-to-date)", config.ProjectConfigFile))
 					return nil
 				}
 			}
