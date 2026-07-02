@@ -474,6 +474,49 @@ func (pc *ProjectConfig) Aliases() map[string]int {
 	return result
 }
 
+// RelatedRepo is one structural sibling declared in .treeline.yml. Unlike a
+// runtime edge (an ad-hoc branch-to-branch link stored in the registry), this
+// is a durable, version-controlled topology fact: "every worktree of this repo
+// relates to that repo." Type defaults to "related".
+type RelatedRepo struct {
+	Repo string
+	Type string
+}
+
+// RelatedRepos returns structural sibling repos declared under related_repos.
+// Each entry may be a bare "owner/name" string or a map with repo/type keys:
+//
+//	related_repos:
+//	  - acme/web-server
+//	  - repo: acme/mobile-app
+//	    type: consumes-api
+func (pc *ProjectConfig) RelatedRepos() []RelatedRepo {
+	raw, ok := pc.Data["related_repos"].([]any)
+	if !ok {
+		return nil
+	}
+	var result []RelatedRepo
+	for _, item := range raw {
+		switch v := item.(type) {
+		case string:
+			if v != "" {
+				result = append(result, RelatedRepo{Repo: v, Type: "related"})
+			}
+		case map[string]any:
+			repo, _ := v["repo"].(string)
+			if repo == "" {
+				continue
+			}
+			typ, _ := v["type"].(string)
+			if typ == "" {
+				typ = "related"
+			}
+			result = append(result, RelatedRepo{Repo: repo, Type: typ})
+		}
+	}
+	return result
+}
+
 func (pc *ProjectConfig) StartCommand() string {
 	if v, ok := Dig(pc.Data, "commands", "start").(string); ok {
 		return v
@@ -786,7 +829,7 @@ func (pc *ProjectConfig) configPath() string {
 var projectKnownKeys = map[string]bool{
 	"project": true, "port_count": true, "env_file": true, "database": true,
 	"copy_files": true, "env": true, "hooks": true, "commands": true,
-	"editor": true, "merge_target": true, "aliases": true,
+	"editor": true, "merge_target": true, "aliases": true, "related_repos": true,
 	// Legacy keys accepted during migration
 	"default_branch": true, "setup_commands": true, "start_command": true,
 	"ports_needed": true,

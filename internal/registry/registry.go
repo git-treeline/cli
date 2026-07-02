@@ -30,10 +30,64 @@ const lockTimeout = 5 * time.Second
 // "worktree", "port", "ports", "database", "database_adapter", "project", etc.
 type Allocation map[string]any
 
+// currentVersion is the registry schema version this build writes. load()
+// migrates older data forward in memory (see migrate); the bumped version is
+// persisted on the next save, so upgrading never requires wiping the file.
+const currentVersion = 2
+
+// RepoRef identifies one endpoint of a relationship by durable coordinates:
+// the GitHub remote identity (owner/name) plus a branch. It deliberately does
+// NOT include a worktree path — paths are unstable across archive/recreate, so
+// the live path is resolved at read time from this (repo, branch) pair.
+type RepoRef struct {
+	Repo   string `json:"repo"`
+	Branch string `json:"branch"`
+}
+
+// Edge is a durable, undirected relationship between two (repo, branch)
+// endpoints. Stored canonically (A <= B) so each pair has exactly one row.
+type Edge struct {
+	A         RepoRef `json:"a"`
+	B         RepoRef `json:"b"`
+	Type      string  `json:"type,omitempty"`
+	CreatedAt string  `json:"createdAt"`
+}
+
+// Other returns the endpoint of the edge that is not ref. If ref matches
+// neither endpoint, the zero RepoRef is returned.
+func (e Edge) Other(ref RepoRef) RepoRef {
+	switch {
+	case e.A == ref:
+		return e.B
+	case e.B == ref:
+		return e.A
+	default:
+		return RepoRef{}
+	}
+}
+
+// less reports whether a sorts before b, used to store edges canonically so
+// relate(A, B) and relate(B, A) collapse to one row.
+func (a RepoRef) less(b RepoRef) bool {
+	if a.Repo != b.Repo {
+		return a.Repo < b.Repo
+	}
+	return a.Branch < b.Branch
+}
+
+// canonicalEdge orders two endpoints deterministically.
+func canonicalEdge(a, b RepoRef) (RepoRef, RepoRef) {
+	if b.less(a) {
+		return b, a
+	}
+	return a, b
+}
+
 // RegistryData is the JSON structure stored in registry.json.
 type RegistryData struct {
 	Version     int          `json:"version"`
 	Allocations []Allocation `json:"allocations"`
+	Edges       []Edge       `json:"edges,omitempty"`
 }
 
 // Registry manages persistent allocation state in a JSON file.
@@ -271,6 +325,73 @@ func (r *Registry) GetLinks(worktreePath string) map[string]string {
 	return result
 }
 
+// AllEdges returns every stored relationship edge.
+func (r *Registry) AllEdges() []Edge {
+	data, err := r.load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to load registry: %v\n", err)
+	}
+	return data.Edges
+}
+
+// EdgesFor returns every edge that has ref as one of its endpoints.
+func (r *Registry) EdgesFor(ref RepoRef) []Edge {
+	var result []Edge
+	for _, e := range r.AllEdges() {
+		if e.A == ref || e.B == ref {
+			result = append(result, e)
+		}
+	}
+	return result
+}
+
+// Relate creates a durable, symmetric edge between two endpoints. It is
+// idempotent: relating an already-related pair is a no-op success. Returns
+// true when a new edge was created, false when the pair already existed.
+// edgeType defaults to "related" when empty.
+func (r *Registry) Relate(a, b RepoRef, edgeType string) (bool, error) {
+	if edgeType == "" {
+		edgeType = "related"
+	}
+	ca, cb := canonicalEdge(a, b)
+	created := false
+	err := r.withLock(func(data *RegistryData) {
+		for _, e := range data.Edges {
+			if e.A == ca && e.B == cb {
+				return // already related — no-op
+			}
+		}
+		data.Edges = append(data.Edges, Edge{
+			A:         ca,
+			B:         cb,
+			Type:      edgeType,
+			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		})
+		created = true
+	})
+	return created, err
+}
+
+// Unrelate removes the edge between two endpoints. It is idempotent:
+// unrelating a pair that isn't related is a no-op success. Returns true when
+// an edge was removed, false when there was nothing to remove.
+func (r *Registry) Unrelate(a, b RepoRef) (bool, error) {
+	ca, cb := canonicalEdge(a, b)
+	removed := false
+	err := r.withLock(func(data *RegistryData) {
+		filtered := make([]Edge, 0, len(data.Edges))
+		for _, e := range data.Edges {
+			if e.A == ca && e.B == cb {
+				removed = true
+				continue
+			}
+			filtered = append(filtered, e)
+		}
+		data.Edges = filtered
+	})
+	return removed, err
+}
+
 func (r *Registry) Prune() (int, error) {
 	count := 0
 	err := r.withLock(func(data *RegistryData) {
@@ -403,7 +524,7 @@ func (r *Registry) load() (RegistryData, error) {
 	raw, err := os.ReadFile(r.Path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return RegistryData{Version: 1, Allocations: []Allocation{}}, nil
+			return RegistryData{Version: currentVersion, Allocations: []Allocation{}, Edges: []Edge{}}, nil
 		}
 		return RegistryData{}, fmt.Errorf("reading registry: %w", err)
 	}
@@ -411,10 +532,28 @@ func (r *Registry) load() (RegistryData, error) {
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return RegistryData{}, fmt.Errorf("registry is corrupt (%s): %w — fix or delete the file", r.Path, err)
 	}
+	migrate(&data)
+	return data, nil
+}
+
+// migrate upgrades registry data loaded from disk to the current schema in
+// place. It is additive and idempotent: existing allocations and edges are
+// preserved untouched, absent fields are initialized, and the version is
+// bumped so the next save persists the upgrade. This is why a schema change
+// never requires deleting registry.json — old files are read, upgraded in
+// memory, and written back with their existing contents intact.
+func migrate(data *RegistryData) {
 	if data.Allocations == nil {
 		data.Allocations = []Allocation{}
 	}
-	return data, nil
+	// v1 -> v2: introduce relationship edges. Nothing to transform on existing
+	// rows; the field simply didn't exist before, so initialize it empty.
+	if data.Edges == nil {
+		data.Edges = []Edge{}
+	}
+	if data.Version < currentVersion {
+		data.Version = currentVersion
+	}
 }
 
 func (r *Registry) save(data RegistryData) error {

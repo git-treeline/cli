@@ -70,6 +70,43 @@ func RepoNameFromRemote(repoPath string) string {
 	return parseRepoNameFromURL(url)
 }
 
+// RepoSlugFromRemote returns the "owner/name" identity from the `origin`
+// remote URL (e.g. "acme/fitter" from "git@github.com:acme/fitter.git" or
+// "https://github.com/acme/fitter"). This is the durable repo identity used to
+// key cross-worktree relationships. Returns "" when there's no origin remote
+// or the URL can't be parsed into at least owner/name.
+func RepoSlugFromRemote(repoPath string) string {
+	url := gitOutput(repoPath, "remote", "get-url", "origin")
+	return parseRepoSlugFromURL(url)
+}
+
+// parseRepoSlugFromURL extracts the last two path segments ("owner/name") from
+// a git remote URL, stripping scheme, host, userinfo, and a trailing ".git".
+// Returns "" when fewer than two segments are present.
+func parseRepoSlugFromURL(url string) string {
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return ""
+	}
+	// Strip the host/userinfo prefix. For scheme URLs this trims "https://host"
+	// or "ssh://git@host"; for scp-style "git@host:path" it trims "git@host".
+	if i := strings.Index(url, "://"); i >= 0 {
+		url = url[i+3:]
+		if j := strings.Index(url, "/"); j >= 0 {
+			url = url[j+1:]
+		}
+	} else if i := strings.Index(url, ":"); i >= 0 {
+		url = url[i+1:]
+	}
+	url = strings.Trim(url, "/")
+	url = strings.TrimSuffix(url, ".git")
+	segments := strings.Split(url, "/")
+	if len(segments) < 2 {
+		return ""
+	}
+	return strings.Join(segments[len(segments)-2:], "/")
+}
+
 func parseRepoNameFromURL(url string) string {
 	url = strings.TrimSpace(url)
 	if url == "" {
