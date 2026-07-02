@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/git-treeline/cli/internal/allocator"
+	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/format"
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/supervisor"
@@ -214,5 +215,53 @@ func renderStatus() error {
 		}
 	}
 
+	renderRedisCapacity(reg)
 	return nil
+}
+
+// renderRedisCapacity surfaces Redis database usage for the "database"
+// strategy, where slots are a finite resource (1..N-1). It reports how full
+// the pool is and, crucially, flags any database shared by more than one
+// worktree — the silent collision that predates fail-loud allocation and the
+// symptom users otherwise can't see. Computed over the whole registry because
+// the DB pool is global, not per-project.
+func renderRedisCapacity(reg *registry.Registry) {
+	uc := config.LoadUserConfig("")
+	if uc.RedisStrategy() != "database" {
+		return
+	}
+
+	byDB := make(map[int][]string)
+	for _, a := range reg.Allocations() {
+		rdb, ok := a["redis_db"].(float64)
+		if !ok || int(rdb) <= 0 {
+			continue
+		}
+		byDB[int(rdb)] = append(byDB[int(rdb)], format.DisplayName(format.Allocation(a)))
+	}
+	if len(byDB) == 0 {
+		return
+	}
+
+	usable := uc.RedisDatabases() - 1
+	fmt.Printf("\nRedis (database strategy): %d/%d slots used on %s\n", len(byDB), usable, uc.RedisURL())
+
+	var shared []int
+	for db, names := range byDB {
+		if len(names) > 1 {
+			shared = append(shared, db)
+		}
+	}
+	if len(shared) == 0 {
+		return
+	}
+	sort.Ints(shared)
+	fmt.Println("  ⚠ collisions — these worktrees share a Redis DB; background jobs will cross-contaminate:")
+	for _, db := range shared {
+		names := byDB[db]
+		sort.Strings(names)
+		fmt.Printf("      db%d: %s\n", db, strings.Join(names, ", "))
+	}
+	fmt.Println("  Fix: raise `databases` in redis.conf + `gtl config set redis.databases <N>`,")
+	fmt.Println("       or `gtl config set redis.strategy prefixed`, then `gtl reallocate --all-registry --apply`.")
 }

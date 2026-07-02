@@ -604,7 +604,8 @@ Controls allocation policy for your machine. Created automatically by `gtl init`
   },
   "redis": {
     "strategy": "prefixed",
-    "url": "redis://localhost:6379"
+    "url": "redis://localhost:6379",
+    "databases": 16
   },
   "router": {
     "port": 3001
@@ -738,11 +739,18 @@ Use `--drop-db` with `gtl release` to clean up cloned databases.
 
 If your project uses Redis, Treeline can assign each worktree its own namespace to prevent key collisions.
 
-**Prefixed** (default): All worktrees share Redis DB 0, keys are namespaced (`myapp:feature-x:...`). No limit on concurrent worktrees.
+**Prefixed** (default): All worktrees share Redis DB 0, keys are namespaced (`myapp:feature-x:...`). No limit on concurrent worktrees. Recommended when you run many worktrees.
 
-**Database**: Each worktree gets its own Redis DB number (1-15). Use this if your app doesn't support key prefixing.
+**Database**: Each worktree gets its own Redis DB number (1 to `databases`-1). Use this if your app doesn't support key prefixing (e.g. Sidekiq, which discourages namespacing).
 
-Configure in your user config under `redis.strategy`.
+Slot capacity comes from your Redis `databases` directive (stock Redis is 16 → indices 0–15, so 15 usable worktree slots; db0 is reserved for the main worktree). When every slot is taken, `gtl new` fails with an explicit error rather than silently sharing a database — and `gtl status` flags any worktrees that already share a DB. To grow the pool, raise `databases` in `redis.conf`, restart Redis, then mirror the value so Treeline can use the new slots:
+
+```
+gtl config set redis.databases 64
+gtl reallocate --all-registry --apply
+```
+
+Configure in your user config under `redis.strategy` and `redis.databases`.
 
 ## Use with AI agents
 

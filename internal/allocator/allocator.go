@@ -15,8 +15,6 @@ import (
 	"github.com/git-treeline/cli/internal/registry"
 )
 
-const maxRedisDbs = 16
-
 // Allocator manages resource allocation using user and project configuration.
 // It tracks used resources via the registry to avoid conflicts between worktrees.
 type Allocator struct {
@@ -256,7 +254,10 @@ func (al *Allocator) allocateNew(worktreePath, worktreeName, branch string) (*Al
 		return nil, fmt.Errorf("no available port block of size %d found (all ports in use or reserved)", count)
 	}
 
-	redisDB, redisPrefix := al.allocateRedis(worktreeName)
+	redisDB, redisPrefix, err := al.allocateRedis(worktreeName)
+	if err != nil {
+		return nil, err
+	}
 	database := al.buildDatabaseName(worktreeName)
 
 	return &Allocation{
@@ -398,25 +399,50 @@ func CheckPortsListening(ports []int) bool {
 	return false
 }
 
-func (al *Allocator) allocateRedis(worktreeName string) (int, string) {
+func (al *Allocator) allocateRedis(worktreeName string) (int, string, error) {
 	if al.UserConfig.RedisStrategy() == "database" {
-		db := al.nextAvailableRedisDB()
-		return db, ""
+		db, err := al.nextAvailableRedisDB()
+		if err != nil {
+			return 0, "", err
+		}
+		return db, "", nil
 	}
-	return 0, fmt.Sprintf("%s:%s", al.ProjectConfig.Project(), worktreeName)
+	return 0, fmt.Sprintf("%s:%s", al.ProjectConfig.Project(), worktreeName), nil
 }
 
-func (al *Allocator) nextAvailableRedisDB() int {
+// nextAvailableRedisDB returns the lowest free Redis database index in the
+// range 1..capacity-1 (db0 is reserved for the main/template worktree). It
+// fails loud when every slot is taken rather than silently colliding onto a
+// shared database — capacity exhaustion is a real error, not a fallback.
+func (al *Allocator) nextAvailableRedisDB() (int, error) {
 	usedSet := make(map[int]bool)
 	for _, db := range al.Registry.UsedRedisDbs() {
 		usedSet[db] = true
 	}
-	for db := 1; db < maxRedisDbs; db++ {
+	capacity := al.UserConfig.RedisDatabases()
+	for db := 1; db < capacity; db++ {
 		if !usedSet[db] {
-			return db
+			return db, nil
 		}
 	}
-	return 1
+	return 0, al.redisExhaustedError(capacity, len(usedSet))
+}
+
+// redisExhaustedError explains that the "database" strategy has run out of
+// Redis slots and points at the two durable fixes: grow the Redis database
+// count, or switch to key-prefix isolation (which has no such ceiling).
+func (al *Allocator) redisExhaustedError(capacity, used int) error {
+	return fmt.Errorf(
+		"no free Redis database: all %d slot(s) on %s are in use (%d worktree(s) allocated)\n\n"+
+			"  The \"database\" strategy isolates each worktree onto its own Redis DB, but\n"+
+			"  this Redis only has %d databases (indices 0–%d; db0 is reserved). Options:\n\n"+
+			"    • Grow the pool — raise `databases` in redis.conf, restart Redis, then:\n"+
+			"        gtl config set redis.databases <N>\n"+
+			"        gtl reallocate --all-registry --apply\n\n"+
+			"    • Switch to key-prefix isolation (no database ceiling):\n"+
+			"        gtl config set redis.strategy prefixed\n"+
+			"        gtl reallocate --all-registry --apply",
+		capacity-1, al.UserConfig.RedisURL(), used, capacity, capacity-1)
 }
 
 var sanitizeRe = regexp.MustCompile(`[^a-zA-Z0-9_]`)

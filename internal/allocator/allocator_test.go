@@ -2,6 +2,7 @@ package allocator
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -268,6 +269,88 @@ func TestAllocate_RedisDatabaseStrategy(t *testing.T) {
 	}
 	if alloc.RedisDB != 1 {
 		t.Errorf("expected redis db 1, got %d", alloc.RedisDB)
+	}
+}
+
+// seedRedisDBs registers placeholder allocations occupying redis DBs 1..n so
+// the next "database"-strategy allocation sees them as taken.
+func seedRedisDBs(t *testing.T, reg *registry.Registry, n int) {
+	t.Helper()
+	for i := 1; i <= n; i++ {
+		entry := registry.Allocation{
+			"worktree": fmt.Sprintf("/wt/seed-%d", i),
+			"project":  "test",
+			"port":     3000 + i,
+			"ports":    []any{3000 + i},
+			"redis_db": float64(i),
+		}
+		if err := reg.Allocate(entry); err != nil {
+			t.Fatalf("seeding redis db %d: %v", i, err)
+		}
+	}
+}
+
+func redisDBAllocator(t *testing.T, extraConfig string) (*Allocator, *registry.Registry) {
+	t.Helper()
+	dir := t.TempDir()
+	reg := registry.New(filepath.Join(dir, "registry.json"))
+
+	confPath := filepath.Join(dir, "config.json")
+	conf := fmt.Sprintf(`{"port":{"base":3000,"increment":10},"redis":{"url":"redis://localhost:6379"%s}}`, extraConfig)
+	_ = os.WriteFile(confPath, []byte(conf), 0o644)
+	uc := config.LoadUserConfig(confPath)
+
+	projDir := filepath.Join(dir, "project")
+	_ = os.MkdirAll(projDir, 0o755)
+	_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"), []byte("project: test\ndatabase:\n  adapter: postgresql\n  template: test_dev\n  pattern: \"{template}_{worktree}\"\n"), 0o644)
+	pc := config.LoadProjectConfig(projDir)
+
+	return New(uc, pc, reg), reg
+}
+
+func TestAllocate_RedisExhaustedFailsLoud(t *testing.T) {
+	al, reg := redisDBAllocator(t, `,"strategy":"database"`)
+	// Default cap of 16 → slots 1..15. Fill them all.
+	seedRedisDBs(t, reg, 15)
+
+	_, err := al.Allocate("/wt/overflow", "overflow", false)
+	if err == nil {
+		t.Fatal("expected exhaustion error when all 15 DB slots are taken, got nil (silent collision)")
+	}
+	for _, want := range []string{"redis.databases", "prefixed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q remedy; got: %v", want, err)
+		}
+	}
+}
+
+func TestAllocate_RedisDatabasesRaisesCap(t *testing.T) {
+	// Raise the pool to 64. Slots 1..15 taken → next should land on db16,
+	// which the stock 16-DB cap would have rejected (proving config is read).
+	al, reg := redisDBAllocator(t, `,"strategy":"database","databases":64`)
+	seedRedisDBs(t, reg, 15)
+
+	alloc, err := al.Allocate("/wt/sixteen", "sixteen", false)
+	if err != nil {
+		t.Fatalf("expected success with raised cap, got: %v", err)
+	}
+	if alloc.RedisDB != 16 {
+		t.Errorf("expected redis db 16 with cap 64, got %d", alloc.RedisDB)
+	}
+}
+
+func TestAllocate_PrefixedNeverExhausts(t *testing.T) {
+	al, reg := redisDBAllocator(t, `,"strategy":"prefixed"`)
+	// Even with every DB slot notionally taken, prefixed isolation ignores
+	// the ceiling entirely.
+	seedRedisDBs(t, reg, 15)
+
+	alloc, err := al.Allocate("/wt/anything", "anything", false)
+	if err != nil {
+		t.Fatalf("prefixed strategy must not exhaust, got: %v", err)
+	}
+	if alloc.RedisDB != 0 || alloc.RedisPrefix == "" {
+		t.Errorf("expected prefix isolation (db0 + prefix), got db=%d prefix=%q", alloc.RedisDB, alloc.RedisPrefix)
 	}
 }
 

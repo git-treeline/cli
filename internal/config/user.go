@@ -15,8 +15,9 @@ var UserDefaults = map[string]any{
 		"increment": float64(2),
 	},
 	"redis": map[string]any{
-		"strategy": "prefixed",
-		"url":      "redis://localhost:6379",
+		"strategy":  "prefixed",
+		"url":       "redis://localhost:6379",
+		"databases": float64(DefaultRedisDatabases),
 	},
 	"router": map[string]any{
 		"port": float64(3001),
@@ -29,6 +30,12 @@ const (
 	RouterModeDisabled = "disabled"
 	RouterModeEnabled  = "enabled"
 )
+
+// DefaultRedisDatabases matches a stock Redis build (databases 16 → indices
+// 0–15). db0 is reserved for the main/template worktree, leaving 1–15 for
+// feature worktrees under the "database" strategy. Raise `databases` in
+// redis.conf and mirror it via `gtl config set redis.databases N` to grow.
+const DefaultRedisDatabases = 16
 
 type UserConfig struct {
 	Path string
@@ -106,6 +113,20 @@ func (uc *UserConfig) RedisURL() string {
 		return s
 	}
 	return "redis://localhost:6379"
+}
+
+// RedisDatabases returns the number of databases the target Redis is
+// configured for (the `databases` directive in redis.conf). It bounds how
+// many worktrees the "database" strategy can isolate: slots 1..N-1. Values
+// below 2 (no room for a feature worktree beyond db0) fall back to the
+// stock default.
+func (uc *UserConfig) RedisDatabases() int {
+	if f, ok := Dig(uc.Data, "redis", "databases").(float64); ok {
+		if n := int(f); n >= 2 {
+			return n
+		}
+	}
+	return DefaultRedisDatabases
 }
 
 // RouterPort returns the port the subdomain router listens on. Default 3001.

@@ -68,7 +68,7 @@ var configGetCmd = &cobra.Command{
 		}
 		keys := []string{
 			"port.base", "port.increment", "port.reservations",
-			"redis.strategy", "redis.url",
+			"redis.strategy", "redis.url", "redis.databases",
 			"router.port",
 			"editor.name",
 			"tunnel.default",
@@ -114,7 +114,7 @@ var configSetCmd = &cobra.Command{
 		}
 		keys := []string{
 			"port.base", "port.increment", "port.reservations",
-			"redis.strategy", "redis.url",
+			"redis.strategy", "redis.url", "redis.databases",
 			"router.port",
 			"editor.name",
 			"tunnel.default",
