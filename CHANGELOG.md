@@ -1,3 +1,7 @@
+## [0.43.18]
+
+- **Redis database allocation is now capacity-aware and fails loud when exhausted.** The `database` isolation strategy previously hardcoded Redis's stock 16-database limit and, once all slots were taken, silently reused db1 — so worktrees beyond the 15th collided onto a shared database with no error or warning, cross-contaminating background jobs (e.g. Sidekiq). The slot count now comes from a new `redis.databases` config key (default 16); to grow the pool, raise `databases` in `redis.conf`, restart Redis, then `gtl config set redis.databases <N>`. When every slot is in use, `gtl new` now fails with an actionable error instead of colliding, and `gtl status` reports Redis pool usage and flags any databases already shared by more than one worktree.
+
 ## [0.43.17]
 
 - **`gtl rename` now reads `.treeline.yml` from the current worktree instead of the main repo.** Running `gtl rename` from a linked worktree would fail with "no .treeline.yml found" when the main repo's branch didn't have the file. The fix mirrors the `db template update` fix from v0.43.16 — config is now loaded from the current worktree root via `DetectRepoRoot`, while `DetectMainRepo` is still used for registry lookups and the stale-name fallback.
