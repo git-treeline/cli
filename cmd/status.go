@@ -131,6 +131,9 @@ func renderStatus() error {
 	}
 
 	if statusJSON {
+		// Index spans the whole registry, not just the (possibly project-
+		// filtered) output set, so edge endpoints in other projects resolve.
+		idx := buildWorktreeIndex(reg.Allocations())
 		for _, a := range allocs {
 			wt, _ := a["worktree"].(string)
 			if wt == "" {
@@ -141,6 +144,12 @@ func renderStatus() error {
 				a["supervisor"] = resp
 			} else {
 				a["supervisor"] = "not running"
+			}
+			if ref, ok := idx.refByPath[wt]; ok {
+				a["repo"] = ref.Repo
+				a["related"] = buildRelated(reg, idx, wt, ref)
+			} else {
+				a["related"] = []relatedEntry{}
 			}
 		}
 		data, err := json.MarshalIndent(allocs, "", "  ")
