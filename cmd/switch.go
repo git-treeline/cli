@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/github"
@@ -50,7 +49,7 @@ Must be run from inside a worktree (not the main repo).`,
 		}
 
 		branch := target
-		if prNum, err := strconv.Atoi(target); err == nil {
+		if prNum, err := parsePRNumber(target); err == nil {
 			fmt.Println(style.Actionf("Looking up PR #%d...", prNum))
 			pr, err := github.LookupPR(prNum)
 			if err != nil {

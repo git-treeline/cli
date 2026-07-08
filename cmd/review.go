@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/confirm"
@@ -21,6 +22,12 @@ import (
 var reviewPath string
 var reviewStart bool
 var reviewOpen bool
+
+// parsePRNumber parses a PR number argument, accepting an optional leading '#'
+// (e.g. both "473" and "#473").
+func parsePRNumber(arg string) (int, error) {
+	return strconv.Atoi(strings.TrimPrefix(arg, "#"))
+}
 
 func init() {
 	reviewCmd.Flags().StringVar(&reviewPath, "path", "", "Custom worktree path (default: ../<project>-pr-<number>)")
@@ -39,7 +46,7 @@ resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		warnServeNotInstalled()
 
-		prNumber, err := strconv.Atoi(args[0])
+		prNumber, err := parsePRNumber(args[0])
 		if err != nil {
 			return cliErr(cmd, &CliError{
 				Message: fmt.Sprintf("Invalid PR number: %s", args[0]),
