@@ -18,6 +18,10 @@ func TestParsePRNumber(t *testing.T) {
 		{name: "empty", arg: "", wantErr: true},
 		{name: "hash with non-numeric", arg: "#abc", wantErr: true},
 		{name: "double hash", arg: "##473", wantErr: true},
+		{name: "zero", arg: "0", wantErr: true},
+		{name: "zero with hash", arg: "#0", wantErr: true},
+		{name: "negative", arg: "-1", wantErr: true},
+		{name: "negative with hash", arg: "#-1", wantErr: true},
 	}
 
 	for _, tt := range tests {

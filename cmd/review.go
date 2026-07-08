@@ -24,9 +24,17 @@ var reviewStart bool
 var reviewOpen bool
 
 // parsePRNumber parses a PR number argument, accepting an optional leading '#'
-// (e.g. both "473" and "#473").
+// (e.g. both "473" and "#473"). PR numbers are positive, so zero and negative
+// values are rejected.
 func parsePRNumber(arg string) (int, error) {
-	return strconv.Atoi(strings.TrimPrefix(arg, "#"))
+	n, err := strconv.Atoi(strings.TrimPrefix(arg, "#"))
+	if err != nil {
+		return 0, err
+	}
+	if n < 1 {
+		return 0, fmt.Errorf("PR number must be positive: %s", arg)
+	}
+	return n, nil
 }
 
 func init() {
