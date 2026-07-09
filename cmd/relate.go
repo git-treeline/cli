@@ -76,7 +76,7 @@ Examples:
 		}
 
 		reg := registry.New("")
-		created, err := reg.Relate(from, target, relateType)
+		outcome, err := reg.Relate(from, target, relateType)
 		if err != nil {
 			return fmt.Errorf("relating: %w", err)
 		}
@@ -87,16 +87,20 @@ Examples:
 		}
 		if relateJSON {
 			return printJSON(map[string]any{
-				"created": created,
+				"created": outcome == registry.RelateCreated,
+				"updated": outcome == registry.RelateUpdated,
 				"a":       from,
 				"b":       target,
 				"type":    typ,
 			})
 		}
-		if created {
+		switch outcome {
+		case registry.RelateCreated:
 			fmt.Printf("Related %s#%s <-> %s#%s (%s)\n", from.Repo, from.Branch, target.Repo, target.Branch, typ)
-		} else {
-			fmt.Printf("Already related: %s#%s <-> %s#%s\n", from.Repo, from.Branch, target.Repo, target.Branch)
+		case registry.RelateUpdated:
+			fmt.Printf("Updated %s#%s <-> %s#%s type to %s\n", from.Repo, from.Branch, target.Repo, target.Branch, typ)
+		default:
+			fmt.Printf("Already related: %s#%s <-> %s#%s (%s)\n", from.Repo, from.Branch, target.Repo, target.Branch, typ)
 		}
 		return nil
 	},

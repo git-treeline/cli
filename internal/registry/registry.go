@@ -404,20 +404,41 @@ func (r *Registry) EdgesFor(ref RepoRef) []Edge {
 	return result
 }
 
-// Relate creates a durable, symmetric edge between two endpoints. It is
-// idempotent: relating an already-related pair is a no-op success. Returns
-// true when a new edge was created, false when the pair already existed.
-// edgeType defaults to "related" when empty.
-func (r *Registry) Relate(a, b RepoRef, edgeType string) (bool, error) {
+// RelateOutcome reports how Relate reconciled a (pair, type) request against
+// the stored edge for that pair.
+type RelateOutcome int
+
+const (
+	// RelateUnchanged means the pair already existed with the requested type.
+	RelateUnchanged RelateOutcome = iota
+	// RelateCreated means a new edge was inserted.
+	RelateCreated
+	// RelateUpdated means the pair existed but its Type was changed.
+	RelateUpdated
+)
+
+// Relate creates or reconciles a durable, symmetric edge between two endpoints.
+// Edges dedupe on the (A, B) pair regardless of type, so re-relating an existing
+// pair with a different edgeType updates the stored Type in place rather than
+// silently dropping the request. It is idempotent: re-relating with the same
+// type is a no-op. edgeType defaults to "related" when empty. Returns which of
+// create / update / no-op occurred.
+func (r *Registry) Relate(a, b RepoRef, edgeType string) (RelateOutcome, error) {
 	if edgeType == "" {
 		edgeType = "related"
 	}
 	ca, cb := canonicalEdge(a, b)
-	created := false
+	outcome := RelateCreated
 	err := r.withLock(func(data *RegistryData) {
-		for _, e := range data.Edges {
+		for i, e := range data.Edges {
 			if e.A == ca && e.B == cb {
-				return // already related — no-op
+				if e.Type == edgeType {
+					outcome = RelateUnchanged
+				} else {
+					data.Edges[i].Type = edgeType
+					outcome = RelateUpdated
+				}
+				return
 			}
 		}
 		data.Edges = append(data.Edges, Edge{
@@ -426,9 +447,8 @@ func (r *Registry) Relate(a, b RepoRef, edgeType string) (bool, error) {
 			Type:      edgeType,
 			CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		})
-		created = true
 	})
-	return created, err
+	return outcome, err
 }
 
 // Unrelate removes the edge between two endpoints. It is idempotent:
