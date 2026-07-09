@@ -5,8 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/git-treeline/cli/internal/registry"
 )
 
@@ -456,6 +458,24 @@ func TestGtlBinaryPath_ResolvesRunningExecutable(t *testing.T) {
 	// running binary is expected rather than the bare fallback name.
 	if !filepath.IsAbs(got) {
 		t.Errorf("expected absolute path, got %q", got)
+	}
+}
+
+func TestTruncate_RuneAware(t *testing.T) {
+	// A multibyte (CJK) branch name must be cut on a rune boundary and stay
+	// within the cell-width budget.
+	s := "特性ブランチテスト"
+	got := truncate(s, 6)
+	if !utf8.ValidString(got) {
+		t.Errorf("truncate produced invalid UTF-8: %q", got)
+	}
+	if w := lipgloss.Width(got); w > 6 {
+		t.Errorf("truncate exceeded width budget: width=%d, %q", w, got)
+	}
+
+	// A multibyte string within the budget is returned unchanged.
+	if got := truncate("café", 10); got != "café" {
+		t.Errorf("expected café unchanged, got %q", got)
 	}
 }
 
