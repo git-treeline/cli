@@ -54,12 +54,30 @@ var doctorCmd = &cobra.Command{
 		// check flapped between samples.
 		serveChecks := service.CheckHealth(config.LoadUserConfig("").RouterPort(), Version)
 
+		// Section the output so a machine-level investigation isn't muddled
+		// by cwd-specific project state (and vice versa). Machine health —
+		// the serve daemon, router, loopback, port forwarding — is identical
+		// no matter which directory you run doctor from. Project health is
+		// specific to this worktree's config and allocation.
+		hasProject := pc.Exists() || registry.New("").Find(absPath) != nil
+
+		fmt.Println("MACHINE  (serve & router — same from any directory)")
+		doctorServe(serveChecks)
+		doctorPortConfig()
+
+		fmt.Println("\nPROJECT  (this directory)")
+		if !hasProject {
+			doctorLine("Status", "no .treeline.yml or allocation here — nothing project-specific to check")
+			fmt.Println("  (the machine health above is unaffected by the current directory)")
+			if doctorFix {
+				return doctorAutoFix(absPath, pc, serveChecks)
+			}
+			return nil
+		}
 		doctorConfig(pc, det, absPath)
 		doctorProjectDrift(absPath)
-		doctorPortConfig()
 		doctorAllocation(absPath)
 		doctorRuntime(absPath, pc)
-		doctorServe(serveChecks)
 		doctorDiagnostics(det)
 		doctorRequestFlow(absPath, pc, serveChecks)
 		if doctorFix {
@@ -70,7 +88,15 @@ var doctorCmd = &cobra.Command{
 }
 
 func doctorJSONOutput(pc *config.ProjectConfig, det *detect.Result, absPath string) error {
-	result := map[string]any{}
+	// Two top-level sections mirror the human output: machine-level health
+	// (serve/router — identical from any directory) vs project-level state
+	// (config/allocation/runtime — specific to this worktree).
+	machine := map[string]any{}
+	project := map[string]any{}
+	result := map[string]any{
+		"machine": machine,
+		"project": project,
+	}
 
 	cfgInfo := map[string]any{}
 	if pc.Exists() {
@@ -84,10 +110,10 @@ func doctorJSONOutput(pc *config.ProjectConfig, det *detect.Result, absPath stri
 	} else {
 		cfgInfo["treeline_yml"] = "missing"
 	}
-	result["config"] = cfgInfo
+	project["config"] = cfgInfo
 
 	if drift := doctorProjectDriftJSON(absPath); drift != nil {
-		result["project_drift"] = drift
+		project["project_drift"] = drift
 	}
 
 	reg := registry.New("")
@@ -103,7 +129,7 @@ func doctorJSONOutput(pc *config.ProjectConfig, det *detect.Result, absPath stri
 	} else {
 		allocInfo["status"] = "not allocated"
 	}
-	result["allocation"] = allocInfo
+	project["allocation"] = allocInfo
 
 	rt := map[string]any{}
 	if alloc != nil {
@@ -119,7 +145,7 @@ func doctorJSONOutput(pc *config.ProjectConfig, det *detect.Result, absPath stri
 	} else {
 		rt["supervisor"] = "not running"
 	}
-	result["runtime"] = rt
+	project["runtime"] = rt
 
 	uc := config.LoadUserConfig("")
 	servePort := uc.RouterPort()
@@ -144,7 +170,7 @@ func doctorJSONOutput(pc *config.ProjectConfig, det *detect.Result, absPath stri
 	} else {
 		serveInfo["ca_cert"] = map[string]any{"status": "not_installed"}
 	}
-	result["serve"] = serveInfo
+	machine["serve"] = serveInfo
 
 	diags := templates.Diagnose(det)
 	if len(diags) > 0 {
@@ -155,7 +181,7 @@ func doctorJSONOutput(pc *config.ProjectConfig, det *detect.Result, absPath stri
 				"message": d.Message,
 			})
 		}
-		result["diagnostics"] = diagList
+		project["diagnostics"] = diagList
 	}
 
 	data, err := json.MarshalIndent(result, "", "  ")
