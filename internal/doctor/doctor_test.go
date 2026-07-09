@@ -1,4 +1,4 @@
-package cmd
+package doctor
 
 import (
 	"strings"
@@ -8,31 +8,31 @@ import (
 )
 
 func TestClassifyPortConfig_Conflict(t *testing.T) {
-	got := classifyPortConfig(8443, 8443)
+	got := ClassifyPortConfig(8443, 8443)
 	if got != "conflict" {
-		t.Errorf("classifyPortConfig(8443, 8443) = %q, want %q", got, "conflict")
+		t.Errorf("ClassifyPortConfig(8443, 8443) = %q, want %q", got, "conflict")
 	}
 }
 
 func TestClassifyPortConfig_CommonDevPort(t *testing.T) {
-	got := classifyPortConfig(3000, 8443)
+	got := ClassifyPortConfig(3000, 8443)
 	if got != "common_dev_port" {
-		t.Errorf("classifyPortConfig(3000, 8443) = %q, want %q", got, "common_dev_port")
+		t.Errorf("ClassifyPortConfig(3000, 8443) = %q, want %q", got, "common_dev_port")
 	}
 }
 
 func TestClassifyPortConfig_Ok(t *testing.T) {
-	got := classifyPortConfig(3002, 8443)
+	got := ClassifyPortConfig(3002, 8443)
 	if got != "" {
-		t.Errorf("classifyPortConfig(3002, 8443) = %q, want empty", got)
+		t.Errorf("ClassifyPortConfig(3002, 8443) = %q, want empty", got)
 	}
 }
 
 func TestClassifyPortConfig_ConflictWhenBaseEqualsRouter(t *testing.T) {
 	// Even when base is also a common dev port, equality with router is the conflict
-	got := classifyPortConfig(3000, 3000)
+	got := ClassifyPortConfig(3000, 3000)
 	if got != "conflict" {
-		t.Errorf("classifyPortConfig(3000, 3000) = %q, want %q", got, "conflict")
+		t.Errorf("ClassifyPortConfig(3000, 3000) = %q, want %q", got, "conflict")
 	}
 }
 
@@ -50,11 +50,11 @@ func healthyChecks() []service.HealthCheck {
 }
 
 func TestEvaluateRequestFlow_AllHealthy(t *testing.T) {
-	step := evaluateRequestFlow(flowInput{
-		allocatedPorts: []int{3022},
-		appListening:   true,
-		serviceChecks:  healthyChecks(),
-		caInstalled:    true,
+	step := EvaluateRequestFlow(FlowInput{
+		AllocatedPorts: []int{3022},
+		AppListening:   true,
+		ServiceChecks:  healthyChecks(),
+		CAInstalled:    true,
 	})
 	if step != nil {
 		t.Errorf("expected no failing step, got %+v", step)
@@ -72,55 +72,55 @@ func TestEvaluateRequestFlow_BrokenLoopbackReframesEverything(t *testing.T) {
 			checks[i].Fix = "allow loopback traffic"
 		}
 	}
-	step := evaluateRequestFlow(flowInput{
-		allocatedPorts: []int{3022},
-		appListening:   false, // would normally win, but loopback outranks it
-		startCommand:   "bin/dev",
-		serviceChecks:  checks,
-		caInstalled:    true,
+	step := EvaluateRequestFlow(FlowInput{
+		AllocatedPorts: []int{3022},
+		AppListening:   false, // would normally win, but loopback outranks it
+		StartCommand:   "bin/dev",
+		ServiceChecks:  checks,
+		CAInstalled:    true,
 	})
 	if step == nil {
 		t.Fatal("expected a failing step")
 	}
-	if !strings.Contains(step.label, "loopback") {
-		t.Errorf("expected loopback to be surfaced first, got %q", step.label)
+	if !strings.Contains(step.Label, "loopback") {
+		t.Errorf("expected loopback to be surfaced first, got %q", step.Label)
 	}
-	if step.fix != "allow loopback traffic" {
-		t.Errorf("expected loopback fix, got %q", step.fix)
+	if step.Fix != "allow loopback traffic" {
+		t.Errorf("expected loopback fix, got %q", step.Fix)
 	}
 }
 
 func TestEvaluateRequestFlow_AppNotListening_UsesStartCommand(t *testing.T) {
-	step := evaluateRequestFlow(flowInput{
-		allocatedPorts: []int{3022},
-		appListening:   false,
-		startCommand:   "bin/dev",
-		serviceChecks:  healthyChecks(),
-		caInstalled:    true,
+	step := EvaluateRequestFlow(FlowInput{
+		AllocatedPorts: []int{3022},
+		AppListening:   false,
+		StartCommand:   "bin/dev",
+		ServiceChecks:  healthyChecks(),
+		CAInstalled:    true,
 	})
 	if step == nil {
 		t.Fatal("expected a failing step")
 	}
-	if !strings.Contains(step.label, "3022") {
-		t.Errorf("expected label to include port, got %q", step.label)
+	if !strings.Contains(step.Label, "3022") {
+		t.Errorf("expected label to include port, got %q", step.Label)
 	}
-	if step.fix != "bin/dev" {
-		t.Errorf("expected fix=bin/dev, got %q", step.fix)
+	if step.Fix != "bin/dev" {
+		t.Errorf("expected fix=bin/dev, got %q", step.Fix)
 	}
 }
 
 func TestEvaluateRequestFlow_AppNotListening_NoStartCommand(t *testing.T) {
-	step := evaluateRequestFlow(flowInput{
-		allocatedPorts: []int{3022},
-		appListening:   false,
-		serviceChecks:  healthyChecks(),
-		caInstalled:    true,
+	step := EvaluateRequestFlow(FlowInput{
+		AllocatedPorts: []int{3022},
+		AppListening:   false,
+		ServiceChecks:  healthyChecks(),
+		CAInstalled:    true,
 	})
 	if step == nil {
 		t.Fatal("expected a failing step")
 	}
-	if step.fix != "start the dev server" {
-		t.Errorf("expected generic fix, got %q", step.fix)
+	if step.Fix != "start the dev server" {
+		t.Errorf("expected generic fix, got %q", step.Fix)
 	}
 }
 
@@ -134,14 +134,14 @@ func TestEvaluateRequestFlow_AppLossBeatsRouterStale(t *testing.T) {
 			checks[i].Detail = "router=0.39.2, cli=0.39.4"
 		}
 	}
-	step := evaluateRequestFlow(flowInput{
-		allocatedPorts: []int{3022},
-		appListening:   false,
-		startCommand:   "bin/dev",
-		serviceChecks:  checks,
-		caInstalled:    true,
+	step := EvaluateRequestFlow(FlowInput{
+		AllocatedPorts: []int{3022},
+		AppListening:   false,
+		StartCommand:   "bin/dev",
+		ServiceChecks:  checks,
+		CAInstalled:    true,
 	})
-	if step == nil || !strings.Contains(step.label, "3022") {
+	if step == nil || !strings.Contains(step.Label, "3022") {
 		t.Errorf("expected app step first, got %+v", step)
 	}
 }
@@ -160,13 +160,13 @@ func TestEvaluateRequestFlow_RouterErrorBeatsPFAndCA(t *testing.T) {
 			checks[i].Fix = "gtl serve reload-pf"
 		}
 	}
-	step := evaluateRequestFlow(flowInput{
-		allocatedPorts: []int{3022},
-		appListening:   true,
-		serviceChecks:  checks,
-		caInstalled:    false,
+	step := EvaluateRequestFlow(FlowInput{
+		AllocatedPorts: []int{3022},
+		AppListening:   true,
+		ServiceChecks:  checks,
+		CAInstalled:    false,
 	})
-	if step == nil || step.label != "router_port" {
+	if step == nil || step.Label != "router_port" {
 		t.Errorf("expected router_port first, got %+v", step)
 	}
 }
@@ -180,20 +180,20 @@ func TestEvaluateRequestFlow_PFFailureSurfaced(t *testing.T) {
 			checks[i].Fix = "gtl serve reload-pf"
 		}
 	}
-	step := evaluateRequestFlow(flowInput{
-		allocatedPorts: []int{3022},
-		appListening:   true,
-		serviceChecks:  checks,
-		caInstalled:    true,
+	step := EvaluateRequestFlow(FlowInput{
+		AllocatedPorts: []int{3022},
+		AppListening:   true,
+		ServiceChecks:  checks,
+		CAInstalled:    true,
 	})
 	if step == nil {
 		t.Fatal("expected pf step")
 	}
-	if step.label != "port_forwarding" {
-		t.Errorf("expected port_forwarding label, got %q", step.label)
+	if step.Label != "port_forwarding" {
+		t.Errorf("expected port_forwarding label, got %q", step.Label)
 	}
-	if step.fix != "gtl serve reload-pf" {
-		t.Errorf("expected reload-pf fix, got %q", step.fix)
+	if step.Fix != "gtl serve reload-pf" {
+		t.Errorf("expected reload-pf fix, got %q", step.Fix)
 	}
 }
 
@@ -205,43 +205,43 @@ func TestEvaluateRequestFlow_RouterStaleSurfaced(t *testing.T) {
 			checks[i].Detail = "router=0.39.2, cli=0.39.4"
 		}
 	}
-	step := evaluateRequestFlow(flowInput{
-		allocatedPorts: []int{3022},
-		appListening:   true,
-		serviceChecks:  checks,
-		caInstalled:    true,
+	step := EvaluateRequestFlow(FlowInput{
+		AllocatedPorts: []int{3022},
+		AppListening:   true,
+		ServiceChecks:  checks,
+		CAInstalled:    true,
 	})
 	if step == nil {
 		t.Fatal("expected stale-router step")
 	}
-	if step.label != "router_version" {
-		t.Errorf("expected router_version label, got %q", step.label)
+	if step.Label != "router_version" {
+		t.Errorf("expected router_version label, got %q", step.Label)
 	}
-	if step.fix != "gtl serve restart" {
-		t.Errorf("expected serve restart fix, got %q", step.fix)
+	if step.Fix != "gtl serve restart" {
+		t.Errorf("expected serve restart fix, got %q", step.Fix)
 	}
 }
 
 func TestEvaluateRequestFlow_CANotInstalled(t *testing.T) {
-	step := evaluateRequestFlow(flowInput{
-		allocatedPorts: []int{3022},
-		appListening:   true,
-		serviceChecks:  healthyChecks(),
-		caInstalled:    false,
+	step := EvaluateRequestFlow(FlowInput{
+		AllocatedPorts: []int{3022},
+		AppListening:   true,
+		ServiceChecks:  healthyChecks(),
+		CAInstalled:    false,
 	})
-	if step == nil || step.label != "ca_cert" {
+	if step == nil || step.Label != "ca_cert" {
 		t.Errorf("expected ca_cert step, got %+v", step)
 	}
 }
 
-// --- planAutoFix ---
+// --- PlanAutoFix ---
 
 func TestPlanAutoFix_NothingToDoOnHealthy(t *testing.T) {
-	plan := planAutoFix(flowInput{
-		allocatedPorts: []int{3022},
-		appListening:   true,
-		serviceChecks:  healthyChecks(),
-		caInstalled:    true,
+	plan := PlanAutoFix(FlowInput{
+		AllocatedPorts: []int{3022},
+		AppListening:   true,
+		ServiceChecks:  healthyChecks(),
+		CAInstalled:    true,
 	}, false)
 	if len(plan) != 0 {
 		t.Errorf("expected empty plan, got %+v", plan)
@@ -256,14 +256,14 @@ func TestPlanAutoFix_StaleRouterPlansRestart(t *testing.T) {
 			checks[i].Detail = "router=0.39.2, cli=0.39.4"
 		}
 	}
-	plan := planAutoFix(flowInput{
-		allocatedPorts: []int{3022},
-		appListening:   true,
-		serviceChecks:  checks,
-		caInstalled:    true,
+	plan := PlanAutoFix(FlowInput{
+		AllocatedPorts: []int{3022},
+		AppListening:   true,
+		ServiceChecks:  checks,
+		CAInstalled:    true,
 	}, false)
-	if len(plan) != 1 || plan[0] != fixServeRestart {
-		t.Errorf("expected [fixServeRestart], got %+v", plan)
+	if len(plan) != 1 || plan[0] != FixServeRestart {
+		t.Errorf("expected [FixServeRestart], got %+v", plan)
 	}
 }
 
@@ -275,38 +275,38 @@ func TestPlanAutoFix_PFErrorPlansReload(t *testing.T) {
 			checks[i].Fix = "gtl serve reload-pf"
 		}
 	}
-	plan := planAutoFix(flowInput{
-		allocatedPorts: []int{3022},
-		appListening:   true,
-		serviceChecks:  checks,
-		caInstalled:    true,
+	plan := PlanAutoFix(FlowInput{
+		AllocatedPorts: []int{3022},
+		AppListening:   true,
+		ServiceChecks:  checks,
+		CAInstalled:    true,
 	}, false)
 	found := false
 	for _, a := range plan {
-		if a == fixReloadPF {
+		if a == FixReloadPF {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected fixReloadPF in plan, got %+v", plan)
+		t.Errorf("expected FixReloadPF in plan, got %+v", plan)
 	}
 }
 
 func TestPlanAutoFix_RegistryOrphansPlanPrune(t *testing.T) {
-	plan := planAutoFix(flowInput{
-		allocatedPorts: []int{3022},
-		appListening:   true,
-		serviceChecks:  healthyChecks(),
-		caInstalled:    true,
+	plan := PlanAutoFix(FlowInput{
+		AllocatedPorts: []int{3022},
+		AppListening:   true,
+		ServiceChecks:  healthyChecks(),
+		CAInstalled:    true,
 	}, true)
 	found := false
 	for _, a := range plan {
-		if a == fixPrune {
+		if a == FixPrune {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected fixPrune in plan, got %+v", plan)
+		t.Errorf("expected FixPrune in plan, got %+v", plan)
 	}
 }
 
@@ -323,15 +323,15 @@ func TestPlanAutoFix_DedupesMultipleSignals(t *testing.T) {
 			checks[i].Fix = "gtl serve restart"
 		}
 	}
-	plan := planAutoFix(flowInput{
-		allocatedPorts: []int{3022},
-		appListening:   true,
-		serviceChecks:  checks,
-		caInstalled:    true,
+	plan := PlanAutoFix(FlowInput{
+		AllocatedPorts: []int{3022},
+		AppListening:   true,
+		ServiceChecks:  checks,
+		CAInstalled:    true,
 	}, false)
 	count := 0
 	for _, a := range plan {
-		if a == fixServeRestart {
+		if a == FixServeRestart {
 			count++
 		}
 	}
