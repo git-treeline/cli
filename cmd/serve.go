@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"runtime"
 	"sort"
 	"strconv"
@@ -43,6 +44,8 @@ func init() {
 	serveCmd.AddCommand(serveRestartCmd)
 	serveCmd.AddCommand(serveReloadPFCmd)
 	serveCmd.AddCommand(serveStatusCmd)
+	serveLogsCmd.Flags().BoolVarP(&serveLogsFollow, "follow", "f", false, "Follow the log output (tail -f / journalctl -f)")
+	serveCmd.AddCommand(serveLogsCmd)
 	serveCmd.AddCommand(serveRunCmd)
 	serveHostsCmd.AddCommand(serveHostsSyncCmd)
 	serveHostsCmd.AddCommand(serveHostsCleanCmd)
@@ -294,6 +297,69 @@ var serveStatusCmd = &cobra.Command{
 
 		return nil
 	},
+}
+
+var serveLogsFollow bool
+
+var serveLogsCmd = &cobra.Command{
+	Use:   "logs",
+	Short: "Print or tail the router's log",
+	Long: `Show the router daemon's operational log (startup, route refreshes,
+shutdown). On macOS this reads ~/Library/Logs/git-treeline/router.{log,err};
+on Linux it reads the systemd journal for the router unit.
+
+Pass --follow/-f to stream new lines as they arrive (Ctrl+C to stop).`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+			return cliErr(cmd, &CliError{
+				Message: fmt.Sprintf("gtl serve logs requires macOS or Linux (detected %s).", runtime.GOOS),
+			})
+		}
+		return runServeLogs(cmd, serveLogsFollow)
+	},
+}
+
+// runServeLogs streams the router's log to stdout. macOS logs are plain files
+// captured by launchd (router.log/router.err); Linux logs live in the systemd
+// journal. --follow maps to `tail -F` / `journalctl -f`; otherwise we show a
+// recent tail so the command returns promptly.
+func runServeLogs(cmd *cobra.Command, follow bool) error {
+	const recentLines = "200"
+
+	var c *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		stdout, stderr := service.RouterLogFiles()
+		if !fileExists(stdout) && !fileExists(stderr) {
+			return cliErr(cmd, &CliError{
+				Message: "No router logs found yet.",
+				Hint:    "Start the router with 'gtl serve install' (logs appear once it runs).",
+			})
+		}
+		args := []string{}
+		if follow {
+			// -F keeps following across log rotation / re-creation.
+			args = append(args, "-F")
+		} else {
+			args = append(args, "-n", recentLines)
+		}
+		args = append(args, stdout, stderr)
+		c = exec.Command("tail", args...)
+	case "linux":
+		args := []string{"--user", "-u", service.SystemdUnit(), "--no-pager"}
+		if follow {
+			args = append(args, "-f")
+		} else {
+			args = append(args, "-n", recentLines)
+		}
+		c = exec.Command("journalctl", args...)
+	}
+
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	c.Stdin = os.Stdin
+	return c.Run()
 }
 
 var serveRunCmd = &cobra.Command{

@@ -464,6 +464,15 @@ func logDir() string {
 	return filepath.Join(home, "Library", "Logs", "git-treeline")
 }
 
+// RouterLogFiles returns the macOS stdout/stderr log paths for the router
+// (StandardOutPath / StandardErrorPath in the launchd plist). Exported so
+// `gtl serve logs` can tail them. Meaningful only on macOS — Linux logging
+// goes through journalctl keyed on SystemdUnit().
+func RouterLogFiles() (stdout, stderr string) {
+	dir := logDir()
+	return filepath.Join(dir, "router.log"), filepath.Join(dir, "router.err")
+}
+
 func installLaunchAgent(gtlPath string, _ int) (string, error) {
 	path := PlistPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
