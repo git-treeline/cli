@@ -66,7 +66,10 @@ func writeToVSCodeDir(worktreePath string, s VSCodeSettings) (string, error) {
 	}
 	path := filepath.Join(dir, "settings.json")
 
-	existing := loadJSON(path)
+	existing, err := loadJSON(path)
+	if err != nil {
+		return "", fmt.Errorf("refusing to update %s: not valid JSON (VS Code JSONC with comments is not supported): %w — add the settings manually or remove the comments", path, err)
+	}
 	merged := mergeSettings(existing, buildSettings(s))
 
 	data, err := json.MarshalIndent(merged, "", "  ")
@@ -165,16 +168,25 @@ func workspaceContainsFolder(wsPath, absPath string) bool {
 	return false
 }
 
-func loadJSON(path string) map[string]any {
+// loadJSON reads and parses a JSON file. A missing file is not an error (it
+// simply hasn't been created yet), but a file that exists and fails to parse
+// returns an error rather than silently discarding its contents — VS Code
+// settings.json is JSONC (comments, trailing commas) which encoding/json
+// cannot parse, and treating that as "empty" would cause writeToVSCodeDir to
+// overwrite the user's real settings.
+func loadJSON(path string) (map[string]any, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return make(map[string]any)
+		if os.IsNotExist(err) {
+			return make(map[string]any), nil
+		}
+		return nil, err
 	}
 	var result map[string]any
 	if err := json.Unmarshal(raw, &result); err != nil {
-		return make(map[string]any)
+		return nil, err
 	}
-	return result
+	return result, nil
 }
 
 func mergeSettings(base, overlay map[string]any) map[string]any {

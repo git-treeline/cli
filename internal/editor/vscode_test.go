@@ -1,6 +1,7 @@
 package editor
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -164,5 +165,67 @@ func TestFindWorkspaceFile_NotFound(t *testing.T) {
 	dir := t.TempDir()
 	if ws := findWorkspaceFile(dir); ws != "" {
 		t.Errorf("expected no workspace, got %s", ws)
+	}
+}
+
+func TestWriteVSCode_RefusesToOverwriteJSONC(t *testing.T) {
+	dir := t.TempDir()
+	vscodeDir := filepath.Join(dir, ".vscode")
+	if err := os.MkdirAll(vscodeDir, 0o755); err != nil {
+		t.Fatalf("failed to create .vscode dir: %v", err)
+	}
+
+	settingsPath := filepath.Join(vscodeDir, "settings.json")
+	original := []byte(`{
+  // this is a JSONC comment, which encoding/json can't parse
+  "editor.fontSize": 14,
+  "go.gopath": "/home/user/go",
+}
+`)
+	if err := os.WriteFile(settingsPath, original, 0o644); err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+
+	s := VSCodeSettings{Title: "new-title"}
+	_, err := WriteVSCode(dir, s)
+	if err == nil {
+		t.Fatal("expected error for unparseable JSONC settings.json, got nil")
+	}
+
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("failed to read settings after WriteVSCode: %v", err)
+	}
+	if !bytes.Equal(original, after) {
+		t.Errorf("expected settings.json to be untouched\nbefore:\n%s\nafter:\n%s", original, after)
+	}
+}
+
+func TestWriteVSCode_NoExistingSettings_CreatesFile(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, ".vscode", "settings.json")
+	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+		t.Fatalf("expected settings.json to not exist yet, stat err: %v", err)
+	}
+
+	s := VSCodeSettings{Title: "brand-new"}
+	target, err := WriteVSCode(dir, s)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if target != settingsPath {
+		t.Errorf("expected target %s, got %s", settingsPath, target)
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("expected settings.json to be created: %v", err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("invalid JSON written: %v", err)
+	}
+	if settings["window.title"] != "brand-new" {
+		t.Errorf("unexpected title: %v", settings["window.title"])
 	}
 }
