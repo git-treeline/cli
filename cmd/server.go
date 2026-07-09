@@ -17,6 +17,7 @@ import (
 	"github.com/git-treeline/cli/internal/detect"
 	"github.com/git-treeline/cli/internal/format"
 	"github.com/git-treeline/cli/internal/interpolation"
+	"github.com/git-treeline/cli/internal/process"
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/resolve"
 	"github.com/git-treeline/cli/internal/service"
@@ -759,6 +760,14 @@ func clearOrphanedPortProcess(port int, worktreeDir string) error {
 		return nil
 	}
 
+	// A live PID isn't proof it owns the port: a stale pidfile plus PID reuse
+	// would point us at an unrelated process and prompt a default-YES kill of it.
+	// Only trust the pidfile if the PID is actually among the port's listeners;
+	// otherwise ignore it and let lsof identify the real owner.
+	if !pidOwnsPort(pid, port) {
+		return clearUnknownPortProcess(port)
+	}
+
 	// Live process identified from this worktree's PID file — safe to offer a kill.
 	if !stdinIsTTY() {
 		return &CliError{
@@ -777,14 +786,9 @@ func clearOrphanedPortProcess(port int, worktreeDir string) error {
 
 	// SIGTERM first, escalate to SIGKILL if the port doesn't free in 2s.
 	_ = syscall.Kill(pid, syscall.SIGTERM)
-	for i := 0; i < 20; i++ {
-		time.Sleep(100 * time.Millisecond)
-		c, dialErr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
-		if dialErr != nil {
-			_ = os.Remove(pidFile)
-			return nil
-		}
-		_ = c.Close()
+	if process.WaitPortFree(port, 2*time.Second) {
+		_ = os.Remove(pidFile)
+		return nil
 	}
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	time.Sleep(200 * time.Millisecond)
@@ -835,13 +839,8 @@ func clearUnknownPortProcess(port int) error {
 	for _, pid := range pids {
 		_ = syscall.Kill(pid, syscall.SIGTERM)
 	}
-	for i := 0; i < 20; i++ {
-		time.Sleep(100 * time.Millisecond)
-		c, dialErr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 100*time.Millisecond)
-		if dialErr != nil {
-			return nil
-		}
-		_ = c.Close()
+	if process.WaitPortFree(port, 2*time.Second) {
+		return nil
 	}
 	for _, pid := range pids {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
@@ -850,38 +849,36 @@ func clearUnknownPortProcess(port int) error {
 	return nil
 }
 
-// lsofPortPIDs returns the PIDs of processes listening on the given TCP port
-// using lsof. Returns nil if lsof is unavailable or finds nothing.
-func lsofPortPIDs(port int) []int {
-	out, err := exec.Command("lsof", "-ti", fmt.Sprintf("tcp:%d", port), "-sTCP:LISTEN").Output()
-	if err != nil {
-		return nil
+// pidOwnsPort reports whether pid is among the processes listening on port.
+func pidOwnsPort(pid, port int) bool {
+	for _, p := range lsofPortPIDs(port) {
+		if p == pid {
+			return true
+		}
 	}
+	return false
+}
+
+// lsofPortPIDs returns the unique PIDs of processes listening on the given TCP
+// port, in listing order. Returns nil if lsof is unavailable or finds nothing.
+// It is a var so tests can substitute a deterministic port owner without
+// shelling out.
+var lsofPortPIDs = func(port int) []int {
 	var pids []int
 	seen := map[int]bool{}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		pid, err := strconv.Atoi(strings.TrimSpace(line))
-		if err != nil || pid <= 0 || seen[pid] {
+	for _, l := range process.ListenersOnPort(port) {
+		if l.PID <= 0 || seen[l.PID] {
 			continue
 		}
-		seen[pid] = true
-		pids = append(pids, pid)
+		seen[l.PID] = true
+		pids = append(pids, l.PID)
 	}
 	return pids
 }
 
 // processCommandName returns the short command name for a PID via ps.
 func processCommandName(pid int) string {
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
-	if err != nil {
-		return ""
-	}
-	// ps returns the full path; trim to basename for readability.
-	name := strings.TrimSpace(string(out))
-	if idx := strings.LastIndex(name, "/"); idx >= 0 {
-		name = name[idx+1:]
-	}
-	return name
+	return process.CommandName(pid)
 }
 
 func joinPIDs(pids []int) string {

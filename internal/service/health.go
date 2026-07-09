@@ -7,12 +7,12 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
+	"github.com/git-treeline/cli/internal/process"
 	"github.com/git-treeline/cli/internal/proxy"
 )
 
@@ -496,30 +496,14 @@ func looksLikeRouter(name string) bool {
 }
 
 // processOnPort returns name + PID of the process listening on the given
-// TCP port, or zero processInfo if it can't be determined.
+// TCP port, or zero processInfo if it can't be determined. When several
+// processes share the port it reports the first listener lsof lists.
 func processOnPort(port int) processInfo {
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+	listeners := process.ListenersOnPort(port)
+	if len(listeners) == 0 {
 		return processInfo{}
 	}
-	out, err := exec.Command("lsof", "-i", fmt.Sprintf("TCP:%d", port),
-		"-sTCP:LISTEN", "-n", "-P", "-F", "cn").Output()
-	if err != nil {
-		return processInfo{}
-	}
-
-	var info processInfo
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.HasPrefix(line, "c") {
-			info.Name = line[1:]
-		}
-		if strings.HasPrefix(line, "p") {
-			var pid int
-			if _, err := fmt.Sscanf(line[1:], "%d", &pid); err == nil {
-				info.PID = pid
-			}
-		}
-	}
-	return info
+	return processInfo{Name: listeners[0].Name, PID: listeners[0].PID}
 }
 
 // httpProbe is the default HTTP liveness implementation. Returns the HTTP

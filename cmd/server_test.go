@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -686,6 +687,12 @@ func TestClearOrphanedPortProcess_LivePidNonTTY(t *testing.T) {
 	dir := t.TempDir()
 	writePidFile(t, dir, livePid)
 
+	// The pidfile PID must actually own the port for the "offer a kill" path.
+	// Stub lsof to report livePid as the listener so the cross-check passes.
+	origLsof := lsofPortPIDs
+	lsofPortPIDs = func(int) []int { return []int{livePid} }
+	t.Cleanup(func() { lsofPortPIDs = origLsof })
+
 	// stdinIsTTY() checks os.Stdin — swap it for a pipe so the non-TTY
 	// code path is taken regardless of whether the test runs in a terminal.
 	r, w, err := os.Pipe()
@@ -713,5 +720,70 @@ func TestClearOrphanedPortProcess_LivePidNonTTY(t *testing.T) {
 	}
 	if !strings.Contains(ce.Hint, fmt.Sprintf("kill %d", livePid)) {
 		t.Errorf("expected kill hint, got: %q", ce.Hint)
+	}
+}
+
+// TestClearOrphanedPortProcess_LivePidNotPortOwner covers the PID-reuse trap: a
+// stale pidfile points at a live PID that does NOT hold the port. The old code
+// would offer to SIGTERM/SIGKILL that unrelated process. The fix cross-checks
+// the pidfile PID against the port's actual listeners and, on a mismatch, falls
+// through to lsof-based identification of the real owner — never the pidfile PID.
+func TestClearOrphanedPortProcess_LivePidNotPortOwner(t *testing.T) {
+	// A live process the stale pidfile points at — must not be targeted.
+	bystander := exec.Command("sleep", "30")
+	if err := bystander.Start(); err != nil {
+		t.Fatalf("start bystander: %v", err)
+	}
+	t.Cleanup(func() { _ = bystander.Process.Kill(); _ = bystander.Wait() })
+	bystanderPid := bystander.Process.Pid
+
+	// A different live process standing in for the port's real owner.
+	owner := exec.Command("sleep", "30")
+	if err := owner.Start(); err != nil {
+		t.Fatalf("start owner: %v", err)
+	}
+	t.Cleanup(func() { _ = owner.Process.Kill(); _ = owner.Wait() })
+	ownerPid := owner.Process.Pid
+
+	ln, port := listenFreePort(t)
+	defer func() { _ = ln.Close() }()
+
+	dir := t.TempDir()
+	writePidFile(t, dir, bystanderPid)
+
+	// lsof reports the real owner, not the pidfile PID.
+	origLsof := lsofPortPIDs
+	lsofPortPIDs = func(int) []int { return []int{ownerPid} }
+	t.Cleanup(func() { lsofPortPIDs = origLsof })
+
+	// Non-TTY so clearUnknownPortProcess returns a structured error instead of
+	// prompting to kill.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	orig := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = orig; _ = r.Close(); _ = w.Close() })
+
+	got := clearOrphanedPortProcess(port, dir)
+	if got == nil {
+		t.Fatal("expected error identifying the real port owner")
+	}
+	ce, ok := got.(*CliError)
+	if !ok {
+		t.Fatalf("expected *CliError, got %T: %v", got, got)
+	}
+	// The message must describe the real owner, never the bystander pidfile PID.
+	if strings.Contains(ce.Message, fmt.Sprintf("pid: %d", bystanderPid)) ||
+		strings.Contains(ce.Hint, fmt.Sprintf(" %d", bystanderPid)) {
+		t.Errorf("must not offer to kill the bystander PID %d: msg=%q hint=%q", bystanderPid, ce.Message, ce.Hint)
+	}
+	if !strings.Contains(ce.Hint, strconv.Itoa(ownerPid)) {
+		t.Errorf("expected the real owner PID %d in the hint, got: %q", ownerPid, ce.Hint)
+	}
+	// The bystander must be untouched.
+	if err := syscall.Kill(bystanderPid, 0); err != nil {
+		t.Errorf("bystander PID %d should still be alive, got: %v", bystanderPid, err)
 	}
 }
