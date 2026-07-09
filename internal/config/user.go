@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,8 +39,9 @@ const (
 const DefaultRedisDatabases = 16
 
 type UserConfig struct {
-	Path string
-	Data map[string]any
+	Path    string
+	Data    map[string]any
+	loadErr error
 }
 
 func LoadUserConfig(path string) *UserConfig {
@@ -427,6 +429,9 @@ func (uc *UserConfig) Set(dottedKey string, value any) {
 }
 
 func (uc *UserConfig) Save() error {
+	if uc.loadErr != nil {
+		return fmt.Errorf("refusing to overwrite %s: it failed to parse and saving would discard its contents: %w", uc.Path, uc.loadErr)
+	}
 	if err := os.MkdirAll(filepath.Dir(uc.Path), platform.DirMode); err != nil {
 		return err
 	}
@@ -487,6 +492,10 @@ func (uc *UserConfig) load() map[string]any {
 
 	var userData map[string]any
 	if err := json.Unmarshal(raw, &userData); err != nil {
+		// The file exists but is corrupt. Record the failure so Save() refuses
+		// to overwrite the user's real config (reservations, tunnels, editor
+		// overrides) with laundered defaults. Run in defaults for this session.
+		uc.loadErr = fmt.Errorf("parsing %s: %w", filepath.Base(uc.Path), err)
 		return copyMap(UserDefaults)
 	}
 
