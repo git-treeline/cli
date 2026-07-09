@@ -98,13 +98,18 @@ func MissingHosts(expected []string) []string {
 	return missing
 }
 
-// NeedsHostsSync reports whether macOS hosts file needs updating for the
-// given set of expected hostnames.
+// NeedsHostsSync reports whether the hosts file needs updating for the given
+// set of expected hostnames. Enabled on macOS (Safari cannot resolve
+// *.localhost) and Linux (a custom TLD requires /etc/hosts on every platform);
+// callers gate the Linux case on a non-localhost domain. Other platforms
+// always report false.
 func NeedsHostsSync(expected []string) bool {
-	if runtime.GOOS != "darwin" {
+	switch runtime.GOOS {
+	case "darwin", "linux":
+		return len(MissingHosts(expected)) > 0
+	default:
 		return false
 	}
-	return len(MissingHosts(expected)) > 0
 }
 
 func buildHostsBlock(hostnames []string) string {

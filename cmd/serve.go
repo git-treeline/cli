@@ -203,7 +203,7 @@ var serveUninstallCmd = &cobra.Command{
 
 		if err := service.CleanHosts(); err != nil {
 			fmt.Fprintln(os.Stderr, style.Warnf("could not clean hosts file: %v", err))
-		} else if runtime.GOOS == "darwin" {
+		} else if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
 			fmt.Println("Hosts entries removed.")
 		}
 		return nil
@@ -272,6 +272,16 @@ var serveStatusCmd = &cobra.Command{
 				fmt.Fprintln(os.Stderr, style.Warnf("Safari may not resolve some routes (hosts file out of date)."))
 				fmt.Fprintln(os.Stderr, style.Dimf("  Run: gtl serve hosts sync"))
 				fmt.Fprintln(os.Stderr, style.Dimf("  Or disable: gtl config set warnings.safari false"))
+			}
+		} else if runtime.GOOS == "linux" && domain != "localhost" {
+			// A custom TLD (non-.localhost) needs /etc/hosts entries on Linux
+			// too — the router's new worktree hostnames won't resolve
+			// otherwise, and previously no warning was shown at all.
+			hostnames := routeHostnames(domain)
+			if service.NeedsHostsSync(hostnames) {
+				fmt.Println()
+				fmt.Fprintln(os.Stderr, style.Warnf("Some routes may not resolve (/etc/hosts out of date for .%s).", domain))
+				fmt.Fprintln(os.Stderr, style.Dimf("  Run: gtl serve hosts sync"))
 			}
 		}
 
@@ -554,8 +564,8 @@ var serveHostsCleanCmd = &cobra.Command{
 	Use:   "clean",
 	Short: "Remove all git-treeline entries from /etc/hosts",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if runtime.GOOS != "darwin" {
-			fmt.Println("Nothing to clean (hosts sync is macOS-only).")
+		if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+			fmt.Println("Nothing to clean (hosts sync is macOS/Linux only).")
 			return nil
 		}
 		if err := service.CleanHosts(); err != nil {
