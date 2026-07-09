@@ -2,13 +2,19 @@ package service
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/git-treeline/cli/internal/platform"
 )
+
+// pfDialTimeout is overridable in tests so the Linux 443-dial fallback can be
+// exercised deterministically without a real listener.
+var pfDialTimeout = net.DialTimeout
 
 const (
 	basePfAnchorName = "dev.treeline.router"
@@ -175,16 +181,21 @@ func checkPortForwardLinux(routerPort int) PortForwardStatus {
 	ipt, err := resolveIptables()
 	if err != nil {
 		st.Detail = err.Error()
-		return st
+		return linuxDialFallback(st)
 	}
 	out, err := runCmdOutput(ipt, "-t", "nat", "-L", "OUTPUT", "-n")
 	if err != nil {
-		if !st.ConfiguredOnDisk {
-			st.Detail = "not configured"
+		// Non-root: the nat table is unreadable (`iptables -t nat -L` needs
+		// root/CAP_NET_ADMIN). KernelStateKnown stays false so the 443 dial
+		// below is the authoritative signal — mirroring the darwin path,
+		// which also treats a live :443 as the reliable evidence when the
+		// ruleset can't be read without sudo.
+		if st.ConfiguredOnDisk {
+			st.Detail = "kernel ruleset not readable without sudo — verifying via port 443"
 		} else {
-			st.Detail = "could not read iptables (need root or CAP_NET_ADMIN)"
+			st.Detail = "not configured"
 		}
-		return st
+		return linuxDialFallback(st)
 	}
 	st.KernelStateKnown = true
 	body := string(out)
@@ -194,6 +205,29 @@ func checkPortForwardLinux(routerPort int) PortForwardStatus {
 	}
 	if !st.LoadedInKernel && st.ConfiguredOnDisk {
 		st.Detail = "iptables rule missing in current ruleset (run 'gtl serve reload-pf')"
+	}
+	return st
+}
+
+// linuxDialFallback consults port 443 when the kernel ruleset could not be
+// read without privilege. A successful dial is authoritative evidence that a
+// redirect is live, so it marks the setup configured even when neither the
+// on-disk marker nor the (root-only) nat table could confirm it — so status,
+// doctor, open and uninstall all agree with reality for a working non-root
+// install. No-op when the kernel state was actually read. Mirrors the darwin
+// health-check dial.
+func linuxDialFallback(st PortForwardStatus) PortForwardStatus {
+	if st.KernelStateKnown {
+		return st
+	}
+	conn, err := pfDialTimeout("tcp", "127.0.0.1:443", 2*time.Second)
+	if err != nil {
+		return st
+	}
+	_ = conn.Close()
+	st.ConfiguredOnDisk = true
+	if st.Detail == "" || st.Detail == "not configured" {
+		st.Detail = "443 redirect is live (verified by dial; kernel ruleset not readable without sudo)"
 	}
 	return st
 }

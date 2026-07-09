@@ -1,10 +1,13 @@
 package service
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestResolveIptables_PrefersPath verifies that a PATH-resolvable iptables is
@@ -114,3 +117,49 @@ func TestLinuxUninstallScript_Bounded(t *testing.T) {
 		t.Errorf("uninstall script must target our marked rules\nscript: %s", s)
 	}
 }
+
+func TestLinuxDialFallback_LivePortMarksConfigured(t *testing.T) {
+	orig := pfDialTimeout
+	pfDialTimeout = func(_, _ string, _ time.Duration) (net.Conn, error) {
+		return fakePFConn{}, nil
+	}
+	t.Cleanup(func() { pfDialTimeout = orig })
+
+	// Kernel state unknown (non-root) and marker absent, but :443 answers.
+	st := linuxDialFallback(PortForwardStatus{ConfiguredOnDisk: false, KernelStateKnown: false, Detail: "not configured"})
+	if !st.ConfiguredOnDisk {
+		t.Error("a live :443 dial should mark the setup as configured for non-root")
+	}
+}
+
+func TestLinuxDialFallback_DeadPortLeavesUnconfigured(t *testing.T) {
+	orig := pfDialTimeout
+	pfDialTimeout = func(_, _ string, _ time.Duration) (net.Conn, error) {
+		return nil, fmt.Errorf("connection refused")
+	}
+	t.Cleanup(func() { pfDialTimeout = orig })
+
+	st := linuxDialFallback(PortForwardStatus{ConfiguredOnDisk: false, KernelStateKnown: false})
+	if st.ConfiguredOnDisk {
+		t.Error("a refused :443 dial must not mark the setup as configured")
+	}
+}
+
+func TestLinuxDialFallback_NoopWhenKernelKnown(t *testing.T) {
+	called := false
+	orig := pfDialTimeout
+	pfDialTimeout = func(_, _ string, _ time.Duration) (net.Conn, error) {
+		called = true
+		return fakePFConn{}, nil
+	}
+	t.Cleanup(func() { pfDialTimeout = orig })
+
+	linuxDialFallback(PortForwardStatus{KernelStateKnown: true})
+	if called {
+		t.Error("dial fallback must not run when the kernel ruleset was read")
+	}
+}
+
+type fakePFConn struct{ net.Conn }
+
+func (fakePFConn) Close() error { return nil }
