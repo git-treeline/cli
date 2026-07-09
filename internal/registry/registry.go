@@ -451,6 +451,29 @@ func (r *Registry) Unrelate(a, b RepoRef) (bool, error) {
 	return removed, err
 }
 
+// GCDanglingEdges removes relationship edges whose BOTH endpoints are
+// unresolvable according to resolvable, returning the removed edges. The
+// two-sided rule is deliberately conservative: an edge with even one live
+// endpoint is kept, so an edge pointing at a worktree that is only temporarily
+// archived (its sibling still checked out) survives to be re-linked later. Only
+// edges where neither side maps to anything live are treated as truly obsolete
+// (typo'd or long-abandoned) and reclaimed.
+func (r *Registry) GCDanglingEdges(resolvable func(RepoRef) bool) ([]Edge, error) {
+	var removed []Edge
+	err := r.withLock(func(data *RegistryData) {
+		filtered := make([]Edge, 0, len(data.Edges))
+		for _, e := range data.Edges {
+			if !resolvable(e.A) && !resolvable(e.B) {
+				removed = append(removed, e)
+				continue
+			}
+			filtered = append(filtered, e)
+		}
+		data.Edges = filtered
+	})
+	return removed, err
+}
+
 func (r *Registry) Prune() (int, error) {
 	count := 0
 	err := r.withLock(func(data *RegistryData) {

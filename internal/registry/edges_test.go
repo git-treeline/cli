@@ -202,3 +202,52 @@ func TestMigrate_Idempotent(t *testing.T) {
 		t.Error("migrate is not idempotent")
 	}
 }
+
+func TestGCDanglingEdges_RemovesOnlyFullyDangling(t *testing.T) {
+	reg := newTestRegistry(t)
+	live := ref("acme/web", "main")
+	archived := ref("acme/api", "feature")
+	gone := ref("acme/old", "typo")
+
+	// Edge with one live endpoint — must be kept.
+	if _, err := reg.Relate(live, archived, "consumes"); err != nil {
+		t.Fatal(err)
+	}
+	// Edge with both endpoints unresolvable — must be reclaimed.
+	if _, err := reg.Relate(archived, gone, "related"); err != nil {
+		t.Fatal(err)
+	}
+
+	resolvable := func(r RepoRef) bool { return r == live }
+	removed, err := reg.GCDanglingEdges(resolvable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 {
+		t.Fatalf("expected 1 removed edge, got %d", len(removed))
+	}
+
+	remaining := reg.AllEdges()
+	if len(remaining) != 1 {
+		t.Fatalf("expected 1 surviving edge, got %d", len(remaining))
+	}
+	if remaining[0].Other(live) != archived {
+		t.Errorf("expected the live-anchored edge to survive, got %+v", remaining[0])
+	}
+}
+
+func TestGCDanglingEdges_KeepsAllWhenResolvable(t *testing.T) {
+	reg := newTestRegistry(t)
+	a := ref("acme/web", "main")
+	b := ref("acme/api", "feature")
+	if _, err := reg.Relate(a, b, ""); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := reg.GCDanglingEdges(func(RepoRef) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 0 {
+		t.Errorf("expected nothing removed when all resolvable, got %d", len(removed))
+	}
+}

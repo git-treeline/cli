@@ -93,6 +93,8 @@ var pruneCmd = &cobra.Command{
 			teardownRuntimeState(removed)
 			fmt.Printf("Pruned %d stale allocation(s).\n", count)
 		}
+
+		gcDanglingEdges(reg)
 		return nil
 	},
 }
@@ -197,6 +199,30 @@ func runPruneMerged() error {
 
 	fmt.Printf("Released %d allocation(s).\n", count)
 	return nil
+}
+
+// gcDanglingEdges reclaims relationship edges that no longer point at any live
+// worktree on either end. Endpoints resolve through the same (repo, branch)
+// index that `gtl status`/`gtl related` use, so an edge is dropped only when
+// neither side is currently checked out anywhere in the registry. Best-effort:
+// failures are reported but never block the prune.
+func gcDanglingEdges(reg *registry.Registry) {
+	if len(reg.AllEdges()) == 0 {
+		return
+	}
+	idx := buildWorktreeIndex(reg.Allocations())
+	resolvable := func(ref registry.RepoRef) bool {
+		_, ok := idx.pathByRef[ref]
+		return ok
+	}
+	removed, err := reg.GCDanglingEdges(resolvable)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not garbage-collect edges: %s\n", err)
+		return
+	}
+	if len(removed) > 0 {
+		fmt.Printf("Removed %d dangling relationship edge(s).\n", len(removed))
+	}
 }
 
 // removedAllocations returns the entries present in before but absent from
