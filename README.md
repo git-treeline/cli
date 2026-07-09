@@ -693,6 +693,11 @@ See [Framework examples](#framework-examples) for complete examples. Available f
 | `hooks.<name>.auto` | `true` to run this hook on every fresh `gtl start` (default: `false`, requires `--with`) |
 | `hooks.<name>.pre_start` | Shell command(s) run before the supervisor launches — string or array of strings |
 | `hooks.<name>.post_stop` | Shell command(s) run in reverse order when the supervisor exits (Ctrl+C) — string or array |
+| `provision.apt` | System packages a host needs before setup (Linux; installed with `sudo apt-get`). Skipped on macOS |
+| `provision.services` | Service packages to apt-install and `systemctl enable --now` (Linux). Skipped on macOS |
+| `provision.database.source` | A `database.sources.<env>` name to hydrate the template database from (preferred — real data) |
+| `provision.database.hydrate` | Fallback shell command, run in the repo dir, to fill the template when no `source` is set (e.g. `bin/rails db:schema:load db:seed`) |
+| `provision.database.template` | Template database name to create (defaults to `database.template` — the DB gtl clones worktree DBs from) |
 
 ### Interpolation tokens
 
@@ -722,6 +727,42 @@ Once a worktree is allocated, the `project` name is stored in the registry and u
 `gtl start`, `gtl setup`, and `gtl env sync` detect this mismatch and prompt to revert `.treeline.yml` to the registry name. `gtl doctor` reports drift diagnostically.
 
 To actually rename a project: release all worktrees (`gtl release --all --project <old-name>`), update `.treeline.yml`, then run `gtl setup`.
+
+## Provisioning a host (optional)
+
+`gtl setup` assumes the host already has what the project needs — Postgres with a
+template database, the right language runtime, system libraries. On your own Mac
+that's usually true. On a fresh box (a cloud VPS, a new machine, CI) it isn't.
+
+`gtl provision` reads a `provision:` section from `.treeline.yml` and brings the
+host up to that declared baseline. Every step checks before acting, so it's safe
+to re-run:
+
+```yaml
+database:
+  template: salt_development         # the DB gtl clones worktree DBs from
+provision:
+  apt: [libvips, imagemagick]        # system packages (Linux; needs sudo)
+  services: [redis-server]           # apt-install + systemctl enable --now
+  database:
+    source: production               # hydrate the template from real data…
+    hydrate: "bin/rails db:schema:load db:seed"   # …or this, if no source
+```
+
+- **apt / services** are Linux-only and are skipped with a note on macOS.
+- **Runtimes** install via `mise` when the repo pins one (`.ruby-version`,
+  `.tool-versions`, `mise.toml`, …) and `mise` is on `PATH`.
+- **Template database**: if the template doesn't exist, it's created from
+  `source` (reusing the `gtl db pull` machinery), else via the `hydrate`
+  command, else empty (with a warning).
+
+```bash
+gtl provision --dry-run   # print the plan without acting
+gtl provision             # apply it
+```
+
+Run it once when you first put a repo on a new host — after cloning, before
+`gtl setup`. `gtl setup` and `gtl new` do **not** invoke it automatically.
 
 ## Database cloning (optional)
 
@@ -813,6 +854,7 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl review <PR#>` | `--path` `--start` `--open` | Check out a GitHub PR into a worktree with full setup (requires `gh`) |
 | `gtl switch <branch-or-PR#>` | `--setup` `--restart` | Switch worktree to a different branch or PR — fetches, checks out, refreshes env |
 | `gtl setup [PATH]` | `--main-repo` `--dry-run` | Allocate resources and configure a worktree (idempotent) |
+| `gtl provision [PATH]` | `--dry-run` | Make a host meet a repo's declared prerequisites (apt/services/runtimes/template DB) before setup (idempotent) |
 | `gtl release [PATH]` | `--drop-db` `--remove-worktree` `--project` `--all` `--force`/`-f` `--dry-run` | Free allocated resources (confirms before releasing unless `--force`) |
 | `gtl port` | `--json` | Print the allocated port for the current worktree |
 | `gtl refresh` | `--dry-run` `--force`/`-f` | Re-allocate all worktrees with current reservations; restarts supervised servers |
