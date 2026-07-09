@@ -29,7 +29,8 @@ var switchCmd = &cobra.Command{
 	Use:   "switch <branch-or-PR#>",
 	Short: "Switch this worktree to a different branch or PR",
 	Long: `Switch the current worktree to a different branch. Accepts either a
-branch name or a PR number (resolved via gh). Fetches from origin,
+branch name or a PR number (resolved via gh). A PR may be given as a bare
+number or with a leading '#' (e.g. '42' or '#42'). Fetches from origin,
 checks out the branch, and refreshes the environment.
 
 Must be run from inside a worktree (not the main repo).`,
@@ -120,7 +121,10 @@ func completeBranchesAndPRs(cmd *cobra.Command, args []string, toComplete string
 	completions := worktree.ListBranches(toComplete)
 	if prs, err := github.ListOpenPRs(); err == nil {
 		for _, pr := range prs {
-			completions = append(completions, fmt.Sprintf("%d\t%s", pr.Number, pr.Title))
+			// Emit the '#N' form: it disambiguates PRs from branches in the
+			// combined list and advertises the supported syntax. parsePRNumber
+			// accepts both '#42' and '42'.
+			completions = append(completions, fmt.Sprintf("#%d\t%s", pr.Number, pr.Title))
 		}
 	}
 	return completions, cobra.ShellCompDirectiveNoFileComp
