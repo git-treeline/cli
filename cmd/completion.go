@@ -24,15 +24,25 @@ Homebrew installs completions automatically. For manual installation:
 	ValidArgs:             []string{"bash", "zsh", "fish", "powershell"},
 	Args:                  cobra.MatchAll(cobra.ExactArgs(1), cobra.OnlyValidArgs),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// The binary is installed and invoked as 'gtl' (a symlink to the
+		// 'git-treeline' binary), so the completion script must register the
+		// 'gtl' command name — otherwise 'gtl <tab>' does nothing. Cobra
+		// derives the completion name from the root command's Name(), so we
+		// temporarily override the root Use for generation and restore it.
+		root := cmd.Root()
+		origUse := root.Use
+		root.Use = "gtl"
+		defer func() { root.Use = origUse }()
+
 		switch args[0] {
 		case "bash":
-			return rootCmd.GenBashCompletion(os.Stdout)
+			return root.GenBashCompletion(os.Stdout)
 		case "zsh":
-			return rootCmd.GenZshCompletion(os.Stdout)
+			return root.GenZshCompletion(os.Stdout)
 		case "fish":
-			return rootCmd.GenFishCompletion(os.Stdout, true)
+			return root.GenFishCompletion(os.Stdout, true)
 		case "powershell":
-			return rootCmd.GenPowerShellCompletionWithDesc(os.Stdout)
+			return root.GenPowerShellCompletionWithDesc(os.Stdout)
 		}
 		return nil
 	},
