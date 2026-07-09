@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -79,6 +80,26 @@ func TestTokenHandler_TokenPath_SetsCookieAndRedirects(t *testing.T) {
 	}
 	if !found {
 		t.Error("gtl_share cookie not found in response")
+	}
+}
+
+func TestTokenPathMatch(t *testing.T) {
+	token := "deadbeef12345678deadbeef12345678"
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"/s/" + token, true},
+		{"/s/" + token + "/extra", true},
+		{"/s/" + token[:len(token)-1], false}, // too short
+		{"/s/" + strings.Repeat("0", len(token)), false},
+		{"/other/" + token, false},
+		{"/", false},
+	}
+	for _, tc := range cases {
+		if got := tokenPathMatch(tc.path, token); got != tc.want {
+			t.Errorf("tokenPathMatch(%q) = %v, want %v", tc.path, got, tc.want)
+		}
 	}
 }
 

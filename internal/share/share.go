@@ -9,6 +9,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -74,10 +75,9 @@ func NewTokenHandler(token string, appPort int) http.Handler {
 	}
 
 	expectedCookie := cookieValue(token)
-	tokenPath := pathPrefix + token
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, tokenPath) {
+		if tokenPathMatch(r.URL.Path, token) {
 			http.SetCookie(w, &http.Cookie{
 				Name:     cookieName,
 				Value:    expectedCookie,
@@ -91,13 +91,24 @@ func NewTokenHandler(token string, appPort int) http.Handler {
 		}
 
 		c, err := r.Cookie(cookieName)
-		if err == nil && c.Value == expectedCookie {
+		if err == nil && hmac.Equal([]byte(c.Value), []byte(expectedCookie)) {
 			rp.ServeHTTP(w, r)
 			return
 		}
 
 		http.NotFound(w, r)
 	})
+}
+
+// tokenPathMatch reports whether path begins with the secret token path
+// (/s/<token>), comparing the token in constant time so the gate doesn't leak
+// how many leading characters of the token an attacker guessed correctly.
+func tokenPathMatch(path, token string) bool {
+	rest, ok := strings.CutPrefix(path, pathPrefix)
+	if !ok || len(rest) < len(token) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(rest[:len(token)]), []byte(token)) == 1
 }
 
 // freePort asks the OS for an available TCP port.
