@@ -13,6 +13,7 @@ import (
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/interpolation"
 	"github.com/git-treeline/cli/internal/registry"
+	"github.com/git-treeline/cli/internal/supervisor"
 )
 
 // Allocator manages resource allocation using user and project configuration.
@@ -21,6 +22,26 @@ type Allocator struct {
 	UserConfig    *config.UserConfig
 	ProjectConfig *config.ProjectConfig
 	Registry      *registry.Registry
+	// SupervisorLive reports whether the given worktree has its own live
+	// supervisor (its control socket responds). Used during reuse so a busy
+	// allocated port held by the worktree's own dev server isn't mistaken for a
+	// foreign squatter. Injectable for tests; nil falls back to a socket probe.
+	SupervisorLive func(worktreePath string) bool
+}
+
+// supervisorResponding probes the worktree's supervisor control socket. It is
+// the default SupervisorLive implementation: a response (of any kind) means the
+// worktree owns whatever is listening on its allocated ports.
+func supervisorResponding(worktreePath string) bool {
+	_, err := supervisor.Send(supervisor.SocketPath(worktreePath), "status")
+	return err == nil
+}
+
+func (al *Allocator) hasLiveSupervisor(worktreePath string) bool {
+	if al.SupervisorLive != nil {
+		return al.SupervisorLive(worktreePath)
+	}
+	return supervisorResponding(worktreePath)
 }
 
 // Allocation represents the resources assigned to a worktree including
@@ -189,8 +210,22 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string, mainWorktr
 		}
 	}
 
+	// A previously-allocated port that is busy is only a conflict when someone
+	// *other* than this worktree holds it. When the worktree's own supervisor is
+	// live, a busy port is the expected steady state (its dev server is running)
+	// — reusing the same ports keeps routes pointing at the right place instead
+	// of rewriting the env file out from under a running server.
+	ownSupervisorChecked := false
+	ownSupervisorLive := false
 	for _, p := range ports {
-		if !IsPortFree(p) {
+		if IsPortFree(p) {
+			continue
+		}
+		if !ownSupervisorChecked {
+			ownSupervisorLive = al.hasLiveSupervisor(worktreePath)
+			ownSupervisorChecked = true
+		}
+		if !ownSupervisorLive {
 			return nil
 		}
 	}

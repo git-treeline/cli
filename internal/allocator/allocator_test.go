@@ -935,6 +935,78 @@ func TestReuseExisting_PortConflict(t *testing.T) {
 	}
 }
 
+// reusePortHeldAllocator builds an allocator whose registry already holds an
+// allocation for /tmp/test-wt on port 49990, with base configured elsewhere so
+// a fresh block lands away from 49990.
+func reusePortHeldAllocator(t *testing.T) *Allocator {
+	t.Helper()
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "registry.json")
+	regData := `{"version":1,"allocations":[{"project":"test","worktree":"/tmp/test-wt","worktree_name":"test-wt","port":49990,"ports":[49990],"database":"","database_adapter":"postgresql"}]}`
+	_ = os.WriteFile(regPath, []byte(regData), 0o644)
+	reg := registry.New(regPath)
+
+	confPath := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(confPath, []byte(`{"port":{"base":49980,"increment":10}}`), 0o644)
+	uc := config.LoadUserConfig(confPath)
+
+	projDir := filepath.Join(dir, "project")
+	_ = os.MkdirAll(projDir, 0o755)
+	_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"), []byte("project: test\n"), 0o644)
+	pc := config.LoadProjectConfig(projDir)
+
+	return New(uc, pc, reg)
+}
+
+// TestReuseExisting_OwnServerRunning: when the allocated port is busy but the
+// worktree's own supervisor is live, that's the steady state (its dev server is
+// running) — reuse must keep the same ports rather than rewrite the allocation.
+func TestReuseExisting_OwnServerRunning(t *testing.T) {
+	al := reusePortHeldAllocator(t)
+	al.SupervisorLive = func(string) bool { return true }
+
+	ln, err := net.Listen("tcp", "127.0.0.1:49990")
+	if err != nil {
+		t.Skip("cannot bind test port 49990")
+	}
+	defer func() { _ = ln.Close() }()
+
+	alloc, err := al.Allocate("/tmp/test-wt", "test-wt", false)
+	if err != nil {
+		t.Fatalf("Allocate failed: %v", err)
+	}
+	if !alloc.Reused {
+		t.Error("expected Reused=true when the worktree's own server holds the port")
+	}
+	if alloc.Port != 49990 {
+		t.Errorf("expected reuse of port 49990, got %d", alloc.Port)
+	}
+}
+
+// TestReuseExisting_ForeignSquatter: an allocated port busy with no live
+// supervisor for this worktree is a genuine conflict — reallocate.
+func TestReuseExisting_ForeignSquatter(t *testing.T) {
+	al := reusePortHeldAllocator(t)
+	al.SupervisorLive = func(string) bool { return false }
+
+	ln, err := net.Listen("tcp", "127.0.0.1:49990")
+	if err != nil {
+		t.Skip("cannot bind test port 49990")
+	}
+	defer func() { _ = ln.Close() }()
+
+	alloc, err := al.Allocate("/tmp/test-wt", "test-wt", false)
+	if err != nil {
+		t.Fatalf("Allocate failed: %v", err)
+	}
+	if alloc.Reused {
+		t.Error("expected Reused=false when a foreign process squats the port")
+	}
+	if alloc.Port == 49990 {
+		t.Errorf("expected re-allocation away from squatted port 49990, got %d", alloc.Port)
+	}
+}
+
 func TestBrowserBlockedPorts_NotAllocated(t *testing.T) {
 	for _, port := range []int{6000, 6665, 6666, 6667} {
 		if !browserBlockedPorts[port] {
