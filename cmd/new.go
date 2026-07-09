@@ -195,6 +195,15 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		s.Options.DryRun = false
 		alloc, err := s.Run()
 		if err != nil {
+			// setup rolls back its own allocation, but the worktree this command
+			// just created would otherwise be left orphaned (no registry entry,
+			// invisible to prune). Remove it so a failed 'new' leaves no trace.
+			if rmErr := worktree.Remove(wtPath, true); rmErr != nil {
+				fmt.Fprintln(os.Stderr, style.Warnf("Could not remove worktree after failed setup: %s", rmErr))
+				fmt.Fprintln(os.Stderr, style.Dimf("  Remove it manually: git worktree remove --force %s", wtPath))
+			} else {
+				fmt.Println(style.Dimf("Rolled back worktree %s after setup failure.", wtPath))
+			}
 			return cliErr(cmd, errSetupFailed(err))
 		}
 
