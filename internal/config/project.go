@@ -73,6 +73,7 @@ var ProjectDefaults = map[string]any{
 type ProjectConfig struct {
 	ProjectRoot string
 	Data        map[string]any
+	loadErr     error
 }
 
 func LoadProjectConfig(projectRoot string) *ProjectConfig {
@@ -98,6 +99,9 @@ func (pc *ProjectConfig) Project() string {
 // when the config is safe to use, otherwise an error naming the offending
 // field with a suggested replacement.
 func (pc *ProjectConfig) Validate() error {
+	if pc.loadErr != nil {
+		return pc.loadErr
+	}
 	if v, ok := pc.Data["project"].(string); ok && v != "" {
 		if !IsValidIdentifier(v) {
 			return fmt.Errorf("project name %q in %s contains invalid characters; must match [a-zA-Z_][a-zA-Z0-9_]* (run `gtl rename %s` to fix)",
@@ -916,15 +920,35 @@ var projectKnownKeys = map[string]bool{
 func (pc *ProjectConfig) load() map[string]any {
 	raw, err := os.ReadFile(pc.configPath())
 	if err != nil {
+		// A missing config file is legitimate — fall back to defaults. Any
+		// other read failure (permissions, I/O) is recorded so callers don't
+		// treat an unreadable config as an empty one.
+		if !os.IsNotExist(err) {
+			pc.loadErr = fmt.Errorf("reading %s: %w", ProjectConfigFile, err)
+		}
 		return copyMap(ProjectDefaults)
 	}
 
 	var yamlData map[string]any
-	if err := yaml.Unmarshal(raw, &yamlData); err != nil || yamlData == nil {
+	if err := yaml.Unmarshal(raw, &yamlData); err != nil {
+		// A syntax error must not silently degrade to defaults — that lets
+		// Project() fall back to the directory name and can trigger data loss
+		// downstream (e.g. a bogus project rename). Surface it via Validate().
+		pc.loadErr = fmt.Errorf("parsing %s: %w", ProjectConfigFile, err)
+		return copyMap(ProjectDefaults)
+	}
+	if yamlData == nil {
 		return copyMap(ProjectDefaults)
 	}
 
 	WarnUnknownKeys(yamlData, projectKnownKeys, ProjectConfigFile)
 
 	return DeepMerge(ProjectDefaults, yamlData)
+}
+
+// LoadError reports a failure to read or parse the project config file. It is
+// nil when the config loaded cleanly or was simply absent (defaults applied).
+// Callers about to take a config-derived destructive action should consult it.
+func (pc *ProjectConfig) LoadError() error {
+	return pc.loadErr
 }

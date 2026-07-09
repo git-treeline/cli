@@ -446,6 +446,12 @@ func (s *Setup) syncTemplateDatabase() error {
 }
 
 func (s *Setup) handleProjectRename() error {
+	// Never treat an unreadable or unparseable config as a rename: Project()
+	// falls back to the directory name in that case, which would look like a
+	// rename and drop the recorded database. Refuse rather than risk data loss.
+	if err := s.ProjectConfig.LoadError(); err != nil {
+		return err
+	}
 	entry := s.Registry.Find(s.WorktreePath)
 	if entry == nil {
 		return nil

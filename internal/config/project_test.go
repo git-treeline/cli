@@ -1091,3 +1091,29 @@ func TestDatabaseSyncOnCreate(t *testing.T) {
 		}
 	})
 }
+
+func TestLoadProjectConfig_InvalidYAMLSurfacedViaValidate(t *testing.T) {
+	dir := t.TempDir()
+	// Unbalanced/broken YAML that yaml.Unmarshal cannot parse.
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: [unterminated\n"), 0o644)
+
+	pc := LoadProjectConfig(dir)
+	if pc.LoadError() == nil {
+		t.Fatal("expected LoadError for invalid YAML, got nil")
+	}
+	if err := pc.Validate(); err == nil {
+		t.Error("expected Validate to surface the parse error, got nil")
+	}
+}
+
+func TestLoadProjectConfig_AbsentIsNotError(t *testing.T) {
+	dir := t.TempDir() // no .treeline.yml written
+
+	pc := LoadProjectConfig(dir)
+	if pc.LoadError() != nil {
+		t.Errorf("expected no LoadError for an absent config, got %v", pc.LoadError())
+	}
+	if err := pc.Validate(); err != nil {
+		t.Errorf("expected Validate to pass for an absent config, got %v", err)
+	}
+}
