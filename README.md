@@ -879,6 +879,10 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl serve install` | | One-time setup: CA trust, port forwarding, background service |
 | `gtl serve status` | | Show router routes and service health |
 | `gtl serve uninstall` | | Remove CA trust, port forwarding, and service |
+| `gtl serve restart` | `--pf` `--if-installed` | Restart the router daemon (verifies it answers before reporting success) |
+| `gtl serve reload-pf` | | Reapply the 443→router port-forwarding rules (macOS pf / Linux iptables) |
+| `gtl serve logs` | `--follow`/`-f` | Print or tail the router log (journalctl on Linux) |
+| `gtl serve hosts sync` / `clean` | | Add/remove managed `/etc/hosts` entries for the router domain |
 | `gtl serve alias [name] [port]` | `--remove` | Add/remove/list static subdomain aliases. Port auto-detected from current directory when omitted |
 | `gtl proxy <port> [target]` | `--tls` | Forward traffic from a stable port to a worktree port |
 | `gtl tunnel [port]` | `--domain` `--tunnel` | Expose a local port via Cloudflare tunnel (quick or named) |
@@ -888,7 +892,14 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl tunnel remove <name>` | | Remove a named tunnel from local config |
 | `gtl share [port]` | `--tunnel` `--tailscale` | Private share URL (Cloudflare token-gated or Tailscale tailnet) |
 | `gtl config` | | Show or initialize user-level config |
-| `gtl db` | `name` `reset` `restore` `drop` — `name --json` | Manage worktree databases |
+| `gtl db` | `name` `reset` `restore` `drop` (`reset`/`restore`/`drop` take `--force`/`-f` `--dry-run`) — `name --json` | Manage worktree databases |
+| `gtl list` | `--json` | Scriptable, non-interactive list of all registered worktrees |
+| `gtl nuke` | `--force`/`-f` | Machine-wide recovery: kill processes holding gtl ports and clear stale supervisors |
+| `gtl relate <target>` | `--from` `--type` | Link the current worktree to another (durable, survives archive/recreate) |
+| `gtl unrelate <target>` / `gtl related` | `--json` | Remove a relationship / list the current worktree's relationships |
+| `gtl rename <new-name>` | | Rename the project across registry, reservations, and databases |
+| `gtl reallocate [PATH...]` | `--apply` `--all-registry` | Preview (default) or apply re-allocation for specific worktrees |
+| `gtl registry` | `validate` (`--json`) `repair` `forget <path>` | Inspect and repair the allocation registry |
 | `gtl dashboard` | aliases: `dash`, `ui` | Interactive TUI for monitoring and managing all worktrees |
 | `gtl mcp` | | MCP server for AI agents (started automatically by your editor) |
 | `gtl version` | | Print version |
