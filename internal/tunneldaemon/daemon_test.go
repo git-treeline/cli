@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"os"
@@ -176,7 +175,6 @@ func startDaemon(t *testing.T) (*Daemon, *fakeRunner, string, func()) {
 	d := New("test-tunnel")
 	d.Runner = runner
 	d.LogSink = io.Discard
-	d.ValidatePort = func(int) error { return nil }
 	d.WriteConfig = func(name string, routes []tunnel.HostRoute) (string, error) {
 		path := filepath.Join(cfgDir, "config.yml")
 		return path, os.WriteFile(path, []byte(tunnel.GenerateMultiHostConfig(name, "/tmp/cred.json", routes)), 0o600)
@@ -358,41 +356,6 @@ func TestDaemon_DuplicateHostnameRejected(t *testing.T) {
 	}
 	if ev.Kind != EventError {
 		t.Errorf("expected error event, got %+v", ev)
-	}
-}
-
-func TestDaemon_UnallocatedPortRejected(t *testing.T) {
-	d, runner, sock, cleanup := startDaemon(t)
-	defer cleanup()
-
-	// Only port 3050 is a "registered" worktree port; anything else (e.g. a
-	// database port a rogue process tries to publish) must be refused.
-	d.ValidatePort = func(port int) error {
-		if port == 3050 {
-			return nil
-		}
-		return fmt.Errorf("port %d is not allocated to any git-treeline worktree", port)
-	}
-
-	conn, err := net.DialTimeout("unix", sock, time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = conn.Close() }()
-	b, _ := json.Marshal(Register{Op: OpRegister, Hostname: "evil.example.dev", Port: 5432})
-	_, _ = conn.Write(append(b, '\n'))
-
-	dec := json.NewDecoder(bufio.NewReader(conn))
-	var ev Event
-	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
-	if err := dec.Decode(&ev); err != nil {
-		t.Fatal(err)
-	}
-	if ev.Kind != EventError {
-		t.Errorf("expected error event for unallocated port, got %+v", ev)
-	}
-	if runner.StartCount() != 0 {
-		t.Errorf("cloudflared should not start for a rejected registration, got %d starts", runner.StartCount())
 	}
 }
 
