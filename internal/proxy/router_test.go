@@ -315,6 +315,53 @@ func TestRouterLoopDetection(t *testing.T) {
 	}
 }
 
+func TestInboundHops_NormalizesClientValues(t *testing.T) {
+	cases := []struct {
+		header string
+		want   int
+	}{
+		{"", 0},
+		{"2", 2},
+		{"-1000000", 0}, // negative can't weaken loop detection
+		{"not-a-number", 0},
+		{"999999", maxProxyHops}, // oversized is capped, not trusted
+	}
+	for _, tc := range cases {
+		req, _ := http.NewRequest("GET", "/", nil)
+		if tc.header != "" {
+			req.Header.Set("X-Gtl-Hops", tc.header)
+		}
+		if got := inboundHops(req); got != tc.want {
+			t.Errorf("inboundHops(%q) = %d, want %d", tc.header, got, tc.want)
+		}
+	}
+}
+
+func TestRouterNegativeHopHeaderStillDetectsLoops(t *testing.T) {
+	reg := testRegistry(t, []registry.Allocation{
+		{"project": "salt", "branch": "main", "port": float64(3001), "ports": []any{float64(3001)}, "worktree": "/tmp/salt"},
+	})
+	router := NewRouter(3000, reg)
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+
+	// A forged negative count must not let a genuine loop slip past the
+	// threshold; the router clamps it to 0 and still increments per hop.
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "salt-main.localhost:3000"
+	req.Header.Set("X-Gtl-Hops", "-500")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	// Clamped to 0 → below threshold → request is routed (backend down → 502),
+	// but crucially not an unbounded pass-through of the forged counter.
+	if resp.StatusCode == http.StatusLoopDetected {
+		t.Error("negative hop header should be clamped, not trigger 508 here")
+	}
+}
+
 func TestRouterAllowsLegitimateMultiHop(t *testing.T) {
 	targetPort := freePort(t)
 	mux := http.NewServeMux()

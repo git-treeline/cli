@@ -154,6 +154,22 @@ func (r *Router) Run() error {
 
 const maxProxyHops = 5
 
+// inboundHops reads the router's loop-detection counter from a request,
+// normalizing client-supplied values. Only the router sets a meaningful count
+// (incremented on each proxied hop), so a first-party client trying to defeat
+// loop detection with a negative or non-numeric value is clamped to zero, and
+// an oversized value is capped at the loop threshold rather than trusted.
+func inboundHops(req *http.Request) int {
+	n, err := strconv.Atoi(req.Header.Get("X-Gtl-Hops"))
+	if err != nil || n < 0 {
+		return 0
+	}
+	if n > maxProxyHops {
+		return maxProxyHops
+	}
+	return n
+}
+
 // HealthEndpoint is the path the doctor probes to confirm the running
 // router is responsive (not just bound to a port).
 const HealthEndpoint = "/_treeline/health"
@@ -167,10 +183,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	hops := 0
-	if v := req.Header.Get("X-Gtl-Hops"); v != "" {
-		hops, _ = strconv.Atoi(v)
-	}
+	hops := inboundHops(req)
 	if hops >= maxProxyHops {
 		r.serveLoopDetected(w, hops)
 		return
@@ -212,10 +225,7 @@ func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, subdomain str
 		Host:   fmt.Sprintf("%s:%d", backendHost, targetPort),
 	}
 
-	hops := 0
-	if v := req.Header.Get("X-Gtl-Hops"); v != "" {
-		hops, _ = strconv.Atoi(v)
-	}
+	hops := inboundHops(req)
 
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
