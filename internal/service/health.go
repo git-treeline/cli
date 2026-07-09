@@ -304,6 +304,25 @@ func checkRouterResponding(d healthDeps, port int) HealthCheck {
 	}
 }
 
+// WaitRouterResponding polls the router's health endpoint until it answers,
+// or until `wait` elapses. Used after a restart: launchd/systemd reporting
+// the service as running (and even the version file being rewritten) only
+// proves the process started, not that it is serving requests.
+func WaitRouterResponding(routerPort int, wait time.Duration) error {
+	d := defaultHealthDeps()
+	deadline := nowFn().Add(wait)
+	for {
+		c := checkRouterResponding(d, routerPort)
+		if c.Status == "ok" {
+			return nil
+		}
+		if !nowFn().Before(deadline) {
+			return fmt.Errorf("%s", c.Detail)
+		}
+		sleepFn(200 * time.Millisecond)
+	}
+}
+
 func checkPortForward(d healthDeps, routerPort int) HealthCheck {
 	st := d.checkPortForward(routerPort)
 	if !st.ConfiguredOnDisk {

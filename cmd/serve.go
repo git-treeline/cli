@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/confirm"
@@ -91,7 +92,14 @@ should not be an error).`,
 				Hint:    "If this persists, run 'gtl serve install' for a full reset.",
 			})
 		}
-		fmt.Println(style.Dimf("Router restarted (running %s).", Version))
+		routerPort := config.LoadUserConfig("").RouterPort()
+		if err := service.WaitRouterResponding(routerPort, 5*time.Second); err != nil {
+			return cliErr(cmd, &CliError{
+				Message: fmt.Sprintf("Router restarted but is not answering health checks: %v", err),
+				Hint:    "Check the router logs, or run 'gtl serve install' for a full reset.",
+			})
+		}
+		fmt.Println(style.Dimf("Router restarted and responding (running %s).", Version))
 
 		if serveRestartReloadPF {
 			fmt.Println(style.Actionf("Reloading pf rules..."))
