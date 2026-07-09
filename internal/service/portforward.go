@@ -225,6 +225,13 @@ func ReloadPortForward() error {
 }
 
 func isLinuxPortForwardConfigured() bool {
+	// The persistence unit file is the sudo-free on-disk marker (the Linux
+	// analog of pf.conf on macOS): its presence means an install ran. Prefer
+	// it so a non-root caller — who cannot read the nat table — still sees a
+	// working setup as "configured".
+	if _, err := os.Stat(linuxPortForwardUnitPath()); err == nil {
+		return true
+	}
 	ipt, err := resolveIptables()
 	if err != nil {
 		return false
@@ -235,6 +242,52 @@ func isLinuxPortForwardConfigured() bool {
 		return false
 	}
 	return strings.Contains(string(out), "git-treeline")
+}
+
+// --- Linux boot-time persistence (systemd oneshot; iptables analog of the
+// macOS pf-reload LaunchDaemon) ---
+
+const baseLinuxPortForwardUnit = "git-treeline-portforward"
+
+func linuxPortForwardUnitName() string {
+	return baseLinuxPortForwardUnit + platform.DevSuffix() + ".service"
+}
+
+func linuxPortForwardUnitPath() string {
+	return "/etc/systemd/system/" + linuxPortForwardUnitName()
+}
+
+// linuxPortForwardUnitBody is the systemd oneshot unit that re-applies the
+// 443→router redirect at boot. Type=oneshot + RemainAfterExit keeps it shown
+// as active after the rule is in place; the ExecStart is idempotent
+// (check-or-add) so a manual `systemctl restart` never stacks duplicates.
+func linuxPortForwardUnitBody(ipt string, routerPort int) string {
+	spec := strings.Join(linuxRedirectRuleSpec(routerPort), " ")
+	return fmt.Sprintf(`[Unit]
+Description=git-treeline 443 to router port redirect
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '%s -t nat -C OUTPUT %s 2>/dev/null || %s -t nat -A OUTPUT %s'
+
+[Install]
+WantedBy=multi-user.target
+`, ipt, spec, ipt, spec)
+}
+
+// IsLinuxPortForwardPersistenceInstalled reports whether the boot-time
+// redirect unit is installed AND enabled (so systemd will actually run it at
+// boot). Read-only; `systemctl is-enabled` does not require root.
+func IsLinuxPortForwardPersistenceInstalled() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	if _, err := os.Stat(linuxPortForwardUnitPath()); err != nil {
+		return false
+	}
+	return runCmd("systemctl", "is-enabled", "--quiet", linuxPortForwardUnitName()) == nil
 }
 
 // resolveIptables locates the iptables command instead of hardcoding
@@ -528,30 +581,43 @@ func linuxRedirectRuleSpec(routerPort int) []string {
 	}
 }
 
-// linuxInstallScript returns an idempotent `sh -c` body: `iptables -C`
-// (check) exits 0 when our rule is already present, so `-A` (add) only runs
-// when it is absent. Without this, re-running install stacked duplicate
-// REDIRECT rules on every invocation.
-func linuxInstallScript(ipt string, routerPort int) string {
+// linuxInstallScript returns the `sh -c` body run in one sudo session. The
+// iptables rule is applied idempotently (`-C` check gates `-A` add so re-runs
+// never stack duplicates) and gates overall success (`|| exit 1`). The
+// boot-time persistence unit is then installed best-effort: it is masked with
+// `|| true` so that a systemd-less host (e.g. WSL2 without systemd) still gets
+// a working redirect for this session — the missing persistence is surfaced
+// separately by `gtl doctor`, not by aborting the whole install.
+func linuxInstallScript(ipt string, routerPort int, tmpUnitPath string) string {
 	spec := strings.Join(linuxRedirectRuleSpec(routerPort), " ")
-	return fmt.Sprintf("%s -t nat -C OUTPUT %s 2>/dev/null || %s -t nat -A OUTPUT %s",
-		ipt, spec, ipt, spec)
+	unit := linuxPortForwardUnitName()
+	unitPath := linuxPortForwardUnitPath()
+	return fmt.Sprintf(
+		"{ %s -t nat -C OUTPUT %s 2>/dev/null || %s -t nat -A OUTPUT %s; } || exit 1; "+
+			"{ cp '%s' '%s' && chmod 644 '%s' && systemctl daemon-reload && systemctl enable '%s'; } || true",
+		ipt, spec, ipt, spec,
+		tmpUnitPath, unitPath, unitPath, unit,
+	)
 }
 
-// linuxUninstallScript returns a bounded `sh -c` body that deletes our
-// REDIRECT rules by line number until none remain, running as root (so the
-// ruleset is readable even for a non-root caller under sudo). Exit codes:
-// 0 = clean, 1 = a delete was denied/failed, 2 = gave up after the cap. The
-// bound and explicit exit codes replace the old unbounded loop that could
-// spin forever re-prompting for sudo when the delete was denied.
+// linuxUninstallScript returns a bounded `sh -c` body that first tears down
+// the boot-time persistence unit (best-effort), then deletes our REDIRECT
+// rules by line number until none remain, running as root (so the ruleset is
+// readable even for a non-root caller under sudo). Exit codes for the rule
+// removal: 0 = clean, 1 = a delete was denied/failed, 2 = gave up after the
+// cap. The bound and explicit exit codes replace the old unbounded loop that
+// could spin forever re-prompting for sudo when the delete was denied.
 func linuxUninstallScript(ipt string) string {
+	unit := linuxPortForwardUnitName()
+	unitPath := linuxPortForwardUnitPath()
 	return fmt.Sprintf(
-		"i=0; while [ $i -lt 20 ]; do "+
+		"{ systemctl disable '%s' 2>/dev/null; rm -f '%s'; systemctl daemon-reload 2>/dev/null; } || true; "+
+			"i=0; while [ $i -lt 20 ]; do "+
 			"n=$(%s -t nat -L OUTPUT -n --line-numbers 2>/dev/null | awk '/git-treeline/{print $1; exit}'); "+
 			"[ -z \"$n\" ] && exit 0; "+
 			"%s -t nat -D OUTPUT \"$n\" || exit 1; "+
 			"i=$((i+1)); done; exit 2",
-		ipt, ipt)
+		unit, unitPath, ipt, ipt)
 }
 
 func installLinuxPortForward(routerPort int) error {
@@ -559,9 +625,22 @@ func installLinuxPortForward(routerPort int) error {
 	if err != nil {
 		return err
 	}
+
+	tmpUnit, err := os.CreateTemp("", "treeline-portforward-*.service")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmpUnit.Name()) }()
+	if _, err := tmpUnit.WriteString(linuxPortForwardUnitBody(ipt, routerPort)); err != nil {
+		return err
+	}
+	if err := tmpUnit.Close(); err != nil {
+		return err
+	}
+
 	cmd := exec.Command("sudo", "-p",
 		"\nEnter your password (2 of 2): ",
-		"sh", "-c", linuxInstallScript(ipt, routerPort))
+		"sh", "-c", linuxInstallScript(ipt, routerPort, tmpUnit.Name()))
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -570,6 +649,10 @@ func installLinuxPortForward(routerPort int) error {
 	}
 
 	fmt.Printf("  Port forwarding configured (443 → %d).\n", routerPort)
+	if !IsLinuxPortForwardPersistenceInstalled() {
+		fmt.Println("  Note: boot-time persistence not enabled — the redirect may not survive a reboot.")
+		fmt.Println("        Re-run 'gtl serve install' on a systemd host, or re-apply with 'gtl serve reload-pf'.")
+	}
 	return nil
 }
 

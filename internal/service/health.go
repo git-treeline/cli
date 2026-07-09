@@ -30,36 +30,43 @@ type processInfo struct {
 }
 
 type healthDeps struct {
-	isRunning                  func() bool
-	installedBinaryPath        func() string
-	runningRouterVersion       func() string
-	runningPID                 func() int
-	isPortForwardConfigured    func() bool
-	checkPortForward           func(routerPort int) PortForwardStatus
-	dialTimeout                func(network, address string, timeout time.Duration) (net.Conn, error)
-	httpProbe                  func(url string, timeout time.Duration) (int, error)
-	executable                 func() (string, error)
-	processOnPort              func(port int) processInfo
-	isPfReloadDaemonInstalled  func() bool
-	pfReloadDaemonSupported    bool
-	routerUsesTLS              func() bool
+	isRunning                 func() bool
+	installedBinaryPath       func() string
+	runningRouterVersion      func() string
+	runningPID                func() int
+	isPortForwardConfigured   func() bool
+	checkPortForward          func(routerPort int) PortForwardStatus
+	dialTimeout               func(network, address string, timeout time.Duration) (net.Conn, error)
+	httpProbe                 func(url string, timeout time.Duration) (int, error)
+	executable                func() (string, error)
+	processOnPort             func(port int) processInfo
+	isPfReloadDaemonInstalled func() bool
+	pfReloadDaemonSupported   bool
+	routerUsesTLS             func() bool
+	// Linux boot-time redirect persistence (systemd oneshot). The macOS
+	// equivalent is the pf-reload LaunchDaemon above; these are the Linux
+	// analog so `gtl doctor` flags a missing persistence unit there too.
+	isPortForwardPersistenceInstalled func() bool
+	portForwardPersistenceSupported   bool
 }
 
 func defaultHealthDeps() healthDeps {
 	return healthDeps{
-		isRunning:                  IsRunning,
-		installedBinaryPath:        InstalledBinaryPath,
-		runningRouterVersion:       RunningRouterVersion,
-		runningPID:                 RunningPID,
-		isPortForwardConfigured:    IsPortForwardConfigured,
-		checkPortForward:           CheckPortForward,
-		dialTimeout:                net.DialTimeout,
-		httpProbe:                  httpProbe,
-		executable:                 os.Executable,
-		processOnPort:              processOnPort,
-		isPfReloadDaemonInstalled:  IsPfReloadDaemonInstalled,
-		pfReloadDaemonSupported:    runtime.GOOS == "darwin",
-		routerUsesTLS:              proxy.IsCAInstalled,
+		isRunning:                         IsRunning,
+		installedBinaryPath:               InstalledBinaryPath,
+		runningRouterVersion:              RunningRouterVersion,
+		runningPID:                        RunningPID,
+		isPortForwardConfigured:           IsPortForwardConfigured,
+		checkPortForward:                  CheckPortForward,
+		dialTimeout:                       net.DialTimeout,
+		httpProbe:                         httpProbe,
+		executable:                        os.Executable,
+		processOnPort:                     processOnPort,
+		isPfReloadDaemonInstalled:         IsPfReloadDaemonInstalled,
+		pfReloadDaemonSupported:           runtime.GOOS == "darwin",
+		routerUsesTLS:                     proxy.IsCAInstalled,
+		isPortForwardPersistenceInstalled: IsLinuxPortForwardPersistenceInstalled,
+		portForwardPersistenceSupported:   runtime.GOOS == "linux",
 	}
 }
 
@@ -80,8 +87,38 @@ func checkHealthWith(d healthDeps, routerPort int, cliVersion string) []HealthCh
 	if d.pfReloadDaemonSupported {
 		checks = append(checks, checkPfReloadDaemon(d))
 	}
+	if d.portForwardPersistenceSupported {
+		checks = append(checks, checkLinuxPortForwardPersistence(d))
+	}
 
 	return checks
+}
+
+// checkLinuxPortForwardPersistence is the Linux analog of checkPfReloadDaemon:
+// it flags the absence of the boot-time systemd oneshot that re-applies the
+// iptables redirect after a reboot when port forwarding is otherwise
+// configured. Linux-only; gated by portForwardPersistenceSupported.
+func checkLinuxPortForwardPersistence(d healthDeps) HealthCheck {
+	if !d.isPortForwardConfigured() {
+		return HealthCheck{
+			Name:   "port_forward_persistence",
+			Status: "ok",
+			Detail: "n/a (port forwarding not configured)",
+		}
+	}
+	if !d.isPortForwardPersistenceInstalled() {
+		return HealthCheck{
+			Name:   "port_forward_persistence",
+			Status: "warn",
+			Detail: "missing — 443 redirect will drop on reboot",
+			Fix:    "gtl serve install",
+		}
+	}
+	return HealthCheck{
+		Name:   "port_forward_persistence",
+		Status: "ok",
+		Detail: "installed (443 redirect survives reboot)",
+	}
 }
 
 // checkPfReloadDaemon flags the absence of the boot-time pf reloader when

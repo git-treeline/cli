@@ -50,7 +50,7 @@ func TestResolveIptables_NoneActionable(t *testing.T) {
 }
 
 func TestLinuxInstallScript_Idempotent(t *testing.T) {
-	s := linuxInstallScript("/usr/sbin/iptables", 3001)
+	s := linuxInstallScript("/usr/sbin/iptables", 3001, "/tmp/unit.service")
 	// Must check before adding so re-runs don't stack duplicate rules.
 	if !strings.Contains(s, "-C OUTPUT") {
 		t.Errorf("install script must check (-C) before adding\nscript: %s", s)
@@ -63,6 +63,39 @@ func TestLinuxInstallScript_Idempotent(t *testing.T) {
 	}
 	if !strings.Contains(s, "--comment git-treeline") {
 		t.Errorf("install script must tag the rule with our marker\nscript: %s", s)
+	}
+	// Rule application gates success; persistence is best-effort (masked).
+	if !strings.Contains(s, "} || exit 1;") {
+		t.Errorf("rule application must gate overall success\nscript: %s", s)
+	}
+	if !strings.Contains(s, "systemctl enable") || !strings.Contains(s, "} || true") {
+		t.Errorf("persistence unit install must be best-effort (masked)\nscript: %s", s)
+	}
+}
+
+func TestLinuxPortForwardUnitBody(t *testing.T) {
+	body := linuxPortForwardUnitBody("/usr/sbin/iptables", 3001)
+	for _, want := range []string{
+		"Type=oneshot",
+		"RemainAfterExit=yes",
+		"WantedBy=multi-user.target",
+		"--to-port 3001",
+		"--comment git-treeline",
+		"-C OUTPUT", // idempotent check-or-add in ExecStart
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("unit body missing %q\nbody: %s", want, body)
+		}
+	}
+}
+
+func TestLinuxUninstallScript_RemovesPersistenceUnit(t *testing.T) {
+	s := linuxUninstallScript("/usr/sbin/iptables")
+	if !strings.Contains(s, "systemctl disable") {
+		t.Errorf("uninstall must disable the persistence unit\nscript: %s", s)
+	}
+	if !strings.Contains(s, linuxPortForwardUnitPath()) {
+		t.Errorf("uninstall must remove the unit file\nscript: %s", s)
 	}
 }
 
