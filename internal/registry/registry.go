@@ -573,8 +573,10 @@ func (r *Registry) withLockE(fn func(data *RegistryData) error) error {
 			waited := time.Since(start).Round(time.Millisecond)
 			return fmt.Errorf(
 				"timed out after %s waiting for registry lock\n\n"+
-					"  Another gtl process may be holding the lock.\n"+
-					"  If no other process is running: rm %s",
+					"  Another gtl process is holding the lock. Find and quit it, then retry.\n"+
+					"  The lock (%s) releases automatically when that process exits — even\n"+
+					"  on a crash — so do not delete it; removing the file breaks mutual\n"+
+					"  exclusion for any process still running.",
 				waited, lockPath)
 		}
 		time.Sleep(100 * time.Millisecond)
