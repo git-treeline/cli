@@ -22,10 +22,13 @@ func init() {
 var renameCmd = &cobra.Command{
 	Use:   "rename <new-name>",
 	Short: "Rename the project, migrating registry, port reservations, and databases",
-	Long: `Renames the project across .treeline.yml, the global registry, and
-user-config keys (port reservations, editor overrides). Worktree databases
-under the old name are dropped, then re-cloned from the template under the
-new name. Existing worktrees keep their port reservations where possible.
+	Long: `Renames the project in this worktree's .treeline.yml and migrates
+matching user-config keys (port reservations, editor overrides) from the old
+name to the new one. It does not touch the registry, worktree databases, or
+other worktrees directly: it prints the list of affected worktrees and the
+manual follow-up (commit, rebase each worktree, then run gtl setup there to
+re-provision — which is what actually drops and re-clones their databases
+under the new name).
 
 Project names must match [a-zA-Z_][a-zA-Z0-9_]* — same rule as Postgres
 identifiers, since the project name flows into databases, redis prefixes,
