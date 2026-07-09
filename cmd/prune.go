@@ -40,6 +40,34 @@ var pruneCmd = &cobra.Command{
 
 		reg := registry.New("")
 
+		candidates := prunableAllocations(reg)
+		if len(candidates) == 0 && !pruneStale {
+			fmt.Println("Nothing to prune.")
+			return nil
+		}
+
+		if len(candidates) > 0 {
+			fmt.Printf("This will prune %d allocation(s) whose worktree no longer exists:\n", len(candidates))
+			for _, a := range candidates {
+				fa := format.Allocation(a)
+				name := format.DisplayName(fa)
+				project := format.GetStr(fa, "project")
+				db := format.GetStr(fa, "database")
+				line := fmt.Sprintf("  %s:%s", project, name)
+				if db != "" {
+					line += fmt.Sprintf("  db:%s", db)
+				}
+				fmt.Println(line)
+			}
+		} else {
+			fmt.Println("This will prune any stale allocations from the registry.")
+		}
+
+		if !confirm.Prompt("Prune these allocations?", pruneForce, nil) {
+			fmt.Println("Aborted.")
+			return nil
+		}
+
 		var count int
 		var err error
 		if pruneStale {
@@ -59,6 +87,25 @@ var pruneCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// prunableAllocations returns the registered allocations whose worktree
+// directory no longer exists on disk — the set that a default 'prune' removes.
+// It is used to preview the destructive operation before confirming; for
+// '--stale' the actual pruned set may also include git worktrees no longer
+// registered with their parent repo.
+func prunableAllocations(reg *registry.Registry) []registry.Allocation {
+	var out []registry.Allocation
+	for _, a := range reg.Allocations() {
+		wt := registry.GetString(a, "worktree")
+		if wt == "" {
+			continue
+		}
+		if _, err := os.Stat(wt); err != nil {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func runPruneMerged() error {
