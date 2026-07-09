@@ -32,6 +32,10 @@ func (f *fakeSys) deps(goos string) Deps {
 			return "", errors.New("not found")
 		},
 		PackageInstalled: func(pkg string) (bool, error) { return f.installed[pkg], nil },
+		AptUpdate: func() error {
+			f.calls = append(f.calls, "apt-update")
+			return nil
+		},
 		AptInstall: func(pkgs []string) error {
 			f.calls = append(f.calls, "apt-install:"+strings.Join(pkgs, ","))
 			for _, p := range pkgs {
@@ -107,6 +111,44 @@ func TestRun_Apt_DarwinSkip_NoEffects(t *testing.T) {
 	}
 	if len(f.calls) != 0 {
 		t.Errorf("darwin apt should make no effects, got %v", f.calls)
+	}
+}
+
+func TestRun_AptUpdate_RunsOnceBeforeFirstInstall(t *testing.T) {
+	f := newFakeSys()
+	// Two install-triggering steps (apt packages + a service package) on a fresh
+	// host: update must run exactly once, before the first install.
+	actions := []Action{
+		{Kind: ActionApt, Packages: []string{"libvips"}},
+		{Kind: ActionService, Packages: []string{"redis-server"}},
+	}
+	if err := Run(actions, "/repo", f.deps("linux")); err != nil {
+		t.Fatal(err)
+	}
+	if got := count(f.calls, "apt-update"); got != 1 {
+		t.Fatalf("expected apt-update exactly once, got %d: %v", got, f.calls)
+	}
+	first := idxOf(f.calls, "apt-install:libvips")
+	if first < 0 || idxOf(f.calls, "apt-update") > first {
+		t.Errorf("apt-update must precede the first install: %v", f.calls)
+	}
+}
+
+func TestRun_AptUpdate_SkippedWhenNothingToInstall(t *testing.T) {
+	f := newFakeSys()
+	f.installed["libvips"] = true
+	f.installed["redis-server"] = true
+	// Everything already present: an idempotent re-run installs nothing, so the
+	// lazy update must never fire — no-op runs stay fast and sudo-free.
+	actions := []Action{
+		{Kind: ActionApt, Packages: []string{"libvips"}},
+		{Kind: ActionService, Packages: []string{"redis-server"}},
+	}
+	if err := Run(actions, "/repo", f.deps("linux")); err != nil {
+		t.Fatal(err)
+	}
+	if f.called("apt-update") {
+		t.Errorf("apt-update should not run when nothing is installed: %v", f.calls)
 	}
 }
 
@@ -219,4 +261,14 @@ func idxOf(s []string, v string) int {
 		}
 	}
 	return -1
+}
+
+func count(s []string, v string) int {
+	n := 0
+	for _, x := range s {
+		if x == v {
+			n++
+		}
+	}
+	return n
 }

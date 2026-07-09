@@ -35,6 +35,10 @@ type Deps struct {
 
 	// PackageInstalled reports whether an apt package is installed (dpkg -s).
 	PackageInstalled func(pkg string) (bool, error)
+	// AptUpdate refreshes the apt package indexes (sudo apt-get update). The
+	// executor calls it lazily, exactly once, immediately before the first real
+	// install of a run — see withLazyAptUpdate.
+	AptUpdate func() error
 	// AptInstall installs the given apt packages (sudo apt-get install -y).
 	AptInstall func(pkgs []string) error
 	// ServiceEnable enables and starts a systemd unit (systemctl enable --now).
@@ -101,12 +105,40 @@ func BuildPlan(cfg config.ProvisionConfig, repoDir string, goos string, fileExis
 // Run executes the plan in order, checking before acting. It returns on the
 // first real failure (platform skips and idempotent no-ops are not failures).
 func Run(actions []Action, repoDir string, d Deps) error {
+	d = withLazyAptUpdate(d)
 	for _, a := range actions {
 		if err := runAction(a, repoDir, d); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// withLazyAptUpdate wraps d.AptInstall so `apt-get update` runs exactly once
+// per provision run, lazily — immediately before the first real package
+// install (apt packages or service packages both route through AptInstall). A
+// fresh host has stale/empty package indexes, so without this the first install
+// fails with "Unable to locate package". A fully-idempotent re-run installs
+// nothing, so it never triggers the update: no-op runs stay fast and sudo-free.
+func withLazyAptUpdate(d Deps) Deps {
+	if d.AptInstall == nil {
+		return d
+	}
+	install := d.AptInstall
+	update := d.AptUpdate
+	updated := false
+	d.AptInstall = func(pkgs []string) error {
+		if !updated {
+			if update != nil {
+				if err := update(); err != nil {
+					return err
+				}
+			}
+			updated = true
+		}
+		return install(pkgs)
+	}
+	return d
 }
 
 func runAction(a Action, repoDir string, d Deps) error {

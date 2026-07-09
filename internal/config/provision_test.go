@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -40,10 +41,10 @@ provision:
 	if !cfg.Present {
 		t.Fatal("expected Present=true")
 	}
-	if got, want := cfg.Apt, []string{"libvips", "imagemagick"}; !equalStrs(got, want) {
+	if got, want := cfg.Apt, []string{"libvips", "imagemagick"}; !slices.Equal(got, want) {
 		t.Errorf("apt = %v, want %v", got, want)
 	}
-	if got, want := cfg.Services, []string{"redis-server"}; !equalStrs(got, want) {
+	if got, want := cfg.Services, []string{"redis-server"}; !slices.Equal(got, want) {
 		t.Errorf("services = %v, want %v", got, want)
 	}
 	// Template falls back to top-level database.template.
@@ -82,16 +83,4 @@ provision:
 	if cfg.Database.Template != "" {
 		t.Errorf("template = %q, want empty (no top-level template)", cfg.Database.Template)
 	}
-}
-
-func equalStrs(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

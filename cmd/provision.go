@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -108,18 +109,22 @@ func fileExists(path string) bool {
 // provisionDeps wires the executor's seams to real system effects.
 func provisionDeps(pc *config.ProjectConfig, repoDir string) provision.Deps {
 	connArgs := pc.DatabaseConnArgs()
-	adapter, _ := database.ForAdapter(pc.DatabaseAdapter(), connArgs)
+	adapter, adapterErr := database.ForAdapter(pc.DatabaseAdapter(), connArgs)
 	return provision.Deps{
 		GOOS:             runtime.GOOS,
 		FileExists:       fileExists,
 		LookPath:         exec.LookPath,
 		PackageInstalled: dpkgInstalled,
+		AptUpdate:        aptUpdate,
 		AptInstall:       aptInstall,
 		ServiceEnable:    systemctlEnableNow,
 		RunInDir:         runShellInDir,
 		DBExists: func(name string) (bool, error) {
 			if adapter == nil {
-				return false, fmt.Errorf("no database adapter")
+				if adapterErr != nil {
+					return false, fmt.Errorf("database adapter %q: %w", pc.DatabaseAdapter(), adapterErr)
+				}
+				return false, fmt.Errorf("no database adapter for %q", pc.DatabaseAdapter())
 			}
 			return adapter.Exists(name)
 		},
@@ -146,13 +151,17 @@ func dpkgInstalled(pkg string) (bool, error) {
 	return strings.Contains(string(out), "install ok installed"), nil
 }
 
+func aptUpdate() error {
+	return sudoCommand("apt-get", "update")
+}
+
 func aptInstall(pkgs []string) error {
 	args := append([]string{"apt-get", "install", "-y"}, pkgs...)
-	return streamCommand("sudo", args...)
+	return sudoCommand(args...)
 }
 
 func systemctlEnableNow(name string) error {
-	return streamCommand("sudo", "systemctl", "enable", "--now", name)
+	return sudoCommand("systemctl", "enable", "--now", name)
 }
 
 func createDB(connArgs []string, name string) error {
@@ -160,16 +169,39 @@ func createDB(connArgs []string, name string) error {
 	return streamCommand("createdb", args...)
 }
 
+// sudoCommand runs a privileged provision command non-interactively. On failure
+// it annotates the error with the passwordless-sudo expectation: provision is
+// meant to run over SSH with no tty (see streamCommand), so a sudo that wants a
+// password can't be answered and surfaces here.
+func sudoCommand(args ...string) error {
+	if err := streamCommand("sudo", args...); err != nil {
+		return fmt.Errorf("%w (provision runs non-interactively; the host user is expected to have passwordless sudo)", err)
+	}
+	return nil
+}
+
 func runShellInDir(dir, command string) error {
 	cmd := exec.Command("sh", "-c", command)
 	cmd.Dir = dir
+	// Non-interactive by contract (see streamCommand): a hydrate command that
+	// reads stdin gets a clean EOF, not an inherited fd.
+	cmd.Stdin = bytes.NewReader(nil)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
+// streamCommand runs an external command, streaming its stdout/stderr onto the
+// process's own. Stdin is wired to an empty reader (EOF on first read) rather
+// than inherited: provision commands are non-interactive by design. The primary
+// consumer is Treeline invoking `gtl provision` over SSH with no controlling
+// tty, where the box user has passwordless sudo — so sudo never needs to
+// prompt. Wiring /dev/null semantics means any subcommand that reads stdin gets
+// a deterministic EOF instead of an arbitrary inherited fd. Interactive sudo
+// (password prompts) is unsupported: there is no channel to answer them.
 func streamCommand(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
+	cmd.Stdin = bytes.NewReader(nil)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
