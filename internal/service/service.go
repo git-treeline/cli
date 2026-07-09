@@ -288,7 +288,52 @@ func waitForFreshVersion(before time.Time, wait time.Duration) error {
 		}
 		sleepFn(100 * time.Millisecond)
 	}
-	return fmt.Errorf("router did not record a new version within %s — check logs at %s", wait, logDir())
+	return fmt.Errorf("router did not record a new version within %s — check logs: %s", wait, logHint())
+}
+
+// logHint returns the platform-appropriate way to view router logs. On Linux
+// the router runs under systemd, so its output goes to the journal — the
+// macOS ~/Library/Logs path is meaningless there.
+func logHint() string {
+	if runtime.GOOS == "linux" {
+		return "journalctl --user -u " + SystemdUnit()
+	}
+	return logDir()
+}
+
+// systemdAvailable reports whether systemd is the init system (PID 1). Its
+// runtime directory only exists when systemd is running — the reliable signal
+// that `systemctl --user` will work. Absent on non-systemd distros and on
+// WSL2 that hasn't enabled systemd.
+func systemdAvailable() bool {
+	_, err := os.Stat("/run/systemd/system")
+	return err == nil
+}
+
+// isWSL reports whether we're running under the Windows Subsystem for Linux,
+// where systemd is opt-in and the install guidance differs.
+func isWSL() bool {
+	data, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	if err != nil {
+		return false
+	}
+	s := strings.ToLower(string(data))
+	return strings.Contains(s, "microsoft") || strings.Contains(s, "wsl")
+}
+
+// nonSystemdInstallMessage returns actionable guidance when systemd is not
+// available, tailored for WSL2 (enable systemd via /etc/wsl.conf) versus a
+// generic non-systemd host. Replaces the raw `systemctl` failure the user
+// would otherwise see.
+func nonSystemdInstallMessage(wsl bool) string {
+	if wsl {
+		return "systemd is not available — WSL2 needs systemd enabled: add\n" +
+			"  [boot]\n  systemd=true\n" +
+			"to /etc/wsl.conf, then run 'wsl --shutdown' and reopen your distro.\n" +
+			"Until then you can run the router in the foreground with 'gtl serve run'."
+	}
+	return "systemd (user session) is not available on this host — enable systemd, " +
+		"or run the router in the foreground with 'gtl serve run'."
 }
 
 func bounceLaunchAgent(wait time.Duration) error {
@@ -545,6 +590,12 @@ func UnitPath() string {
 }
 
 func installSystemd(gtlPath string, _ int) (string, error) {
+	// Fail with actionable guidance before touching disk when systemd isn't
+	// running (non-systemd distro, or WSL2 without systemd) — otherwise the
+	// user just sees a raw `systemctl` connection error.
+	if !systemdAvailable() {
+		return "", fmt.Errorf("%s", nonSystemdInstallMessage(isWSL()))
+	}
 	path := UnitPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
