@@ -379,6 +379,7 @@ func runRouter() error {
 	reg := registry.New("")
 	router := proxy.NewRouter(port, reg).
 		WithBaseDomain(domain).
+		WithVersion(Version).
 		WithAliases(func() map[string]int { return config.LoadUserConfig("").RouterAliases() }).
 		WithAliases(projectAliases(reg))
 	if proxy.IsCAInstalled() {

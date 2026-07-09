@@ -211,6 +211,69 @@ func TestRouter_HealthEndpointBypassesRouting(t *testing.T) {
 	}
 }
 
+// The default (no Accept/format) response must stay the exact "ok\n" text the
+// liveness probe checkRouterResponding depends on.
+func TestRouter_HealthEndpoint_PlainTextDefault(t *testing.T) {
+	reg := testRegistry(t, nil)
+	router := NewRouter(3000, reg)
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + HealthEndpoint)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("expected text/plain, got %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "ok\n" {
+		t.Errorf("expected \"ok\\n\", got %q", string(body))
+	}
+}
+
+func TestRouter_HealthEndpoint_JSON(t *testing.T) {
+	reg := testRegistry(t, nil)
+	router := NewRouter(3000, reg).WithVersion("9.9.9")
+	router.startedAt = time.Now().Add(-30 * time.Second)
+	router.lastRefresh = time.Now()
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+
+	for _, url := range []string{HealthEndpoint + "?format=json", HealthEndpoint} {
+		req, _ := http.NewRequest("GET", ts.URL+url, nil)
+		if !strings.Contains(url, "format=json") {
+			req.Header.Set("Accept", "application/json")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+			t.Errorf("%s: expected application/json, got %q", url, ct)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			t.Fatalf("%s: decode: %v", url, err)
+		}
+		_ = resp.Body.Close()
+		if payload["status"] != "ok" {
+			t.Errorf("%s: status = %v, want ok", url, payload["status"])
+		}
+		if payload["version"] != "9.9.9" {
+			t.Errorf("%s: version = %v, want 9.9.9", url, payload["version"])
+		}
+		if _, ok := payload["uptime_seconds"]; !ok {
+			t.Errorf("%s: missing uptime_seconds", url)
+		}
+		if _, ok := payload["last_refresh"]; !ok {
+			t.Errorf("%s: missing last_refresh", url)
+		}
+	}
+}
+
 func TestRouteKey_LongLabelTruncated(t *testing.T) {
 	key := RouteKey("my-long-company-name", "feature/redesign-entire-authentication-flow-for-enterprise-clients")
 	if len(key) > 63 {
