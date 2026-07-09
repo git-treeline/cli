@@ -7,7 +7,8 @@
 // each step, covering the seams the layer unit tests can't.
 //
 // Gated behind the `e2e` build tag so `go test ./...` never runs it: it is
-// slower and needs python3 plus the ability to bind a local TCP port.
+// slower and needs a Go toolchain (to build the port-binder helper) plus the
+// ability to bind a local TCP port.
 package e2e
 
 import (
@@ -315,6 +316,45 @@ func main() {
 		t.Fatalf("list ports %v missing allocated port %d", listEntry["ports"], port)
 	}
 	t.Logf("STEP 4 ok: list --json shows worktree up on port %d", port)
+
+	// =====================================================================
+	// STEP 4b: gtl doctor --json — the diagnosis engine runs end-to-end and
+	// reports this worktree's real runtime state (machine + project sections,
+	// allocated port, live supervisor). Guards the doctor wiring the unit
+	// tests can't reach: cmd gathering → internal/doctor engine → JSON out.
+	// =====================================================================
+	out, err = runGtl(t, gtl, repo, env, "doctor", "--json")
+	if err != nil {
+		t.Fatalf("gtl doctor --json failed: %v\n%s", err, out)
+	}
+	var diag struct {
+		Machine map[string]any `json:"machine"`
+		Project struct {
+			Allocation struct {
+				Ports []any `json:"ports"`
+			} `json:"allocation"`
+			Runtime struct {
+				Supervisor string `json:"supervisor"`
+				Listening  bool   `json:"listening"`
+			} `json:"runtime"`
+		} `json:"project"`
+	}
+	if err := json.Unmarshal([]byte(out), &diag); err != nil {
+		t.Fatalf("parsing doctor --json: %v\noutput:\n%s", err, out)
+	}
+	if diag.Machine == nil {
+		t.Fatalf("doctor --json missing machine section:\n%s", out)
+	}
+	if !containsInt(anyIntSlice(diag.Project.Allocation.Ports), port) {
+		t.Fatalf("doctor --json allocation ports %v missing %d", diag.Project.Allocation.Ports, port)
+	}
+	if diag.Project.Runtime.Supervisor != "running" {
+		t.Fatalf("doctor --json supervisor = %q, want \"running\"", diag.Project.Runtime.Supervisor)
+	}
+	if !diag.Project.Runtime.Listening {
+		t.Fatalf("doctor --json reports port %d not listening while the server is up", port)
+	}
+	t.Logf("STEP 4b ok: doctor --json reports live allocation on port %d", port)
 
 	// =====================================================================
 	// STEP 5: gtl stop — server stops (port no longer listening) but the
