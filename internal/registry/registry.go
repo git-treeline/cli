@@ -18,10 +18,38 @@ import (
 )
 
 func resolvePath(p string) string {
+	// Empty input must stay empty: the ancestor walk below would otherwise
+	// resolve "" through "." to the current directory, making a pathless
+	// registry entry spuriously match Find/Release for whatever cwd is.
+	if p == "" {
+		return ""
+	}
 	if resolved, err := filepath.EvalSymlinks(p); err == nil {
 		return resolved
 	}
-	return p
+	// EvalSymlinks fails outright when any path component is missing — the
+	// common case being a worktree directory that was already rm -rf'd. Walk
+	// up to the deepest existing ancestor, resolve that, and rejoin the
+	// missing tail; otherwise a deleted path under a symlinked parent (macOS
+	// /var -> /private/var) never matches the canonical form that was stored
+	// at allocation time, and e.g. `gtl release` silently no-ops.
+	dir := filepath.Dir(p)
+	tail := []string{filepath.Base(p)}
+	for {
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err == nil {
+			for i := len(tail) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, tail[i])
+			}
+			return resolved
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return p
+		}
+		tail = append(tail, filepath.Base(dir))
+		dir = parent
+	}
 }
 
 const lockTimeout = 5 * time.Second
@@ -195,7 +223,7 @@ func (r *Registry) AllocateTx(worktree string, compute func(used UsedResources) 
 		filtered := make([]Allocation, 0, len(data.Allocations))
 		var links map[string]any
 		for _, a := range data.Allocations {
-			if GetString(a, "worktree") != resolved {
+			if resolvePath(GetString(a, "worktree")) != resolved {
 				filtered = append(filtered, a)
 			} else if l, ok := a["links"].(map[string]any); ok && len(l) > 0 {
 				links = l
@@ -238,7 +266,7 @@ func (r *Registry) Allocate(entry Allocation) error {
 
 		filtered := make([]Allocation, 0, len(data.Allocations))
 		for _, a := range data.Allocations {
-			if GetString(a, "worktree") != resolved {
+			if resolvePath(GetString(a, "worktree")) != resolved {
 				filtered = append(filtered, a)
 			} else if links, ok := a["links"].(map[string]any); ok && len(links) > 0 {
 				entry["links"] = links
@@ -718,32 +746,21 @@ func migrate(data *RegistryData) {
 }
 
 func (r *Registry) save(data RegistryData) error {
-	dir := filepath.Dir(r.Path)
-	if err := os.MkdirAll(dir, platform.DirMode); err != nil {
+	// A newer gtl build may have added top-level fields this struct doesn't
+	// know about. Writing here would silently drop them, so refuse instead —
+	// reads stay permissive (load never errors on this), only writes bail.
+	if data.Version > currentVersion {
+		return fmt.Errorf("%s was written by a newer version of gtl (schema v%d, this build supports up to v%d) — upgrade gtl before making changes", r.Path, data.Version, currentVersion)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(r.Path), platform.DirMode); err != nil {
 		return err
 	}
 	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return err
 	}
-
-	tmp, err := os.CreateTemp(dir, ".registry-*.json")
-	if err != nil {
-		return fmt.Errorf("creating temp registry file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	_ = tmp.Chmod(platform.PrivateFileMode)
-
-	if _, err := tmp.Write(append(raw, '\n')); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	return os.Rename(tmpPath, r.Path)
+	return platform.AtomicWriteFile(r.Path, append(raw, '\n'), platform.PrivateFileMode)
 }
 
 // GetString extracts a string field from an allocation.

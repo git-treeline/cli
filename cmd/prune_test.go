@@ -44,7 +44,13 @@ func TestRemovedAllocations_NoneRemoved(t *testing.T) {
 // prunableAllocations selects exactly the allocations whose worktree directory
 // no longer exists on disk; live directories and pathless entries are kept.
 func TestPrunableAllocations_SelectsMissingDirs(t *testing.T) {
-	dir := t.TempDir()
+	// Resolve the temp dir so the paths stored by Allocate (which canonicalizes
+	// through symlinked ancestors, e.g. macOS /var -> /private/var) compare
+	// equal to the literals below.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	live := filepath.Join(dir, "live") // exists
 	if err := os.MkdirAll(live, 0o755); err != nil {
 		t.Fatal(err)

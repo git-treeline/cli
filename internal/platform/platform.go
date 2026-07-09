@@ -85,3 +85,35 @@ func baseDir() string {
 		return filepath.Join(home, ".config")
 	}
 }
+
+// AtomicWriteFile writes data to path by creating a temp file in the same
+// directory, fsyncing it, and renaming it into place. A crash or ENOSPC
+// mid-write can only corrupt the discarded temp file, never the live target —
+// the rename is atomic, so readers see either the old contents or the new
+// ones, and the Sync guarantees the new contents are on disk before the
+// rename makes them visible.
+func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Chmod(perm)
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, path)
+}

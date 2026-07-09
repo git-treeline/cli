@@ -1357,3 +1357,114 @@ env:
 		t.Error("expected old SQLite database file to be dropped")
 	}
 }
+
+// TestHandleProjectRename_TemplateDatabase_NotDropped covers the main-repo case:
+// allocateMain records the template DB itself as the entry's "database", so a
+// hand-edited `project:` rename must NOT drop it (that would delete the user's
+// real dev database and leave cloneDatabase with no source). Mirrors the drop
+// test's structure but with the registry database equal to the template.
+func TestHandleProjectRename_TemplateDatabase_NotDropped(t *testing.T) {
+	s, mainRepo, worktreePath, _ := testSetupWithRegistry(t, `
+project: myapp_new
+env_file:
+  target: .env
+  source: .env
+database:
+  adapter: sqlite
+  template: db/development.sqlite3
+  pattern: "db/{worktree}.sqlite3"
+env:
+  PORT: "{port}"
+  DATABASE_PATH: "{database}"
+`)
+	_ = os.WriteFile(filepath.Join(mainRepo, ".env"), []byte(""), 0o644)
+	_ = os.MkdirAll(filepath.Join(mainRepo, "db"), 0o755)
+	_ = os.WriteFile(filepath.Join(mainRepo, "db", "development.sqlite3"), []byte("template-data"), 0o644)
+
+	// The registry's database is the template itself, exactly as allocateMain
+	// stores it. handleProjectRename's drop path would resolve this to
+	// worktreePath/db/development.sqlite3 for sqlite, so place a file there and
+	// assert it survives.
+	templateRelPath := "db/development.sqlite3"
+	templateInWorktree := filepath.Join(worktreePath, templateRelPath)
+	_ = os.MkdirAll(filepath.Join(worktreePath, "db"), 0o755)
+	_ = os.WriteFile(templateInWorktree, []byte("template-data"), 0o644)
+
+	_ = s.Registry.Allocate(registry.Allocation{
+		"project":          "myapp_old",
+		"worktree":         worktreePath,
+		"port":             3010,
+		"ports":            []any{float64(3010)},
+		"database":         templateRelPath,
+		"database_adapter": "sqlite",
+	})
+
+	alloc, err := s.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if alloc.Reused {
+		t.Error("expected fresh allocation after rename, not reused")
+	}
+
+	if _, err := os.Stat(templateInWorktree); err != nil {
+		t.Errorf("expected template database to be kept, but it was dropped: %v", err)
+	}
+
+	plain := ansiRE.ReplaceAllString(s.Log.(*bytes.Buffer).String(), "")
+	if !strings.Contains(plain, "keeping template database") {
+		t.Errorf("expected 'keeping template database' message in log, got: %q", plain)
+	}
+}
+
+// A main repo whose project AND database.template were renamed in the same
+// edit: the stored database no longer name-matches the current template, so
+// only the isMain guard stands between the old template and the drop path.
+// The old template is still the user's real data — it must survive.
+func TestHandleProjectRename_MainRepo_OldTemplateNotDropped(t *testing.T) {
+	s, mainRepo, _, _ := testSetupWithRegistry(t, `
+project: myapp_new
+env_file:
+  target: .env
+  source: .env
+database:
+  adapter: sqlite
+  template: db/development_v2.sqlite3
+  pattern: "db/{worktree}.sqlite3"
+env:
+  PORT: "{port}"
+  DATABASE_PATH: "{database}"
+`)
+	// Re-point the Setup at the main repo itself: WorktreePath == MainRepo is
+	// what makes handleProjectRename treat the entry as a template holder.
+	s.WorktreePath = mainRepo
+
+	_ = os.WriteFile(filepath.Join(mainRepo, ".env"), []byte(""), 0o644)
+	_ = os.MkdirAll(filepath.Join(mainRepo, "db"), 0o755)
+	oldTemplate := filepath.Join(mainRepo, "db", "development.sqlite3")
+	_ = os.WriteFile(oldTemplate, []byte("old-template-data"), 0o644)
+	_ = os.WriteFile(filepath.Join(mainRepo, "db", "development_v2.sqlite3"), []byte("new-template-data"), 0o644)
+
+	_ = s.Registry.Allocate(registry.Allocation{
+		"project":          "myapp_old",
+		"worktree":         mainRepo,
+		"port":             3010,
+		"ports":            []any{float64(3010)},
+		"database":         "db/development.sqlite3",
+		"database_adapter": "sqlite",
+	})
+
+	if _, err := s.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	if data, err := os.ReadFile(oldTemplate); err != nil || string(data) != "old-template-data" {
+		t.Errorf("expected the old template database to survive a main-repo rename, got err=%v data=%q", err, data)
+	}
+
+	plain := ansiRE.ReplaceAllString(s.Log.(*bytes.Buffer).String(), "")
+	if !strings.Contains(plain, "keeping template database") {
+		t.Errorf("expected 'keeping template database' message in log, got: %q", plain)
+	}
+}

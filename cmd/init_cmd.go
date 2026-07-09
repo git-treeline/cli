@@ -10,6 +10,7 @@ import (
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/confirm"
 	"github.com/git-treeline/cli/internal/detect"
+	"github.com/git-treeline/cli/internal/doctor"
 	"github.com/git-treeline/cli/internal/editor"
 	"github.com/git-treeline/cli/internal/platform"
 	"github.com/git-treeline/cli/internal/proxy"
@@ -130,7 +131,7 @@ var initCmd = &cobra.Command{
 
 		base := uc.PortBase()
 		routerPort := uc.RouterPort()
-		switch classifyPortConfig(base, routerPort) {
+		switch doctor.ClassifyPortConfig(base, routerPort) {
 		case "conflict":
 			fmt.Println()
 			fmt.Println(style.Warnf("port.base (%d) conflicts with router.port (%d).", base, routerPort))

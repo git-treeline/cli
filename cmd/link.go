@@ -20,6 +20,9 @@ var linkRestart bool
 
 func init() {
 	linkCmd.Flags().BoolVar(&linkJSON, "json", false, "Output as JSON")
+	// --restart is kept registered (rather than removed) so scripts that still
+	// pass it don't break; the flag is a no-op because RunE now always restarts
+	// the server when it's running. linkRestart itself is never read.
 	linkCmd.Flags().BoolVar(&linkRestart, "restart", false, "Deprecated: server is now always restarted if running")
 	_ = linkCmd.Flags().MarkDeprecated("restart", "server is now always restarted if running")
 	linkCmd.ValidArgsFunction = completeProjectThenBranch

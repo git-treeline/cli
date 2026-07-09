@@ -4,15 +4,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
-	"runtime"
 	"sort"
-	"strings"
-	"syscall"
 	"time"
 
 	"github.com/git-treeline/cli/internal/confirm"
 	"github.com/git-treeline/cli/internal/format"
+	"github.com/git-treeline/cli/internal/process"
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/style"
 	"github.com/git-treeline/cli/internal/supervisor"
@@ -199,55 +196,19 @@ func executeNukePlanWith(plan nukePlan, holder func(int) (int, string), kill fun
 	return killed, cleared
 }
 
-// killProcess sends SIGTERM, waits briefly, then escalates to SIGKILL if the
-// process is still alive. Returns true once the process is gone (or was never
-// there). Kills the whole process group when possible so child servers spawned
-// via `sh -c` die with their parent.
+// killProcess is the default kill seam: a graceful group SIGTERM, a 3s grace
+// period, then SIGKILL. Delegates to the shared process package.
 func killProcess(pid int) bool {
-	// Prefer the process group (negative pid) so children die too; fall back to
-	// the single pid if the group signal isn't accepted.
-	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
-		_ = syscall.Kill(pid, syscall.SIGTERM)
-	}
-
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if syscall.Kill(pid, 0) == syscall.ESRCH {
-			return true
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-	}
-	time.Sleep(100 * time.Millisecond)
-	return syscall.Kill(pid, 0) == syscall.ESRCH
+	return process.KillGracefully(pid, 3*time.Second)
 }
 
 // portHolder returns the pid and command name of the process listening on the
-// given TCP port, or (0, "") if none can be determined. Uses lsof, available on
-// macOS and Linux.
+// given TCP port, or (0, "") if none can be determined. When several processes
+// share the port it reports the first listener lsof lists.
 func portHolder(port int) (int, string) {
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+	listeners := process.ListenersOnPort(port)
+	if len(listeners) == 0 {
 		return 0, ""
 	}
-	out, err := exec.Command("lsof", "-i", fmt.Sprintf("TCP:%d", port),
-		"-sTCP:LISTEN", "-n", "-P", "-F", "cn").Output()
-	if err != nil {
-		return 0, ""
-	}
-	var pid int
-	var name string
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.HasPrefix(line, "p") {
-			if _, err := fmt.Sscanf(line[1:], "%d", &pid); err != nil {
-				pid = 0
-			}
-		}
-		if strings.HasPrefix(line, "c") {
-			name = line[1:]
-		}
-	}
-	return pid, name
+	return listeners[0].PID, listeners[0].Name
 }

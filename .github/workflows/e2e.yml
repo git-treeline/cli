@@ -19,8 +19,5 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Verify python3 is available
-        run: python3 --version
-
       - name: Run end-to-end lifecycle test
         run: make test-e2e

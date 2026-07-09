@@ -10,8 +10,6 @@ import (
 	"github.com/git-treeline/cli/internal/confirm"
 	"github.com/git-treeline/cli/internal/detect"
 	"github.com/git-treeline/cli/internal/format"
-	"github.com/git-treeline/cli/internal/registry"
-	"github.com/git-treeline/cli/internal/service"
 	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/style"
 	"github.com/git-treeline/cli/internal/worktree"
@@ -106,17 +104,9 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		// and treat the command as resumable.
 		if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
 			fmt.Println(style.Actionf("Branch '%s' already checked out at %s", branch, existingWT))
-			reg := registry.New("")
-			alloc := reg.Find(existingWT)
-
-			if alloc == nil {
-				fmt.Println(style.Actionf("No allocation found — running setup..."))
-				s := setup.New(existingWT, mainRepo, uc)
-				if _, err := s.Run(); err != nil {
-					return cliErr(cmd, errSetupFailed(err))
-				}
-				reg = registry.New("")
-				alloc = reg.Find(existingWT)
+			alloc, err := ensureWorktreeAllocation(existingWT, mainRepo, uc)
+			if err != nil {
+				return cliErr(cmd, err)
 			}
 
 			if alloc != nil {
@@ -125,23 +115,12 @@ Otherwise a new branch is created from --base (or the current branch).`,
 				if len(ports) > 0 {
 					fmt.Printf("  Port:     %s\n", format.JoinInts(ports, ", "))
 					printLocalAndRouter(uc, projectName, branch, ports[0])
-				}
-
-				if newOpen && len(ports) > 0 {
-					url := buildOpenURL(ports[0], projectName, branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
-					fmt.Printf("Opening %s\n", url)
-					_ = openBrowser(url)
+					maybeOpenInBrowser(newOpen, uc, ports[0], projectName, branch)
 				}
 			}
 
-			if newStart {
-				startCmd := pc.StartCommand()
-				if startCmd == "" {
-					fmt.Println(style.Warnf("--start passed but no commands.start configured in .treeline.yml"))
-					return nil
-				}
-				fmt.Println(style.Actionf("Starting: %s", startCmd))
-				return execInWorktree(existingWT, startCmd)
+			if handled, err := maybeStartServer(newStart, pc, existingWT); handled {
+				return err
 			}
 
 			fmt.Printf("\n  cd %s\n", existingWT)
@@ -207,21 +186,10 @@ Otherwise a new branch is created from --base (or the current branch).`,
 			return cliErr(cmd, errSetupFailed(err))
 		}
 
-		if newOpen && alloc.Port > 0 {
-			url := buildOpenURL(alloc.Port, projectName, alloc.Branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
-			fmt.Printf("Opening %s\n", url)
-			_ = openBrowser(url)
-		}
+		maybeOpenInBrowser(newOpen, uc, alloc.Port, projectName, alloc.Branch)
 
-		if newStart {
-			pc = config.LoadProjectConfig(wtPath)
-			startCmd := pc.StartCommand()
-			if startCmd == "" {
-				fmt.Println(style.Warnf("--start passed but no commands.start configured in .treeline.yml"))
-				return nil
-			}
-			fmt.Println(style.Actionf("Starting: %s", startCmd))
-			return execInWorktree(wtPath, startCmd)
+		if handled, err := maybeStartServer(newStart, config.LoadProjectConfig(wtPath), wtPath); handled {
+			return err
 		}
 
 		return nil

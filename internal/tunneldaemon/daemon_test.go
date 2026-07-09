@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -331,6 +332,59 @@ func TestDaemon_TwoClientsBothInIngress(t *testing.T) {
 	}
 	if !contains(got, `hostname: "b.example.dev"`) || !contains(got, "http://localhost:3060") {
 		t.Errorf("config missing second route:\n%s", got)
+	}
+}
+
+// TestDaemon_ConcurrentRegistrationsAllInIngress pins the fix for the F6
+// ordering race: applyRoutes used to apply a routes snapshot captured by the
+// caller, so two near-simultaneous registrations could reach applyMu in an
+// order that let an OLDER snapshot win — silently dropping a hostname whose
+// client had already been handed a "registered" event. With applyRoutes
+// reading live state, the LAST config written must contain every registered
+// hostname regardless of how the registrations interleave: once every client
+// has seen EventRegistered, every applyRoutes has completed, and the final
+// one to hold applyMu necessarily observed all N clients in the map.
+func TestDaemon_ConcurrentRegistrationsAllInIngress(t *testing.T) {
+	_, runner, sock, cleanup := startDaemon(t)
+	defer cleanup()
+
+	const n = 8
+	hostnames := make([]string, n)
+	for i := range hostnames {
+		hostnames[i] = fmt.Sprintf("h%d.example.dev", i)
+	}
+
+	conns := make([]net.Conn, n)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			conn, _ := dialAndRegister(t, sock, hostnames[i], 3050+i)
+			mu.Lock()
+			conns[i] = conn
+			mu.Unlock()
+		}(i)
+	}
+	wg.Wait()
+	defer func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			if c != nil {
+				_ = c.Close()
+			}
+		}
+	}()
+
+	// Every client registered, so every applyRoutes has returned; the last
+	// config written is the authoritative one and must carry all hostnames.
+	got := runner.LastConfig()
+	for _, h := range hostnames {
+		if !contains(got, `hostname: "`+h+`"`) {
+			t.Errorf("final config missing hostname %s:\n%s", h, got)
+		}
 	}
 }
 

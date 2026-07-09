@@ -330,7 +330,13 @@ func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, subdomain str
 				pr.Out.Header.Set("X-Forwarded-Proto", "http")
 			}
 			if pr.In.RemoteAddr != "" {
-				pr.Out.Header.Set("X-Forwarded-For", pr.In.RemoteAddr)
+				// Standard XFF carries only the client IP, not "ip:port" — strip the
+				// port so backends parsing this header (rate limiting, geo-IP) don't choke.
+				host, _, err := net.SplitHostPort(pr.In.RemoteAddr)
+				if err != nil {
+					host = pr.In.RemoteAddr
+				}
+				pr.Out.Header.Set("X-Forwarded-For", host)
 			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {

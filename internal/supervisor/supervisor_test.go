@@ -236,6 +236,120 @@ func TestSupervisor_GetCommand(t *testing.T) {
 	<-errCh
 }
 
+// TestSupervisor_UpdateEnvLargePayload verifies the framed protocol carries an
+// update-env payload well past the old 4096-byte server read buffer without
+// truncating a value mid-pair. A cut value used to slip through SplitN and
+// corrupt the child's env.
+func TestSupervisor_UpdateEnvLargePayload(t *testing.T) {
+	dir := t.TempDir()
+	sock := tmpSocket(t)
+
+	sv := New("sleep 60", dir, sock)
+	sv.Log = func(f string, a ...any) {}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- sv.Run() }()
+	waitForSocket(t, sock, 2*time.Second)
+
+	// A single value larger than the old 4096-byte read window.
+	bigVal := strings.Repeat("x", 8192)
+	resp, err := Send(sock, "update-env:BIG="+bigVal+"\x00SECOND=tail")
+	if err != nil {
+		t.Fatalf("update-env failed: %v", err)
+	}
+	if resp != "ok" {
+		t.Errorf("expected ok, got %s", resp)
+	}
+
+	sv.mu.Lock()
+	got := sv.Env["BIG"]
+	tail := sv.Env["SECOND"]
+	sv.mu.Unlock()
+	if got != bigVal {
+		t.Errorf("BIG env truncated: got %d bytes, want %d", len(got), len(bigVal))
+	}
+	// The trailing pair must survive too — proof nothing was cut mid-stream.
+	if tail != "tail" {
+		t.Errorf("expected SECOND=tail, got %q", tail)
+	}
+
+	_, _ = Send(sock, "shutdown")
+	<-errCh
+}
+
+// TestSupervisor_GetCommandLargeReply verifies a get-command reply longer than
+// the old 256-byte client buffer round-trips whole, so warnStaleCommand can't
+// fire on a truncated command string.
+func TestSupervisor_GetCommandLargeReply(t *testing.T) {
+	dir := t.TempDir()
+	sock := tmpSocket(t)
+
+	// A start command comfortably over 256 bytes.
+	cmd := "echo " + strings.Repeat("a", 512) + " && sleep 60"
+	sv := New(cmd, dir, sock)
+	sv.Log = func(f string, a ...any) {}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- sv.Run() }()
+	waitForSocket(t, sock, 2*time.Second)
+
+	resp, err := Send(sock, "get-command")
+	if err != nil {
+		t.Fatalf("get-command failed: %v", err)
+	}
+	if resp != cmd {
+		t.Errorf("get-command truncated: got %d bytes, want %d", len(resp), len(cmd))
+	}
+
+	_, _ = Send(sock, "shutdown")
+	<-errCh
+}
+
+// TestSupervisor_StartDuringStopReturnsRetryError verifies that a 'start' racing
+// a stop-in-progress gets an explicit retry error rather than a misleading "ok"
+// for a child that was never started.
+func TestSupervisor_StartDuringStopReturnsRetryError(t *testing.T) {
+	dir := t.TempDir()
+	sock := tmpSocket(t)
+	marker := filepath.Join(dir, "started")
+
+	// Linger on SIGTERM so the stop window stays open for the racing start.
+	cmd := "trap 'sleep 1; exit 0' TERM; echo $$ >> " + marker + "; sleep 60"
+	sv := New(cmd, dir, sock)
+	sv.Log = func(f string, a ...any) {}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- sv.Run() }()
+	waitForSocket(t, sock, 2*time.Second)
+	waitForFile(t, marker, 2*time.Second)
+
+	// Enter the stop window (s.mu released before the SIGTERM linger), then fire
+	// a start into it.
+	go func() { _, _ = Send(sock, "restart") }()
+	time.Sleep(300 * time.Millisecond)
+
+	resp, err := Send(sock, "start")
+	if err != nil {
+		t.Fatalf("racing start send failed: %v", err)
+	}
+	if !strings.Contains(resp, "stop in progress") {
+		t.Errorf("expected a retry error, got %q", resp)
+	}
+
+	// The supervisor must recover: restart finishes and the server is running.
+	time.Sleep(2 * time.Second)
+	if resp, err := Send(sock, "status"); err != nil || resp != "running" {
+		t.Errorf("expected running after restart, got %q (err %v)", resp, err)
+	}
+
+	_, _ = Send(sock, "shutdown")
+	select {
+	case <-errCh:
+	case <-time.After(15 * time.Second):
+		t.Fatal("supervisor didn't exit after shutdown")
+	}
+}
+
 func TestSupervisor_UpdateEnvEmpty(t *testing.T) {
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "test.sock")

@@ -190,12 +190,7 @@ func renderStatus() error {
 			name := format.DisplayName(fa)
 			db := format.GetStr(fa, "database")
 
-			redis := ""
-			if prefix, ok := a["redis_prefix"].(string); ok && prefix != "" {
-				redis = "prefix:" + prefix
-			} else if rdb, ok := a["redis_db"].(float64); ok {
-				redis = fmt.Sprintf("db:%d", int(rdb))
-			}
+			redis := redisLabel(a)
 
 			line := fmt.Sprintf("  :%s  %s", portLabel, name)
 			if db != "" {

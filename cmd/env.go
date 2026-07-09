@@ -11,7 +11,6 @@ import (
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/envparse"
-	"github.com/git-treeline/cli/internal/registry"
 	"github.com/spf13/cobra"
 )
 
@@ -65,10 +64,8 @@ var envShowCmd = &cobra.Command{
 			return nil
 		}
 
-		reg := registry.New("")
-		entry := reg.Find(absPath)
-		if entry == nil {
-			return cliErr(cmd, errNoAllocation(absPath))
+		if _, err := currentAllocation(); err != nil {
+			return cliErr(cmd, err)
 		}
 
 		envPath := filepath.Join(absPath, pc.EnvFileTarget())
@@ -144,4 +141,3 @@ var envShowCmd = &cobra.Command{
 		return nil
 	},
 }
-

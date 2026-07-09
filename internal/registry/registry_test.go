@@ -272,8 +272,11 @@ func TestFindProjectBranch(t *testing.T) {
 	if found == nil {
 		t.Fatal("expected to find api/feature-x")
 	}
-	if GetString(found, "worktree") != "/tmp/api-feat" {
-		t.Errorf("wrong worktree: %s", GetString(found, "worktree"))
+	// Allocate stores the canonical (symlink-resolved) form, e.g. macOS
+	// resolves /tmp to /private/tmp even though "api-feat" itself never
+	// exists on disk — resolvePath walks up to the existing /tmp ancestor.
+	if want := resolvePath("/tmp/api-feat"); GetString(found, "worktree") != want {
+		t.Errorf("wrong worktree: got %s, want %s", GetString(found, "worktree"), want)
 	}
 
 	notFound := reg.FindProjectBranch("api", "no-such-branch")
@@ -606,6 +609,138 @@ type errString string
 
 func (e errString) Error() string { return string(e) }
 
+func TestResolvePath_DeletedLeafUnderSymlinkedParent(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	canonicalReal, err := filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// "child" never exists under the symlink — simulating a worktree that was
+	// rm -rf'd — so EvalSymlinks on the full path fails outright.
+	deleted := filepath.Join(link, "child")
+	want := filepath.Join(canonicalReal, "child")
+
+	if got := resolvePath(deleted); got != want {
+		t.Errorf("resolvePath(%q) = %q, want %q", deleted, got, want)
+	}
+}
+
+func TestRegistry_Release_MatchesDeletedDirUnderSymlink(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(real, "child")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := New(filepath.Join(base, "registry.json"))
+	if err := reg.Allocate(Allocation{"worktree": filepath.Join(link, "child"), "port": float64(4000)}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Directory removed entirely, as if the worktree was nuked, then release
+	// is called with the symlinked (pre-deletion) variant of the path.
+	if err := os.RemoveAll(child); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := reg.Release(filepath.Join(link, "child"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !removed {
+		t.Error("expected Release to match the entry despite the deleted directory")
+	}
+	if len(reg.Allocations()) != 0 {
+		t.Errorf("expected registry empty after release, got %d", len(reg.Allocations()))
+	}
+}
+
+func TestRegistry_AllocateReplaces_SymmetricPathComparison(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := New(filepath.Join(base, "registry.json"))
+	// First allocation stores the canonical (symlink-resolved) path, as
+	// Allocate always normalizes on write.
+	if err := reg.Allocate(Allocation{"worktree": real, "port": float64(3010)}); err != nil {
+		t.Fatal(err)
+	}
+	// Re-allocating via the symlinked variant must replace the existing
+	// entry rather than filtering it in as a stale collision.
+	if err := reg.Allocate(Allocation{"worktree": link, "port": float64(3020)}); err != nil {
+		t.Fatal(err)
+	}
+
+	allocs := reg.Allocations()
+	if len(allocs) != 1 {
+		t.Fatalf("expected 1 allocation after re-allocate via symlink, got %d: %v", len(allocs), allocs)
+	}
+	if allocs[0]["port"] != float64(3020) {
+		t.Errorf("expected updated port 3020, got %v", allocs[0]["port"])
+	}
+}
+
+func TestRegistry_NewerSchemaVersion_RefusesToSave(t *testing.T) {
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "registry.json")
+	original := `{
+  "version": 99,
+  "allocations": [
+    {
+      "worktree": "/wt/future",
+      "project": "future"
+    }
+  ]
+}
+`
+	if err := os.WriteFile(regPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := New(regPath)
+
+	if err := reg.Allocate(Allocation{"worktree": "/wt/new"}); err == nil {
+		t.Fatal("expected Allocate to refuse writing over a newer-schema registry")
+	}
+
+	raw, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != original {
+		t.Errorf("registry file was modified despite refusal:\n got:  %s\n want: %s", raw, original)
+	}
+
+	// Reads must keep working even though writes are refused.
+	allocs := reg.Allocations()
+	if len(allocs) != 1 || GetString(allocs[0], "project") != "future" {
+		t.Errorf("expected reads to still return the newer-schema data, got %v", allocs)
+	}
+}
+
 func TestOrphanedBranchAllocations(t *testing.T) {
 	reg := newTestRegistry(t)
 	dir := t.TempDir()
@@ -630,5 +765,13 @@ func TestOrphanedBranchAllocations(t *testing.T) {
 	}
 	if GetString(orphans[0], "branch") != "gone" {
 		t.Errorf("expected the deleted-branch alloc, got %v", orphans[0])
+	}
+}
+
+// resolvePath must not canonicalize the empty string: the ancestor walk would
+// turn "" into the resolved cwd, making pathless entries match real lookups.
+func TestResolvePath_EmptyStaysEmpty(t *testing.T) {
+	if got := resolvePath(""); got != "" {
+		t.Errorf("resolvePath(%q) = %q, want empty", "", got)
 	}
 }

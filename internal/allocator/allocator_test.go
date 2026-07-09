@@ -1308,3 +1308,76 @@ func TestAllocate_Concurrent(t *testing.T) {
 		seenDB[r.db] = i
 	}
 }
+
+// TestAllocateMain_Concurrent exercises the main-worktree allocation path, which
+// used to select ports from an unlocked snapshot and persist separately in the
+// setup layer — a read→choose→write race two concurrent main-repo setups could
+// lose. It allocates many distinct main worktrees (each its own project) against
+// one shared registry and asserts no two end up with the same port. Run under
+// -race.
+func TestAllocateMain_Concurrent(t *testing.T) {
+	dir := t.TempDir()
+	reg := registry.New(filepath.Join(dir, "registry.json"))
+
+	confPath := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(confPath, []byte(`{
+		"port": {"base": 41000, "increment": 10},
+		"redis": {"strategy": "prefixed", "url": "redis://localhost:6379"}
+	}`), 0o644)
+	uc := config.LoadUserConfig(confPath)
+
+	const n = 40
+	type result struct {
+		ports []int
+		err   error
+	}
+	results := make([]result, n)
+
+	// Each main worktree is its own project with its own allocator, all sharing
+	// one registry — the realistic shape of several `gtl setup` runs racing in
+	// different main repos at once.
+	allocators := make([]*Allocator, n)
+	paths := make([]string, n)
+	for i := range n {
+		projDir := filepath.Join(dir, fmt.Sprintf("proj%d", i))
+		_ = os.MkdirAll(projDir, 0o755)
+		_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"),
+			[]byte(fmt.Sprintf("project: app%d\ndatabase:\n  adapter: postgresql\n  template: t%d\n  pattern: \"{template}_{worktree}\"\n", i, i)), 0o644)
+		allocators[i] = New(uc, config.LoadProjectConfig(projDir), reg)
+		paths[i] = fmt.Sprintf("/main/app%d", i)
+	}
+
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			alloc, err := allocators[i].Allocate(paths[i], fmt.Sprintf("app%d", i), true)
+			if err != nil {
+				results[i] = result{err: err}
+				return
+			}
+			results[i] = result{ports: alloc.Ports}
+		}(i)
+	}
+	wg.Wait()
+
+	seenPort := make(map[int]int)
+	for i, r := range results {
+		if r.err != nil {
+			t.Fatalf("goroutine %d: %v", i, r.err)
+		}
+		for _, p := range r.ports {
+			if prev, ok := seenPort[p]; ok {
+				t.Errorf("duplicate port %d in goroutines %d and %d", p, prev, i)
+			}
+			seenPort[p] = i
+		}
+	}
+
+	// Every main allocation must be persisted inside its transaction — that is the
+	// invariant that replaced the old separate setup-layer write.
+	if got := len(reg.Allocations()); got != n {
+		t.Errorf("expected %d persisted allocations, got %d", n, got)
+	}
+}

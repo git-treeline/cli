@@ -56,14 +56,18 @@ func TestValidate_FlagsMissingWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Allocate stores the canonical (symlink-resolved) form of "gone" even
+	// though it never exists on disk — resolvePath walks up to the existing
+	// parent dir (e.g. macOS resolves /var to /private/var).
+	wantWorktree := resolvePath(gone)
 	found := false
 	for _, iss := range issues {
-		if iss.Kind == "missing_worktree" && iss.Worktree == gone {
+		if iss.Kind == "missing_worktree" && iss.Worktree == wantWorktree {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected missing_worktree issue for %s, got: %+v", gone, issues)
+		t.Errorf("expected missing_worktree issue for %s, got: %+v", wantWorktree, issues)
 	}
 }
 

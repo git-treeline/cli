@@ -3,13 +3,10 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/format"
 	"github.com/git-treeline/cli/internal/proxy"
-	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/service"
 	"github.com/spf13/cobra"
 )
@@ -33,25 +30,17 @@ Examples:
   gtl routes --json       # structured output for scripting`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cwd, err := os.Getwd()
+		alloc, err := currentAllocation()
 		if err != nil {
-			return err
+			return cliErr(cmd, err)
 		}
-		absPath, _ := filepath.Abs(cwd)
-
-		reg := registry.New("")
-		entry := reg.Find(absPath)
-		if entry == nil {
-			return cliErr(cmd, errNoAllocation(absPath))
-		}
-
-		fa := format.Allocation(entry)
-		ports := format.GetPorts(fa)
+		fa := format.Allocation(alloc.Entry)
+		ports := alloc.Ports()
 		if len(ports) == 0 {
-			return cliErr(cmd, errNoAllocationNoPorts(absPath))
+			return cliErr(cmd, errNoAllocationNoPorts(alloc.Path))
 		}
 
-		pc := config.LoadProjectConfig(absPath)
+		pc := config.LoadProjectConfig(alloc.Path)
 		uc := config.LoadUserConfig("")
 
 		project := pc.Project()

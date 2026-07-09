@@ -7,7 +7,9 @@ import (
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/proxy"
+	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/service"
+	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/style"
 	"github.com/git-treeline/cli/internal/worktree"
 )
@@ -61,6 +63,51 @@ func isInWorktree(absPath, mainRepo string) bool {
 		return filepath.Clean(absPath) != filepath.Clean(mainRepo)
 	}
 	return resolvedAbs != resolvedMain
+}
+
+// maybeOpenInBrowser opens the worktree's URL when its command was invoked
+// with --open. Shared by new/review so the two commands can't drift on how
+// the URL is built or when opening is skipped (no port allocated).
+func maybeOpenInBrowser(open bool, uc *config.UserConfig, port int, project, branch string) {
+	if !open || port <= 0 {
+		return
+	}
+	url := buildOpenURL(port, project, branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
+	fmt.Printf("Opening %s\n", url)
+	_ = openBrowser(url)
+}
+
+// maybeStartServer runs commands.start in dir when its command was invoked
+// with --start. handled reports whether the flag was set at all — when true
+// the caller should return err as its own result (the flag consumed the rest
+// of the command), when false the caller continues its normal tail.
+func maybeStartServer(start bool, pc *config.ProjectConfig, dir string) (handled bool, err error) {
+	if !start {
+		return false, nil
+	}
+	startCmd := pc.StartCommand()
+	if startCmd == "" {
+		fmt.Println(style.Warnf("--start passed but no commands.start configured in .treeline.yml"))
+		return true, nil
+	}
+	fmt.Println(style.Actionf("Starting: %s", startCmd))
+	return true, execInWorktree(dir, startCmd)
+}
+
+// ensureWorktreeAllocation returns the registry allocation for an existing
+// worktree, running a full setup first when none exists yet — the "resume"
+// path new/review share when a branch is already checked out somewhere.
+func ensureWorktreeAllocation(wtPath, mainRepo string, uc *config.UserConfig) (registry.Allocation, error) {
+	reg := registry.New("")
+	if alloc := reg.Find(wtPath); alloc != nil {
+		return alloc, nil
+	}
+	fmt.Println(style.Actionf("No allocation found — running setup..."))
+	s := setup.New(wtPath, mainRepo, uc)
+	if _, err := s.Run(); err != nil {
+		return nil, errSetupFailed(err)
+	}
+	return registry.New("").Find(wtPath), nil
 }
 
 // ensureGitignored delegates to worktree.EnsureGitignored and prints

@@ -9,7 +9,6 @@ import (
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/confirm"
 	"github.com/git-treeline/cli/internal/database"
-	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/worktree"
 	"github.com/spf13/cobra"
 )
@@ -224,22 +223,15 @@ func resolveDBPaths(adapterName, absPath, mainRepo, dbName, template string) (ta
 }
 
 func resolveDB() (*dbInfo, error) {
-	cwd, err := os.Getwd()
+	wt, err := currentAllocation()
 	if err != nil {
-		return nil, fmt.Errorf("getting working directory: %w", err)
+		return nil, err
 	}
-
-	absPath, _ := filepath.Abs(cwd)
+	absPath := wt.Path
 	mainRepo := worktree.DetectMainRepo(absPath)
 	pc := config.LoadProjectConfig(absPath)
 
-	reg := registry.New("")
-	alloc := reg.Find(absPath)
-	if alloc == nil {
-		return nil, errNoAllocation(absPath)
-	}
-
-	dbName, _ := alloc["database"].(string)
+	dbName, _ := wt.Entry["database"].(string)
 	if dbName == "" {
 		return nil, errNoDatabaseConfigured()
 	}
