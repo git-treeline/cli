@@ -48,16 +48,22 @@ var doctorCmd = &cobra.Command{
 			return doctorJSONOutput(pc, det, absPath)
 		}
 
+		// One health snapshot for the whole run. The Serve section, the
+		// request-flow diagnosis, and auto-fix must agree with each other;
+		// re-probing per section produced self-contradicting output when a
+		// check flapped between samples.
+		serveChecks := service.CheckHealth(config.LoadUserConfig("").RouterPort(), Version)
+
 		doctorConfig(pc, det, absPath)
 		doctorProjectDrift(absPath)
 		doctorPortConfig()
 		doctorAllocation(absPath)
 		doctorRuntime(absPath, pc)
-		doctorServe()
+		doctorServe(serveChecks)
 		doctorDiagnostics(det)
-		doctorRequestFlow(absPath, pc)
+		doctorRequestFlow(absPath, pc, serveChecks)
 		if doctorFix {
-			return doctorAutoFix(absPath, pc)
+			return doctorAutoFix(absPath, pc, serveChecks)
 		}
 		return nil
 	},
@@ -311,10 +317,10 @@ func doctorRuntime(absPath string, pc *config.ProjectConfig) {
 // → router → router has the route → port forwarding → CA) and surfaces the
 // FIRST failing link as the actionable diagnosis. Everything else is noise
 // when the first link is broken.
-func doctorRequestFlow(absPath string, pc *config.ProjectConfig) {
+func doctorRequestFlow(absPath string, pc *config.ProjectConfig, serveChecks []service.HealthCheck) {
 	fmt.Println("\nRequest flow")
 
-	step := firstFailingStep(absPath, pc)
+	step := evaluateRequestFlow(buildFlowInput(absPath, pc, serveChecks))
 	if step == nil {
 		doctorLine("Status", "✓ all links healthy")
 		return
@@ -343,25 +349,6 @@ type flowInput struct {
 	startCommand    string
 	serviceChecks   []service.HealthCheck
 	caInstalled     bool
-}
-
-func firstFailingStep(absPath string, pc *config.ProjectConfig) *flowStep {
-	uc := config.LoadUserConfig("")
-	reg := registry.New("")
-	alloc := reg.Find(absPath)
-
-	in := flowInput{
-		startCommand:  pc.StartCommand(),
-		serviceChecks: service.CheckHealth(uc.RouterPort(), Version),
-		caInstalled:   proxy.IsCAInstalled(),
-	}
-	if alloc != nil {
-		in.allocatedPorts = format.GetPorts(format.Allocation(alloc))
-		if len(in.allocatedPorts) > 0 {
-			in.appListening = allocator.CheckPortsListening(in.allocatedPorts)
-		}
-	}
-	return evaluateRequestFlow(in)
 }
 
 func evaluateRequestFlow(in flowInput) *flowStep {
@@ -426,10 +413,7 @@ func evaluateRequestFlow(in flowInput) *flowStep {
 	return nil
 }
 
-func doctorServe() {
-	uc := config.LoadUserConfig("")
-	port := uc.RouterPort()
-
+func doctorServe(checks []service.HealthCheck) {
 	fmt.Println("\nServe")
 
 	displayNames := map[string]string{
@@ -442,7 +426,6 @@ func doctorServe() {
 		"pf_reload_daemon":  "pf reboot survival",
 	}
 
-	checks := service.CheckHealth(port, Version)
 	for _, c := range checks {
 		label := displayNames[c.Name]
 		if label == "" {
@@ -548,8 +531,8 @@ func planAutoFix(in flowInput, registryHasOrphans bool) []fixAction {
 	return plan
 }
 
-func doctorAutoFix(absPath string, pc *config.ProjectConfig) error {
-	in := buildFlowInput(absPath, pc)
+func doctorAutoFix(absPath string, pc *config.ProjectConfig, serveChecks []service.HealthCheck) error {
+	in := buildFlowInput(absPath, pc, serveChecks)
 	plan := planAutoFix(in, shouldUseRegistryRepair())
 
 	fmt.Println("\nAuto-fix")
@@ -569,13 +552,12 @@ func doctorAutoFix(absPath string, pc *config.ProjectConfig) error {
 	return nil
 }
 
-func buildFlowInput(absPath string, pc *config.ProjectConfig) flowInput {
-	uc := config.LoadUserConfig("")
+func buildFlowInput(absPath string, pc *config.ProjectConfig, serveChecks []service.HealthCheck) flowInput {
 	reg := registry.New("")
 	alloc := reg.Find(absPath)
 	in := flowInput{
 		startCommand:  pc.StartCommand(),
-		serviceChecks: service.CheckHealth(uc.RouterPort(), Version),
+		serviceChecks: serveChecks,
 		caInstalled:   proxy.IsCAInstalled(),
 	}
 	if alloc != nil {
