@@ -360,6 +360,18 @@ func WaitRouterResponding(routerPort int, wait time.Duration) error {
 	}
 }
 
+// routerPortReachable reports whether the router's own listener accepts a
+// loopback connection. Used to distinguish "pf isn't forwarding :443" from
+// "the router is fine but an external filter is blocking :443 specifically".
+func routerPortReachable(d healthDeps, routerPort int) bool {
+	conn, err := d.dialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", routerPort), 2*time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
 func checkPortForward(d healthDeps, routerPort int) HealthCheck {
 	st := d.checkPortForward(routerPort)
 	if !st.ConfiguredOnDisk {
@@ -390,6 +402,22 @@ func checkPortForward(d healthDeps, routerPort int) HealthCheck {
 		// Port 443 not reachable. If we read the kernel ruleset and it
 		// didn't show our rule, the diagnosis is "rule missing"; otherwise
 		// it's "loaded but unreachable" — both fix with reload-pf.
+		//
+		// EXCEPTION: if we positively confirmed the rule IS loaded in the
+		// kernel AND the router's own port answers, then pf is doing its
+		// job — some external filter (a VPN killswitch, Little Snitch,
+		// EncryptMe) is intercepting loopback :443. reload-pf cannot fix
+		// that; sending the user there just wastes a sudo round-trip. Point
+		// at the real culprit instead. This was the root cause of the
+		// incident that motivated the doctor overhaul.
+		if st.KernelStateKnown && st.LoadedInKernel && routerPortReachable(d, routerPort) {
+			return HealthCheck{
+				Name:   "port_forwarding",
+				Status: "error",
+				Detail: "port 443 is blocked by something outside gtl (VPN killswitch / packet filter) — not a pf rule problem",
+				Fix:    "check your firewall — a VPN killswitch, Little Snitch, or EncryptMe is intercepting loopback :443 (the pf rule is loaded and the router is up, so reloading pf rules won't help)",
+			}
+		}
 		detail := "rule loaded but port 443 not reachable"
 		if st.KernelStateKnown && !st.LoadedInKernel {
 			detail = st.Detail

@@ -537,19 +537,40 @@ func TestCheckPfReloadDaemon_OkWhenPfNotConfigured(t *testing.T) {
 	}
 }
 
-func TestCheckPortForward_RuleLoadedButPort443Unreachable(t *testing.T) {
-	d := allHealthy()
+// When the rule is confirmed loaded in the kernel AND the router's own port
+// answers but :443 does not, the culprit is an external filter (VPN
+// killswitch / packet filter), not pf. We must NOT send the user to
+// reload-pf in that case — reload-pf can't fix a loopback intercept.
+func TestCheckPortForward_RuleLoadedButPort443Unreachable_ExternalFirewall(t *testing.T) {
+	d := allHealthy() // fakePF(true, true, true) → loaded in kernel, kernel state known
 	d.dialTimeout = func(_, addr string, _ time.Duration) (net.Conn, error) {
 		if addr == "127.0.0.1:443" {
 			return nil, fmt.Errorf("connection refused")
 		}
-		return fakeConn{}, nil
+		return fakeConn{}, nil // router port (8443) answers
 	}
 	c := checkPortForward(d, 8443)
 	if c.Status != "error" {
 		t.Errorf("expected error, got %s", c.Status)
 	}
+	if strings.Contains(c.Fix, "reload-pf") {
+		t.Errorf("external-firewall diagnosis must not point at reload-pf, got %q", c.Fix)
+	}
+	if !strings.Contains(c.Detail, "outside gtl") {
+		t.Errorf("expected external-firewall detail, got %q", c.Detail)
+	}
+}
+
+// If the router's OWN port is also unreachable, we can't blame an external
+// :443-specific filter — fall back to the reload-pf diagnosis.
+func TestCheckPortForward_RuleLoadedButRouterPortAlsoDown(t *testing.T) {
+	d := allHealthy()
+	d.dialTimeout = fakeDial(false) // nothing reachable, including the router port
+	c := checkPortForward(d, 8443)
+	if c.Status != "error" {
+		t.Errorf("expected error, got %s", c.Status)
+	}
 	if c.Fix != "gtl serve reload-pf" {
-		t.Errorf("expected fix to suggest reload-pf, got %q", c.Fix)
+		t.Errorf("expected reload-pf fix when router port is also down, got %q", c.Fix)
 	}
 }
