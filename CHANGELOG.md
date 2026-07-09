@@ -1,4 +1,4 @@
-## [Unreleased]
+## [0.48.0]
 
 Follow-up hardening from the post-remediation deep audit:
 
