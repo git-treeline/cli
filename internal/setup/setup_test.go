@@ -153,6 +153,47 @@ env:
 	}
 }
 
+func TestWriteEnvFile_PreservesUserEditsOnRerun(t *testing.T) {
+	s, mainRepo, worktree := testSetup(t, `
+project: test
+env_file:
+  target: .env.local
+  source: .env.local
+env:
+  PORT: "{port}"
+`)
+	_ = os.WriteFile(filepath.Join(mainRepo, ".env.local"), []byte("APP_NAME=myapp\n"), 0o644)
+
+	// First provisioning seeds from source and applies gtl's vars.
+	if err := s.writeEnvFile(map[string]string{"PORT": "3010"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// User manually edits the worktree env file.
+	envPath := filepath.Join(worktree, ".env.local")
+	data, _ := os.ReadFile(envPath)
+	if err := os.WriteFile(envPath, append(data, []byte("USER_SECRET=keepme\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A re-run (e.g. setup/refresh) must not clobber the manual edit.
+	if err := s.writeEnvFile(map[string]string{"PORT": "3020"}); err != nil {
+		t.Fatal(err)
+	}
+
+	content, _ := os.ReadFile(envPath)
+	got := string(content)
+	if !strings.Contains(got, "USER_SECRET=keepme") {
+		t.Errorf("expected user-added line to survive re-run, got:\n%s", got)
+	}
+	if !strings.Contains(got, `PORT="3020"`) {
+		t.Errorf("expected gtl var updated in place, got:\n%s", got)
+	}
+	if strings.Contains(got, `PORT="3010"`) {
+		t.Errorf("expected old PORT value replaced, got:\n%s", got)
+	}
+}
+
 func TestWriteEnvFile_FallsBackToDotEnv(t *testing.T) {
 	s, mainRepo, worktree := testSetup(t, `
 project: test

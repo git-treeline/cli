@@ -368,12 +368,18 @@ func (s *Setup) writeEnvFile(vars map[string]string) error {
 	target := s.ProjectConfig.EnvFileTarget()
 	envPath := filepath.Join(s.WorktreePath, target)
 
-	source := filepath.Join(s.MainRepo, s.ProjectConfig.EnvFileSource())
-	if _, err := os.Stat(source); err != nil {
-		source = filepath.Join(s.MainRepo, ".env")
-	}
-	if data, err := os.ReadFile(source); err == nil {
-		_ = atomicWriteFile(envPath, data, 0o644)
+	// Seed from the main repo's env file only on first provisioning. On a
+	// re-run (setup/refresh) the worktree env already exists and may hold
+	// manual edits — copying the seed over it would destroy them before the
+	// updateOrAppend pass below re-applies gtl's vars. Update-in-place instead.
+	if _, err := os.Stat(envPath); err != nil {
+		source := filepath.Join(s.MainRepo, s.ProjectConfig.EnvFileSource())
+		if _, err := os.Stat(source); err != nil {
+			source = filepath.Join(s.MainRepo, ".env")
+		}
+		if data, err := os.ReadFile(source); err == nil {
+			_ = atomicWriteFile(envPath, data, 0o644)
+		}
 	}
 
 	for key, value := range vars {
