@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/tunnel"
 )
 
@@ -76,6 +77,12 @@ type Daemon struct {
 	// LogSink receives daemon's own log lines (defaults to stderr).
 	LogSink io.Writer
 
+	// ValidatePort authorizes a client's requested localhost port before it
+	// is published to the public tunnel. Defaults to allowing only ports the
+	// gtl registry has allocated to a worktree, so a rogue same-user process
+	// can't route e.g. Postgres 5432 out through the shared tunnel.
+	ValidatePort func(port int) error
+
 	mu      sync.Mutex
 	applyMu sync.Mutex // serializes config writes + cloudflared (re)starts
 	clients map[*client]struct{}
@@ -106,13 +113,27 @@ type client struct {
 // New returns a daemon ready to serve. Call Run with a listening socket.
 func New(tunnelName string) *Daemon {
 	return &Daemon{
-		TunnelName:  tunnelName,
-		Runner:      cloudflaredRunner{},
-		WriteConfig: tunnel.WriteMultiHostConfig,
-		LogSink:     os.Stderr,
-		clients:     make(map[*client]struct{}),
-		done:        make(chan struct{}),
+		TunnelName:   tunnelName,
+		Runner:       cloudflaredRunner{},
+		WriteConfig:  tunnel.WriteMultiHostConfig,
+		LogSink:      os.Stderr,
+		ValidatePort: registryPortAllocated,
+		clients:      make(map[*client]struct{}),
+		done:         make(chan struct{}),
 	}
+}
+
+// registryPortAllocated authorizes only ports the gtl registry currently
+// hands out to a worktree. This is the confused-deputy guard: without it any
+// same-user process could register an arbitrary local port (a database, an
+// admin panel) and have the daemon publish it to the public tunnel.
+func registryPortAllocated(port int) error {
+	for _, p := range registry.New("").UsedPorts() {
+		if p == port {
+			return nil
+		}
+	}
+	return fmt.Errorf("port %d is not allocated to any git-treeline worktree", port)
 }
 
 // Run accepts connections from the given listener until the daemon's idle
@@ -169,6 +190,13 @@ func (d *Daemon) handleConn(conn net.Conn) {
 		c.send(Event{Kind: EventError, Error: "hostname and valid port required"})
 		_ = conn.Close()
 		return
+	}
+	if d.ValidatePort != nil {
+		if err := d.ValidatePort(reg.Port); err != nil {
+			c.send(Event{Kind: EventError, Error: err.Error()})
+			_ = conn.Close()
+			return
+		}
 	}
 	c.hostname = reg.Hostname
 	c.port = reg.Port

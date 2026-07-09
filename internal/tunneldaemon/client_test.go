@@ -48,6 +48,7 @@ func TestClient_RegisterAgainstRunningDaemon(t *testing.T) {
 	d := New("test-tunnel")
 	d.Runner = runner
 	d.LogSink = io.Discard
+	d.ValidatePort = func(int) error { return nil }
 	d.WriteConfig = func(name string, routes []tunnel.HostRoute) (string, error) {
 		path := filepath.Join(cfgDir, "config.yml")
 		return path, os.WriteFile(path, []byte(tunnel.GenerateMultiHostConfig(name, "/tmp/cred.json", routes)), 0o600)
