@@ -147,11 +147,13 @@ func runReleaseSingle(args []string) error {
 	}
 
 	if releaseDropDB {
-		format.DropSingleDB(fa, absPath)
+		if err := format.DropSingleDB(fa, absPath); err != nil {
+			return err
+		}
 	}
 
 	if _, err := reg.Release(absPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to release allocation: %s\n", err)
+		return fmt.Errorf("failed to release allocation: %w", err)
 	}
 	fmt.Printf("==> Released resources for %s\n", filepath.Base(absPath))
 
@@ -258,7 +260,9 @@ func runReleaseBatch(project string, all bool) error {
 		for i, a := range allocs {
 			formatAllocs[i] = format.Allocation(a)
 		}
-		format.DropDatabases(formatAllocs)
+		if err := format.DropDatabases(formatAllocs); err != nil {
+			return err
+		}
 	}
 
 	paths := make([]string, 0, len(allocs))

@@ -108,7 +108,9 @@ func TestPortDisplay(t *testing.T) {
 
 func TestDropSingleDB_EmptyName(t *testing.T) {
 	alloc := Allocation{"database": "", "database_adapter": "sqlite"}
-	DropSingleDB(alloc, t.TempDir())
+	if err := DropSingleDB(alloc, t.TempDir()); err != nil {
+		t.Errorf("expected nil error for empty database name, got %v", err)
+	}
 }
 
 func TestDropSingleDB_SQLite(t *testing.T) {
@@ -120,7 +122,9 @@ func TestDropSingleDB_SQLite(t *testing.T) {
 		"database":         "test.db",
 		"database_adapter": "sqlite",
 	}
-	DropSingleDB(alloc, dir)
+	if err := DropSingleDB(alloc, dir); err != nil {
+		t.Errorf("expected nil error on successful drop, got %v", err)
+	}
 
 	if _, err := os.Stat(dbFile); !os.IsNotExist(err) {
 		t.Error("expected sqlite file to be removed")
@@ -132,7 +136,9 @@ func TestDropSingleDB_UnknownAdapter(t *testing.T) {
 		"database":         "mydb",
 		"database_adapter": "nonexistent_adapter",
 	}
-	DropSingleDB(alloc, t.TempDir())
+	if err := DropSingleDB(alloc, t.TempDir()); err == nil {
+		t.Error("expected error for unknown adapter, got nil")
+	}
 }
 
 func TestDropDatabases_MixedEntries(t *testing.T) {
@@ -145,7 +151,11 @@ func TestDropDatabases_MixedEntries(t *testing.T) {
 		{"database": "drop_me.db", "database_adapter": "sqlite", "worktree": dir},
 		{"database": "x", "database_adapter": "nonexistent"},
 	}
-	DropDatabases(allocs)
+	// The unknown-adapter entry fails, so a non-nil error is expected even
+	// though the sqlite drop succeeds.
+	if err := DropDatabases(allocs); err == nil {
+		t.Error("expected error naming the failed drop, got nil")
+	}
 
 	if _, err := os.Stat(dbFile); !os.IsNotExist(err) {
 		t.Error("expected sqlite file to be removed by DropDatabases")
