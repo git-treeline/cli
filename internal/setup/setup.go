@@ -18,6 +18,7 @@ import (
 	"github.com/git-treeline/cli/internal/editor"
 	"github.com/git-treeline/cli/internal/format"
 	"github.com/git-treeline/cli/internal/interpolation"
+	"github.com/git-treeline/cli/internal/platform"
 	"github.com/git-treeline/cli/internal/proxy"
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/resolve"
@@ -129,15 +130,8 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	} else {
 		s.log("Allocating port %d for '%s'", alloc.Port, worktreeName)
 	}
-	// A new (non-main) allocation is already persisted atomically inside the
-	// allocator's registry transaction; only the main-worktree path, which
-	// selects without persisting, needs to be written here.
-	if !alloc.Reused && isMain {
-		if err := s.Registry.Allocate(alloc.ToRegistryEntry()); err != nil {
-			return nil, fmt.Errorf("registering allocation: %w", err)
-		}
-	}
-
+	// Both main and non-main allocations are now persisted atomically inside the
+	// allocator's registry transaction, so there is nothing to write here.
 	if err := s.runPostAllocation(alloc, redisURL); err != nil {
 		if !alloc.Reused {
 			_, _ = s.Registry.Release(s.WorktreePath)
@@ -378,7 +372,7 @@ func (s *Setup) writeEnvFile(vars map[string]string) error {
 			source = filepath.Join(s.MainRepo, ".env")
 		}
 		if data, err := os.ReadFile(source); err == nil {
-			_ = atomicWriteFile(envPath, data, 0o644)
+			_ = platform.AtomicWriteFile(envPath, data, 0o644)
 		}
 	}
 
@@ -419,32 +413,7 @@ func updateOrAppend(file, key, value string) error {
 		content += line + "\n"
 	}
 
-	return atomicWriteFile(file, []byte(content), 0o644)
-}
-
-// atomicWriteFile writes data to path by creating a temp file in the same
-// directory and renaming it into place. A crash or ENOSPC mid-write can only
-// corrupt the discarded temp file, never the live env file — the rename is
-// atomic, so readers see either the old contents or the new ones.
-func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	_ = tmp.Chmod(perm)
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	return os.Rename(tmpPath, path)
+	return platform.AtomicWriteFile(file, []byte(content), 0o644)
 }
 
 func (s *Setup) syncTemplateDatabase() error {
@@ -496,7 +465,21 @@ func (s *Setup) handleProjectRename() error {
 		return nil
 	}
 	oldDB := registry.GetString(entry, "database")
-	if oldDB != "" {
+	template := s.ProjectConfig.DatabaseTemplate()
+	isMain := s.WorktreePath == s.MainRepo
+	switch {
+	case oldDB != "" && (oldDB == template || isMain):
+		// A template database is never dropped on rename. For a main repo the
+		// registry's "database" IS the template (allocateMain stores
+		// DatabaseTemplate() verbatim), and the project name doesn't feed into
+		// the template's name — so a rename records the same DB again and the
+		// drop would only destroy the clone source cloneDatabase needs next.
+		// The name compare catches a worktree whose pattern resolved to the
+		// template; the isMain check catches a main repo whose template config
+		// was renamed in the same edit (stored name no longer matches). Keep it
+		// and just re-provision — cloneDatabase skips when the DB already exists.
+		s.log("Project renamed %s → %s, keeping template database %s (use `gtl rename` for a proper project rename)", entryProject, s.ProjectConfig.Project(), oldDB)
+	case oldDB != "":
 		s.log("Project renamed %s → %s, dropping database %s", entryProject, s.ProjectConfig.Project(), oldDB)
 		adapterName := registry.GetString(entry, "database_adapter")
 		if adapter, err := database.ForAdapter(adapterName, nil); err == nil {
@@ -510,7 +493,7 @@ func (s *Setup) handleProjectRename() error {
 				}
 			}
 		}
-	} else {
+	default:
 		s.log("Project renamed %s → %s, re-provisioning", entryProject, s.ProjectConfig.Project())
 	}
 	if _, err := s.Registry.Release(s.WorktreePath); err != nil {

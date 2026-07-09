@@ -244,31 +244,57 @@ func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*A
 	}
 
 	project := al.ProjectConfig.Project()
-	var ports []int
-	if base, ok := al.resolveReservation(project, branch); ok {
-		if err := al.validateReservedPorts(base, count, al.Registry.UsedPorts()); err != nil {
-			return nil, err
+
+	// build selects the main worktree's port block against a snapshot of
+	// already-used ports. Like allocateNew it runs inside the registry lock for a
+	// real allocation — so the read of used ports, the choice, and the write are
+	// one atomic transaction and two concurrent main-repo setups can't pick the
+	// same block from a stale snapshot — and against the current snapshot for a
+	// dry-run preview, which never persists. Main worktrees own Redis db0, so no
+	// Redis DB is allocated here.
+	build := func(used registry.UsedResources) (*Allocation, error) {
+		var ports []int
+		if base, ok := al.resolveReservation(project, branch); ok {
+			if verr := al.validateReservedPorts(base, count, used.Ports); verr != nil {
+				return nil, verr
+			}
+			ports = make([]int, count)
+			for i := range count {
+				ports[i] = base + i
+			}
+		} else {
+			ports = al.nextAvailablePortsFromUsed(al.UserConfig.PortBase(), count, used.Ports)
 		}
-		ports = make([]int, count)
-		for i := range count {
-			ports[i] = base + i
+		if ports == nil {
+			return nil, fmt.Errorf("no available port block of size %d found (all ports in use or reserved)", count)
 		}
-	} else {
-		ports = al.nextAvailablePortsFrom(al.UserConfig.PortBase(), count)
-	}
-	if ports == nil {
-		return nil, fmt.Errorf("no available port block of size %d found (all ports in use or reserved)", count)
+		return &Allocation{
+			Project:         project,
+			Worktree:        worktreePath,
+			WorktreeName:    worktreeName,
+			Port:            ports[0],
+			Ports:           ports,
+			Database:        al.ProjectConfig.DatabaseTemplate(),
+			DatabaseAdapter: al.ProjectConfig.DatabaseAdapter(),
+		}, nil
 	}
 
-	return &Allocation{
-		Project:         project,
-		Worktree:        worktreePath,
-		WorktreeName:    worktreeName,
-		Port:            ports[0],
-		Ports:           ports,
-		Database:        al.ProjectConfig.DatabaseTemplate(),
-		DatabaseAdapter: al.ProjectConfig.DatabaseAdapter(),
-	}, nil
+	if al.DryRun {
+		return build(registry.UsedResources{Ports: al.Registry.UsedPorts()})
+	}
+
+	var alloc *Allocation
+	if _, err := al.Registry.AllocateTx(worktreePath, func(used registry.UsedResources) (registry.Allocation, error) {
+		a, berr := build(used)
+		if berr != nil {
+			return nil, berr
+		}
+		alloc = a
+		return a.ToRegistryEntry(), nil
+	}); err != nil {
+		return nil, err
+	}
+	return alloc, nil
 }
 
 func (al *Allocator) allocateNew(worktreePath, worktreeName, branch string) (*Allocation, error) {
@@ -460,9 +486,6 @@ var browserBlockedPorts = map[int]bool{
 	6669: true, 6679: true, 6697: true, 10080: true,
 }
 
-func (al *Allocator) nextAvailablePortsFrom(start, count int) []int {
-	return al.nextAvailablePortsFromUsed(start, count, al.Registry.UsedPorts())
-}
 
 // nextAvailablePortsFromUsed scans for a free contiguous port block starting at
 // start, treating usedPorts as already claimed. It keeps the live IsPortFree
