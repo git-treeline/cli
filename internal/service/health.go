@@ -43,6 +43,7 @@ type healthDeps struct {
 	isPfReloadDaemonInstalled func() bool
 	pfReloadDaemonSupported   bool
 	routerUsesTLS             func() bool
+	loopbackListen            func(network, address string) (net.Listener, error)
 	// Linux boot-time redirect persistence (systemd oneshot). The macOS
 	// equivalent is the pf-reload LaunchDaemon above; these are the Linux
 	// analog so `gtl doctor` flags a missing persistence unit there too.
@@ -65,6 +66,7 @@ func defaultHealthDeps() healthDeps {
 		isPfReloadDaemonInstalled:         IsPfReloadDaemonInstalled,
 		pfReloadDaemonSupported:           runtime.GOOS == "darwin",
 		routerUsesTLS:                     proxy.IsCAInstalled,
+		loopbackListen:                    net.Listen,
 		isPortForwardPersistenceInstalled: IsLinuxPortForwardPersistenceInstalled,
 		portForwardPersistenceSupported:   runtime.GOOS == "linux",
 	}
@@ -78,6 +80,7 @@ func CheckHealth(routerPort int, cliVersion string) []HealthCheck {
 func checkHealthWith(d healthDeps, routerPort int, cliVersion string) []HealthCheck {
 	var checks []HealthCheck
 
+	checks = append(checks, checkLoopback(d))
 	checks = append(checks, checkServiceRegistered(d))
 	checks = append(checks, checkBinaryMatch(d))
 	checks = append(checks, checkRouterVersion(d, cliVersion))
@@ -118,6 +121,42 @@ func checkLinuxPortForwardPersistence(d healthDeps) HealthCheck {
 		Name:   "port_forward_persistence",
 		Status: "ok",
 		Detail: "installed (443 redirect survives reboot)",
+	}
+}
+
+// checkLoopback binds a throwaway 127.0.0.1 port and immediately dials it.
+// If binding or dialing fails, the machine's loopback interface is broken or
+// being filtered (a local firewall, VPN kill-switch, or endpoint-security
+// agent). That matters because it invalidates every downstream "router
+// unreachable" verdict: the router could be perfectly healthy while nothing
+// local can reach it. Surfacing this plainly stops doctor from blaming the
+// router for a machine-level network policy.
+func checkLoopback(d healthDeps) HealthCheck {
+	ln, err := d.loopbackListen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return HealthCheck{
+			Name:   "loopback",
+			Status: "error",
+			Detail: fmt.Sprintf("could not bind a 127.0.0.1 port: %v", err),
+			Fix:    "check for a local firewall, VPN, or security agent blocking loopback",
+		}
+	}
+	defer func() { _ = ln.Close() }()
+
+	conn, err := d.dialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		return HealthCheck{
+			Name:   "loopback",
+			Status: "error",
+			Detail: "bound a 127.0.0.1 port but could not connect to it — loopback is being filtered (local firewall, VPN, or security agent)",
+			Fix:    "allow loopback traffic; while this is broken every 'router unreachable' result is meaningless",
+		}
+	}
+	_ = conn.Close()
+	return HealthCheck{
+		Name:   "loopback",
+		Status: "ok",
+		Detail: "127.0.0.1 accepts local connections",
 	}
 }
 

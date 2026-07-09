@@ -39,6 +39,7 @@ func TestClassifyPortConfig_ConflictWhenBaseEqualsRouter(t *testing.T) {
 // healthyChecks returns a healthcheck slice where every link is "ok".
 func healthyChecks() []service.HealthCheck {
 	return []service.HealthCheck{
+		{Name: "loopback", Status: "ok"},
 		{Name: "service", Status: "ok"},
 		{Name: "binary", Status: "ok"},
 		{Name: "router_version", Status: "ok"},
@@ -57,6 +58,35 @@ func TestEvaluateRequestFlow_AllHealthy(t *testing.T) {
 	})
 	if step != nil {
 		t.Errorf("expected no failing step, got %+v", step)
+	}
+}
+
+// A broken loopback must reframe every downstream "unreachable" verdict —
+// even an app that isn't listening is a red herring when 127.0.0.1 is filtered.
+func TestEvaluateRequestFlow_BrokenLoopbackReframesEverything(t *testing.T) {
+	checks := healthyChecks()
+	for i := range checks {
+		if checks[i].Name == "loopback" {
+			checks[i].Status = "error"
+			checks[i].Detail = "loopback is being filtered"
+			checks[i].Fix = "allow loopback traffic"
+		}
+	}
+	step := evaluateRequestFlow(flowInput{
+		allocatedPorts: []int{3022},
+		appListening:   false, // would normally win, but loopback outranks it
+		startCommand:   "bin/dev",
+		serviceChecks:  checks,
+		caInstalled:    true,
+	})
+	if step == nil {
+		t.Fatal("expected a failing step")
+	}
+	if !strings.Contains(step.label, "loopback") {
+		t.Errorf("expected loopback to be surfaced first, got %q", step.label)
+	}
+	if step.fix != "allow loopback traffic" {
+		t.Errorf("expected loopback fix, got %q", step.fix)
 	}
 }
 

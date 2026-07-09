@@ -81,6 +81,7 @@ func allHealthy() healthDeps {
 		isPfReloadDaemonInstalled:  func() bool { return true },
 		pfReloadDaemonSupported:    true,
 		routerUsesTLS:              func() bool { return false },
+		loopbackListen:             net.Listen,
 	}
 }
 
@@ -89,8 +90,8 @@ func allHealthy() healthDeps {
 func TestCheckHealthWith_AllHealthy(t *testing.T) {
 	checks := checkHealthWith(allHealthy(), 8443, "1.0.0")
 
-	if len(checks) != 7 {
-		t.Fatalf("expected 7 checks, got %d", len(checks))
+	if len(checks) != 8 {
+		t.Fatalf("expected 8 checks, got %d", len(checks))
 	}
 	for _, c := range checks {
 		if c.Status != "ok" {
@@ -125,11 +126,13 @@ func TestCheckHealthWith_AllBroken(t *testing.T) {
 		isPfReloadDaemonInstalled:  func() bool { return false },
 		pfReloadDaemonSupported:    true,
 		routerUsesTLS:              func() bool { return false },
+		loopbackListen:             net.Listen,
 	}
 
 	checks := checkHealthWith(d, 8443, "1.0.0")
 
 	expected := map[string]string{
+		"loopback":          "error", // binds, but the fake dialer refuses
 		"service":           "error",
 		"binary":            "warn",
 		"router_version":    "warn",
@@ -147,6 +150,42 @@ func TestCheckHealthWith_AllBroken(t *testing.T) {
 		if c.Status != want {
 			t.Errorf("check %q: got %s, want %s", c.Name, c.Status, want)
 		}
+	}
+}
+
+// --- checkLoopback ---
+
+func TestCheckLoopback_Ok(t *testing.T) {
+	d := allHealthy() // real net.Listen + fake dial that succeeds
+	c := checkLoopback(d)
+	if c.Status != "ok" {
+		t.Errorf("expected ok, got %s (%s)", c.Status, c.Detail)
+	}
+}
+
+func TestCheckLoopback_BindFails(t *testing.T) {
+	d := allHealthy()
+	d.loopbackListen = func(string, string) (net.Listener, error) {
+		return nil, fmt.Errorf("operation not permitted")
+	}
+	c := checkLoopback(d)
+	if c.Status != "error" {
+		t.Fatalf("expected error, got %s", c.Status)
+	}
+	if !strings.Contains(c.Detail, "could not bind") {
+		t.Errorf("expected bind detail, got %q", c.Detail)
+	}
+}
+
+func TestCheckLoopback_DialFails(t *testing.T) {
+	d := allHealthy()
+	d.dialTimeout = fakeDial(false) // bound but nothing can connect
+	c := checkLoopback(d)
+	if c.Status != "error" {
+		t.Fatalf("expected error, got %s", c.Status)
+	}
+	if !strings.Contains(c.Detail, "filtered") {
+		t.Errorf("expected filtered detail, got %q", c.Detail)
 	}
 }
 

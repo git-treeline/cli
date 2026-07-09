@@ -352,6 +352,20 @@ type flowInput struct {
 }
 
 func evaluateRequestFlow(in flowInput) *flowStep {
+	// 0. Loopback sanity. If 127.0.0.1 itself is filtered, every downstream
+	// "unreachable" verdict (app not listening, router port dead, port 443
+	// closed) is a red herring — nothing local can connect regardless of the
+	// router's actual health. Surface this first and plainly.
+	for _, c := range in.serviceChecks {
+		if c.Name == "loopback" && c.Status == "error" {
+			return &flowStep{
+				label:  "loopback (127.0.0.1)",
+				detail: c.Detail + " — this invalidates the 'unreachable' results below; the router itself may be fine",
+				fix:    c.Fix,
+			}
+		}
+	}
+
 	// 1. App listening on its allocated port?
 	if len(in.allocatedPorts) > 0 && !in.appListening {
 		fix := "start the dev server"
@@ -417,6 +431,7 @@ func doctorServe(checks []service.HealthCheck) {
 	fmt.Println("\nServe")
 
 	displayNames := map[string]string{
+		"loopback":          "Loopback",
 		"service":           "Service",
 		"binary":            "Binary",
 		"router_version":    "Router version",
