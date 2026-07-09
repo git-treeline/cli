@@ -143,29 +143,88 @@ func (r *Registry) FindProjectBranch(project, branch string) Allocation {
 }
 
 func (r *Registry) UsedPorts() []int {
+	return allocationsUsedPorts(r.Allocations())
+}
+
+func (r *Registry) UsedRedisDbs() []int {
+	return allocationsUsedRedisDbs(r.Allocations())
+}
+
+// allocationsUsedPorts derives every port claimed by the given allocations,
+// covering both the "ports" array and the legacy single "port" field. It is a
+// pure function so it can be evaluated against an in-lock RegistryData snapshot.
+func allocationsUsedPorts(allocs []Allocation) []int {
 	var ports []int
-	for _, a := range r.Allocations() {
-		if ps, ok := a["ports"].([]any); ok {
-			for _, p := range ps {
-				if f, ok := p.(float64); ok {
-					ports = append(ports, int(f))
-				}
-			}
-		} else if p, ok := a["port"].(float64); ok {
-			ports = append(ports, int(p))
-		}
+	for _, a := range allocs {
+		ports = append(ports, ExtractPorts(a)...)
 	}
 	return ports
 }
 
-func (r *Registry) UsedRedisDbs() []int {
+// allocationsUsedRedisDbs derives every Redis database index claimed by the
+// given allocations. Pure, for the same reason as allocationsUsedPorts.
+func allocationsUsedRedisDbs(allocs []Allocation) []int {
 	var dbs []int
-	for _, a := range r.Allocations() {
+	for _, a := range allocs {
 		if v, ok := a["redis_db"].(float64); ok {
 			dbs = append(dbs, int(v))
 		}
 	}
 	return dbs
+}
+
+// UsedResources is the in-lock snapshot of already-claimed resources handed to
+// an AllocateTx compute callback so it can choose non-colliding values.
+type UsedResources struct {
+	Ports    []int
+	RedisDbs []int
+}
+
+// AllocateTx performs resource selection and persistence as a single locked
+// transaction. Under one lock acquisition it computes the resources already in
+// use (excluding any prior entry for worktree, which is being replaced), invokes
+// compute to choose a new allocation against that fresh state, and — only if
+// compute succeeds — applies the same worktree-filtering, links-preservation,
+// allocated_at stamping and append that Allocate does before saving. If compute
+// returns an error nothing is written. This closes the read→choose→write race
+// where two concurrent callers pick the same Redis DB from a stale snapshot.
+func (r *Registry) AllocateTx(worktree string, compute func(used UsedResources) (Allocation, error)) (Allocation, error) {
+	resolved := resolvePath(worktree)
+	var result Allocation
+	err := r.withLockE(func(data *RegistryData) error {
+		filtered := make([]Allocation, 0, len(data.Allocations))
+		var links map[string]any
+		for _, a := range data.Allocations {
+			if GetString(a, "worktree") != resolved {
+				filtered = append(filtered, a)
+			} else if l, ok := a["links"].(map[string]any); ok && len(l) > 0 {
+				links = l
+			}
+		}
+
+		entry, cerr := compute(UsedResources{
+			Ports:    allocationsUsedPorts(filtered),
+			RedisDbs: allocationsUsedRedisDbs(filtered),
+		})
+		if cerr != nil {
+			return cerr
+		}
+
+		entry["worktree"] = resolved
+		if links != nil {
+			entry["links"] = links
+		}
+		if entry["allocated_at"] == nil {
+			entry["allocated_at"] = time.Now().UTC().Format(time.RFC3339)
+		}
+		data.Allocations = append(filtered, entry)
+		result = entry
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (r *Registry) Allocate(entry Allocation) error {
@@ -482,6 +541,16 @@ func listGitWorktreesFor(dir string) map[string]bool {
 }
 
 func (r *Registry) withLock(fn func(data *RegistryData)) error {
+	return r.withLockE(func(data *RegistryData) error {
+		fn(data)
+		return nil
+	})
+}
+
+// withLockE runs fn under the exclusive registry file lock, saving only when fn
+// returns nil. Callers that must abort the transaction (leaving the file
+// untouched) return a non-nil error from fn.
+func (r *Registry) withLockE(fn func(data *RegistryData) error) error {
 	if err := os.MkdirAll(filepath.Dir(r.Path), platform.DirMode); err != nil {
 		return err
 	}
@@ -516,7 +585,9 @@ func (r *Registry) withLock(fn func(data *RegistryData)) error {
 	if err != nil {
 		return err
 	}
-	fn(&data)
+	if err := fn(&data); err != nil {
+		return err
+	}
 	return r.save(data)
 }
 

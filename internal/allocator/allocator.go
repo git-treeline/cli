@@ -27,6 +27,10 @@ type Allocator struct {
 	// allocated port held by the worktree's own dev server isn't mistaken for a
 	// foreign squatter. Injectable for tests; nil falls back to a socket probe.
 	SupervisorLive func(worktreePath string) bool
+	// DryRun selects resources against the current registry snapshot without
+	// persisting them (for previewing an allocation). When false, a new-worktree
+	// allocation is chosen and written atomically inside the registry lock.
+	DryRun bool
 }
 
 // supervisorResponding probes the worktree's supervisor control socket. It is
@@ -235,14 +239,16 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string, mainWorktr
 
 func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*Allocation, error) {
 	count := al.ProjectConfig.PortsNeeded()
-	if count > al.UserConfig.PortIncrement() {
-		return nil, fmt.Errorf("port_count (%d) exceeds port.increment (%d); increase port.increment in your config.json to at least %d",
-			count, al.UserConfig.PortIncrement(), count)
+	if err := al.validatePortCount(count); err != nil {
+		return nil, err
 	}
 
 	project := al.ProjectConfig.Project()
 	var ports []int
 	if base, ok := al.resolveReservation(project, branch); ok {
+		if err := al.validateReservedPorts(base, count, al.Registry.UsedPorts()); err != nil {
+			return nil, err
+		}
 		ports = make([]int, count)
 		for i := range count {
 			ports[i] = base + i
@@ -267,45 +273,116 @@ func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*A
 
 func (al *Allocator) allocateNew(worktreePath, worktreeName, branch string) (*Allocation, error) {
 	count := al.ProjectConfig.PortsNeeded()
-	if count > al.UserConfig.PortIncrement() {
-		return nil, fmt.Errorf("port_count (%d) exceeds port.increment (%d); increase port.increment in your config.json to at least %d",
-			count, al.UserConfig.PortIncrement(), count)
+	if err := al.validatePortCount(count); err != nil {
+		return nil, err
 	}
 
 	project := al.ProjectConfig.Project()
-	var ports []int
-	if branch != "" {
-		if base, ok := al.resolveBranchReservation(project, branch); ok {
-			ports = make([]int, count)
-			for i := range count {
-				ports[i] = base + i
+	database := al.buildDatabaseName(worktreeName)
+	adapter := al.ProjectConfig.DatabaseAdapter()
+
+	// build chooses ports and Redis isolation against a snapshot of already-used
+	// resources. It is run inside the registry lock for a real allocation — so
+	// the read of used resources, the choice, and the write are one atomic
+	// transaction and two concurrent runs can't pick the same port block or
+	// Redis DB — and against the current snapshot for a dry-run preview, which
+	// never persists.
+	build := func(used registry.UsedResources) (*Allocation, error) {
+		var ports []int
+		if branch != "" {
+			if base, ok := al.resolveBranchReservation(project, branch); ok {
+				if verr := al.validateReservedPorts(base, count, used.Ports); verr != nil {
+					return nil, verr
+				}
+				ports = make([]int, count)
+				for i := range count {
+					ports[i] = base + i
+				}
 			}
 		}
-	}
-	if ports == nil {
-		ports = al.nextAvailablePortsFrom(al.UserConfig.PortBase()+al.UserConfig.PortIncrement(), count)
-	}
-	if ports == nil {
-		return nil, fmt.Errorf("no available port block of size %d found (all ports in use or reserved)", count)
+		if ports == nil {
+			ports = al.nextAvailablePortsFromUsed(al.UserConfig.PortBase()+al.UserConfig.PortIncrement(), count, used.Ports)
+		}
+		if ports == nil {
+			return nil, fmt.Errorf("no available port block of size %d found (all ports in use or reserved)", count)
+		}
+		redisDB, redisPrefix, rerr := al.allocateRedisFrom(worktreeName, used.RedisDbs)
+		if rerr != nil {
+			return nil, rerr
+		}
+		return &Allocation{
+			Project:         project,
+			Worktree:        worktreePath,
+			WorktreeName:    worktreeName,
+			Port:            ports[0],
+			Ports:           ports,
+			Branch:          branch,
+			Database:        database,
+			DatabaseAdapter: adapter,
+			RedisDB:         redisDB,
+			RedisPrefix:     redisPrefix,
+		}, nil
 	}
 
-	redisDB, redisPrefix, err := al.allocateRedis(worktreeName)
-	if err != nil {
+	if al.DryRun {
+		return build(registry.UsedResources{
+			Ports:    al.Registry.UsedPorts(),
+			RedisDbs: al.Registry.UsedRedisDbs(),
+		})
+	}
+
+	var alloc *Allocation
+	if _, err := al.Registry.AllocateTx(worktreePath, func(used registry.UsedResources) (registry.Allocation, error) {
+		a, berr := build(used)
+		if berr != nil {
+			return nil, berr
+		}
+		alloc = a
+		return a.ToRegistryEntry(), nil
+	}); err != nil {
 		return nil, err
 	}
-	database := al.buildDatabaseName(worktreeName)
+	return alloc, nil
+}
 
-	return &Allocation{
-		Project:         project,
-		Worktree:        worktreePath,
-		WorktreeName:    worktreeName,
-		Port:            ports[0],
-		Ports:           ports,
-		Database:        database,
-		DatabaseAdapter: al.ProjectConfig.DatabaseAdapter(),
-		RedisDB:         redisDB,
-		RedisPrefix:     redisPrefix,
-	}, nil
+// validatePortCount rejects non-positive port counts (which would otherwise
+// produce an empty port block and panic on ports[0]) and counts that exceed the
+// increment (blocks would overlap the next worktree's range).
+func (al *Allocator) validatePortCount(count int) error {
+	if count <= 0 {
+		return fmt.Errorf("port_count must be at least 1, got %d; set a positive port_count in %s",
+			count, config.ProjectConfigFile)
+	}
+	if count > al.UserConfig.PortIncrement() {
+		return fmt.Errorf("port_count (%d) exceeds port.increment (%d); increase port.increment in your config.json to at least %d",
+			count, al.UserConfig.PortIncrement(), count)
+	}
+	return nil
+}
+
+// validateReservedPorts subjects a reserved port block to the same hard
+// exclusions the scan path enforces: it must not collide with the router port,
+// a browser-blocked (WHATWG bad) port, or a port already allocated to another
+// worktree. A reservation tripping any of these is a real misconfiguration, so
+// fail loud rather than hand out a port that can't work.
+func (al *Allocator) validateReservedPorts(base, count int, usedPorts []int) error {
+	usedSet := make(map[int]bool, len(usedPorts))
+	for _, p := range usedPorts {
+		usedSet[p] = true
+	}
+	routerPort := al.UserConfig.RouterPort()
+	for i := range count {
+		port := base + i
+		switch {
+		case port == routerPort:
+			return fmt.Errorf("reserved port %d conflicts with router.port (%d); choose a different reservation base", port, routerPort)
+		case browserBlockedPorts[port]:
+			return fmt.Errorf("reserved port %d is browser-blocked (WHATWG bad port) and browsers will refuse it; choose a different reservation base", port)
+		case usedSet[port]:
+			return fmt.Errorf("reserved port %d is already allocated to another worktree; choose a different reservation base", port)
+		}
+	}
+	return nil
 }
 
 // resolveReservation checks for a port reservation for a main repo.
@@ -384,8 +461,17 @@ var browserBlockedPorts = map[int]bool{
 }
 
 func (al *Allocator) nextAvailablePortsFrom(start, count int) []int {
+	return al.nextAvailablePortsFromUsed(start, count, al.Registry.UsedPorts())
+}
+
+// nextAvailablePortsFromUsed scans for a free contiguous port block starting at
+// start, treating usedPorts as already claimed. It keeps the live IsPortFree
+// bind-verify as belt-and-suspenders even when called inside the registry lock:
+// the lock guarantees no other gtl run races us, but a foreign process can still
+// hold a port, so a bound candidate advances to the next block.
+func (al *Allocator) nextAvailablePortsFromUsed(start, count int, usedPorts []int) []int {
 	usedSet := make(map[int]bool)
-	for _, p := range al.Registry.UsedPorts() {
+	for _, p := range usedPorts {
 		usedSet[p] = true
 	}
 	reserved := al.UserConfig.ReservedPorts()
@@ -434,9 +520,12 @@ func CheckPortsListening(ports []int) bool {
 	return false
 }
 
-func (al *Allocator) allocateRedis(worktreeName string) (int, string, error) {
+// allocateRedisFrom picks Redis isolation against a caller-supplied set of
+// already-used database indices. The transactional allocateNew path passes the
+// in-lock snapshot so DB selection cannot silently collide with a concurrent run.
+func (al *Allocator) allocateRedisFrom(worktreeName string, usedDbs []int) (int, string, error) {
 	if al.UserConfig.RedisStrategy() == "database" {
-		db, err := al.nextAvailableRedisDB()
+		db, err := al.nextAvailableRedisDBFrom(usedDbs)
 		if err != nil {
 			return 0, "", err
 		}
@@ -445,13 +534,15 @@ func (al *Allocator) allocateRedis(worktreeName string) (int, string, error) {
 	return 0, fmt.Sprintf("%s:%s", al.ProjectConfig.Project(), worktreeName), nil
 }
 
-// nextAvailableRedisDB returns the lowest free Redis database index in the
-// range 1..capacity-1 (db0 is reserved for the main/template worktree). It
-// fails loud when every slot is taken rather than silently colliding onto a
-// shared database — capacity exhaustion is a real error, not a fallback.
-func (al *Allocator) nextAvailableRedisDB() (int, error) {
+// nextAvailableRedisDBFrom returns the lowest free Redis database index in the
+// range 1..capacity-1 (db0 is reserved for the main/template worktree), treating
+// usedDbs as taken. It fails loud when every slot is in use rather than silently
+// colliding onto a shared database — capacity exhaustion is a real error, not a
+// fallback. Uniqueness is guaranteed only when usedDbs is a fresh in-lock
+// snapshot: a logical DB number can't be bind-tested, so the lock is the guarantee.
+func (al *Allocator) nextAvailableRedisDBFrom(usedDbs []int) (int, error) {
 	usedSet := make(map[int]bool)
-	for _, db := range al.Registry.UsedRedisDbs() {
+	for _, db := range usedDbs {
 		usedSet[db] = true
 	}
 	capacity := al.UserConfig.RedisDatabases()

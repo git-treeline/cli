@@ -100,6 +100,7 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	resolverPkg := resolve.New(s.Registry, s.WorktreePath, branch)
 	s.Resolver = resolverPkg.Resolve
 	hadExisting := s.Registry.Find(s.WorktreePath) != nil
+	s.Allocator.DryRun = s.Options.DryRun
 	alloc, err := s.Allocator.Allocate(s.WorktreePath, worktreeName, isMain, branch)
 	if err != nil {
 		return nil, err
@@ -128,7 +129,10 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	} else {
 		s.log("Allocating port %d for '%s'", alloc.Port, worktreeName)
 	}
-	if !alloc.Reused {
+	// A new (non-main) allocation is already persisted atomically inside the
+	// allocator's registry transaction; only the main-worktree path, which
+	// selects without persisting, needs to be written here.
+	if !alloc.Reused && isMain {
 		if err := s.Registry.Allocate(alloc.ToRegistryEntry()); err != nil {
 			return nil, fmt.Errorf("registering allocation: %w", err)
 		}

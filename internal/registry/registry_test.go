@@ -496,3 +496,112 @@ func TestRegistry_FilePermissions(t *testing.T) {
 		t.Errorf("lock file mode = %o, want %o", got, platform.PrivateFileMode)
 	}
 }
+
+func TestAllocateTx_WritesOnSuccess(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	got, err := reg.AllocateTx("/tmp/wt/branch-a", func(used UsedResources) (Allocation, error) {
+		if len(used.Ports) != 0 || len(used.RedisDbs) != 0 {
+			t.Errorf("expected empty used resources on fresh registry, got %+v", used)
+		}
+		return Allocation{
+			"project": "salt",
+			"port":    3010,
+			"ports":   []any{3010},
+		}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["allocated_at"] == nil {
+		t.Error("expected allocated_at to be stamped")
+	}
+	found := reg.Find("/tmp/wt/branch-a")
+	if found == nil {
+		t.Fatal("expected allocation to be persisted")
+	}
+	if GetString(found, "project") != "salt" {
+		t.Errorf("expected persisted project salt, got %q", GetString(found, "project"))
+	}
+}
+
+func TestAllocateTx_NoWriteOnError(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	sentinel := "compute failed"
+	_, err := reg.AllocateTx("/tmp/wt/branch-a", func(used UsedResources) (Allocation, error) {
+		return nil, errString(sentinel)
+	})
+	if err == nil || err.Error() != sentinel {
+		t.Fatalf("expected sentinel error, got %v", err)
+	}
+	if reg.Find("/tmp/wt/branch-a") != nil {
+		t.Error("expected nothing to be persisted when compute errors")
+	}
+	if len(reg.Allocations()) != 0 {
+		t.Errorf("expected empty registry, got %d allocations", len(reg.Allocations()))
+	}
+}
+
+func TestAllocateTx_SeesFreshUsedResources(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	if err := reg.Allocate(Allocation{
+		"worktree": "/tmp/wt/a",
+		"ports":    []any{float64(3010)},
+		"redis_db": float64(1),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := reg.AllocateTx("/tmp/wt/b", func(used UsedResources) (Allocation, error) {
+		if len(used.Ports) != 1 || used.Ports[0] != 3010 {
+			t.Errorf("expected to see port 3010 in use, got %v", used.Ports)
+		}
+		if len(used.RedisDbs) != 1 || used.RedisDbs[0] != 1 {
+			t.Errorf("expected to see redis_db 1 in use, got %v", used.RedisDbs)
+		}
+		return Allocation{"ports": []any{3020}, "redis_db": 2}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAllocateTx_ExcludesReplacedWorktreeFromUsed(t *testing.T) {
+	reg := newTestRegistry(t)
+
+	if err := reg.Allocate(Allocation{
+		"worktree": "/tmp/wt/a",
+		"ports":    []any{float64(3010)},
+		"redis_db": float64(3),
+		"links":    map[string]any{"salt": "main"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := reg.AllocateTx("/tmp/wt/a", func(used UsedResources) (Allocation, error) {
+		if len(used.Ports) != 0 {
+			t.Errorf("worktree's own prior ports should be excluded, got %v", used.Ports)
+		}
+		if len(used.RedisDbs) != 0 {
+			t.Errorf("worktree's own prior redis_db should be excluded, got %v", used.RedisDbs)
+		}
+		return Allocation{"ports": []any{3010}, "redis_db": 3}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Links from the replaced entry must be preserved.
+	found := reg.Find("/tmp/wt/a")
+	if links, ok := found["links"].(map[string]any); !ok || links["salt"] != "main" {
+		t.Errorf("expected preserved links, got %v", found["links"])
+	}
+	if len(reg.Allocations()) != 1 {
+		t.Errorf("expected the worktree to be replaced, not duplicated; got %d", len(reg.Allocations()))
+	}
+}
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
