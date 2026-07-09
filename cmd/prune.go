@@ -68,6 +68,12 @@ var pruneCmd = &cobra.Command{
 			return nil
 		}
 
+		// Snapshot before pruning so we can tear down runtime state (supervisor
+		// + managed hosts entry) for whatever gets removed. Prune/PruneStale
+		// return only a count, and the removed set differs by variant, so a
+		// before/after diff keeps this independent of which path ran.
+		before := reg.Allocations()
+
 		var count int
 		var err error
 		if pruneStale {
@@ -83,6 +89,8 @@ var pruneCmd = &cobra.Command{
 		if count == 0 {
 			fmt.Println("Nothing to prune.")
 		} else {
+			removed := removedAllocations(before, reg.Allocations())
+			teardownRuntimeState(removed)
 			fmt.Printf("Pruned %d stale allocation(s).\n", count)
 		}
 		return nil
@@ -179,6 +187,8 @@ func runPruneMerged() error {
 		return err
 	}
 
+	teardownRuntimeState(matches)
+
 	if pruneRemoveWorktree {
 		for _, p := range paths {
 			removeWorktreeDir(p, pruneForce)
@@ -187,4 +197,22 @@ func runPruneMerged() error {
 
 	fmt.Printf("Released %d allocation(s).\n", count)
 	return nil
+}
+
+// removedAllocations returns the entries present in before but absent from
+// after, matched by worktree path. Used to recover the set pruned by
+// Prune/PruneStale (which report only a count) so their runtime state can be
+// torn down.
+func removedAllocations(before, after []registry.Allocation) []registry.Allocation {
+	survived := make(map[string]bool, len(after))
+	for _, a := range after {
+		survived[format.GetStr(format.Allocation(a), "worktree")] = true
+	}
+	var removed []registry.Allocation
+	for _, a := range before {
+		if !survived[format.GetStr(format.Allocation(a), "worktree")] {
+			removed = append(removed, a)
+		}
+	}
+	return removed
 }
