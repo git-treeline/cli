@@ -210,10 +210,9 @@ func (d *Daemon) addClient(c *client) error {
 		d.idleTimer.Stop()
 		d.idleTimer = nil
 	}
-	routes := d.routesLocked()
 	d.mu.Unlock()
 
-	return d.applyRoutes(routes)
+	return d.applyRoutes()
 }
 
 func (d *Daemon) dropClient(c *client) {
@@ -224,20 +223,22 @@ func (d *Daemon) dropClient(c *client) {
 		return
 	}
 	delete(d.clients, c)
-	routes := d.routesLocked()
 	empty := len(d.clients) == 0
 	d.mu.Unlock()
 
 	_ = c.conn.Close()
 
+	// Arm the idle-shutdown countdown before applying: once the last client
+	// leaves we want the timer running even though applyRoutes (seeing zero
+	// live routes) will itself stop cloudflared eagerly. Delegating the stop
+	// to applyRoutes keeps a single code path for turning cloudflared on and
+	// off, and — because applyRoutes reads live state — a client that
+	// re-registers in this same window still gets a correct ingress.
 	if empty {
 		d.armIdleTimer()
-		// Stop cloudflared eagerly so we don't keep an idle tunnel up.
-		d.stopCloudflared()
-		return
 	}
 
-	if err := d.applyRoutes(routes); err != nil {
+	if err := d.applyRoutes(); err != nil {
 		d.logf("apply routes after drop: %v", err)
 	}
 }
@@ -251,14 +252,29 @@ func (d *Daemon) routesLocked() []tunnel.HostRoute {
 	return routes
 }
 
-// applyRoutes writes a fresh cloudflared config and (re)starts cloudflared
-// so the new ingress takes effect. Restart-on-change is the explicit
-// tradeoff: SIGHUP-based reload isn't reliable across cloudflared versions,
-// so adding or removing one branch briefly interrupts the others sharing
-// this daemon. applyMu serializes concurrent callers.
-func (d *Daemon) applyRoutes(routes []tunnel.HostRoute) error {
+// applyRoutes writes a fresh cloudflared config for the CURRENT registration
+// set and (re)starts cloudflared so the new ingress takes effect.
+//
+// It deliberately reads live state under d.mu rather than accepting a
+// caller-supplied snapshot: applyMu serializes callers but does not preserve
+// their arrival order, so a snapshot captured earlier could be applied last
+// and silently clobber a newer one (dropping a hostname whose client was
+// already told it registered). Reading live state means whichever call wins
+// the applyMu race applies the complete set. The cost is that two coalescing
+// changes may each apply the same live state — a harmless redundant restart —
+// which we accept over the risk of a missing route.
+//
+// Restart-on-change is the explicit tradeoff: SIGHUP-based reload isn't
+// reliable across cloudflared versions, so adding or removing one branch
+// briefly interrupts the others sharing this daemon. Lock order: applyMu is
+// always acquired before d.mu, never the reverse.
+func (d *Daemon) applyRoutes() error {
 	d.applyMu.Lock()
 	defer d.applyMu.Unlock()
+
+	d.mu.Lock()
+	routes := d.routesLocked()
+	d.mu.Unlock()
 
 	if len(routes) == 0 {
 		d.stopCloudflaredLocked()
