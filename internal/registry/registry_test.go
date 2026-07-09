@@ -605,3 +605,30 @@ func TestAllocateTx_ExcludesReplacedWorktreeFromUsed(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+func TestOrphanedBranchAllocations(t *testing.T) {
+	reg := newTestRegistry(t)
+	dir := t.TempDir()
+	live := filepath.Join(dir, "live")
+	dead := filepath.Join(dir, "dead")
+	if err := os.MkdirAll(live, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dead, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = reg.Allocate(Allocation{"project": "p", "worktree": live, "branch": "keeps"})
+	_ = reg.Allocate(Allocation{"project": "p", "worktree": dead, "branch": "gone"})
+	// Directory removed entirely — ordinary staleness, must NOT be flagged here.
+	_ = reg.Allocate(Allocation{"project": "p", "worktree": filepath.Join(dir, "missing"), "branch": "x"})
+
+	branchExists := func(wt, branch string) bool { return branch != "gone" }
+	orphans := reg.orphanedBranchAllocations(branchExists)
+	if len(orphans) != 1 {
+		t.Fatalf("expected 1 orphan, got %d", len(orphans))
+	}
+	if GetString(orphans[0], "branch") != "gone" {
+		t.Errorf("expected the deleted-branch alloc, got %v", orphans[0])
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"github.com/git-treeline/cli/internal/confirm"
 	"github.com/git-treeline/cli/internal/format"
 	"github.com/git-treeline/cli/internal/registry"
+	"github.com/git-treeline/cli/internal/style"
 	"github.com/git-treeline/cli/internal/worktree"
 	"github.com/spf13/cobra"
 )
@@ -95,6 +96,7 @@ var pruneCmd = &cobra.Command{
 		}
 
 		gcDanglingEdges(reg)
+		surfaceOrphanedBranches(reg)
 		return nil
 	},
 }
@@ -223,6 +225,24 @@ func gcDanglingEdges(reg *registry.Registry) {
 	if len(removed) > 0 {
 		fmt.Printf("Removed %d dangling relationship edge(s).\n", len(removed))
 	}
+}
+
+// surfaceOrphanedBranches warns about allocations whose directory survives but
+// whose branch was deleted out from under it — the route now points at a dead
+// branch. Prune can't safely remove these (the worktree dir is still there and
+// may hold work), so this is informational: it tells the user where to look.
+func surfaceOrphanedBranches(reg *registry.Registry) {
+	orphaned := reg.OrphanedBranchAllocations()
+	if len(orphaned) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Println(style.Warnf("%d allocation(s) point at a deleted branch (worktree dir still present):", len(orphaned)))
+	for _, a := range orphaned {
+		fa := format.Allocation(a)
+		fmt.Printf("  %s:%s  %s\n", format.GetStr(fa, "project"), format.DisplayName(fa), format.GetStr(fa, "worktree"))
+	}
+	fmt.Println(style.Dimf("  Recreate the branch, or release with: gtl release <path>"))
 }
 
 // removedAllocations returns the entries present in before but absent from

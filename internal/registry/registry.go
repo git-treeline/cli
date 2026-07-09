@@ -494,6 +494,54 @@ func (r *Registry) GCDanglingEdges(resolvable func(RepoRef) bool) ([]Edge, error
 	return removed, err
 }
 
+// OrphanedBranchAllocations returns allocations whose worktree directory still
+// exists on disk but whose recorded branch no longer resolves in that
+// worktree's git repo. These are the inverse of the usual stale case: the dir
+// survives (so PruneStale keeps it) yet its route points at a branch that was
+// deleted underneath it, leaving a live-looking allocation aimed at nothing.
+func (r *Registry) OrphanedBranchAllocations() []Allocation {
+	return r.orphanedBranchAllocations(branchExistsInWorktree)
+}
+
+// orphanedBranchAllocations is the testable core of OrphanedBranchAllocations
+// with the git branch-existence check injected.
+func (r *Registry) orphanedBranchAllocations(branchExists func(worktree, branch string) bool) []Allocation {
+	var out []Allocation
+	for _, a := range r.Allocations() {
+		wt := GetString(a, "worktree")
+		branch := GetString(a, "branch")
+		if wt == "" || branch == "" {
+			continue
+		}
+		info, err := os.Stat(wt)
+		if err != nil || !info.IsDir() {
+			continue // directory gone — that's ordinary staleness, not this case
+		}
+		if !branchExists(wt, branch) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// branchExistsInWorktree reports whether branch still resolves as a local ref
+// in the git repo backing the given worktree directory. A failed git call is
+// treated as "exists" so a transient/unreadable repo never mislabels a live
+// allocation as orphaned.
+func branchExistsInWorktree(worktreePath, branch string) bool {
+	err := exec.Command("git", "-C", worktreePath, "show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run()
+	if err == nil {
+		return true
+	}
+	// Distinguish "branch missing" (exit 1) from "git couldn't run" (other):
+	// only a clean non-zero exit means the ref is genuinely absent.
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return false
+	}
+	return true
+}
+
 func (r *Registry) Prune() (int, error) {
 	count := 0
 	err := r.withLock(func(data *RegistryData) {
