@@ -6,7 +6,9 @@ package supervisor
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -17,6 +19,12 @@ import (
 	"syscall"
 	"time"
 )
+
+// errStopInProgress is returned by startChildLocked when a stop is mid-flight
+// (s.stopping true, s.mu released to wait for the old child). The socket "start"
+// handler surfaces this as a retry hint so the caller knows to try again rather
+// than believing an "ok" that started nothing.
+var errStopInProgress = errors.New("stop in progress")
 
 // SocketPath returns a short, deterministic socket path under /tmp to avoid
 // the ~104 byte macOS limit on Unix socket paths. The hash ensures uniqueness
@@ -123,7 +131,7 @@ func (s *Supervisor) startChildLocked() error {
 	// child itself once the stop completes.
 	if s.stopping {
 		s.Log("==> Ignoring start: a stop is in progress")
-		return nil
+		return errStopInProgress
 	}
 
 	s.Log("==> Starting: %s", s.Command)
@@ -231,14 +239,20 @@ func (s *Supervisor) acceptLoop() {
 func (s *Supervisor) handleConn(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	buf := make([]byte, 4096)
-	n, err := conn.Read(buf)
-	if err != nil {
+	// Read the whole request until the client half-closes its write side (EOF).
+	// A fixed-size Read truncated large payloads (e.g. an update-env >4096B cut a
+	// value mid-pair). io.ReadAll returns whatever it buffered even when the read
+	// deadline fires, which is the compat backstop for OLD clients that never
+	// CloseWrite: they write once and never signal EOF, so ReadAll blocks until
+	// the 5s deadline, then hands back the same bytes today's single read saw —
+	// correct, just ~5s later. New clients CloseWrite and return immediately.
+	rawBytes, _ := io.ReadAll(conn)
+	_ = conn.SetReadDeadline(time.Time{})
+	if len(rawBytes) == 0 {
 		return
 	}
-	_ = conn.SetReadDeadline(time.Time{})
 
-	raw := strings.TrimSpace(string(buf[:n]))
+	raw := strings.TrimSpace(string(rawBytes))
 	parts := strings.SplitN(raw, ":", 2)
 	cmd := parts[0]
 
@@ -266,6 +280,13 @@ func (s *Supervisor) handleConn(conn net.Conn) {
 		err := s.startChildLocked()
 		s.mu.Unlock()
 		if err != nil {
+			// A stop released s.mu to wait and set s.child=nil, so this start slid
+			// in but startChildLocked refused to spawn. Tell the client to retry
+			// instead of replying "ok" for a child that was never started.
+			if errors.Is(err, errStopInProgress) {
+				_, _ = fmt.Fprint(conn, "error: stop in progress — retry in a moment")
+				return
+			}
 			_, _ = fmt.Fprintf(conn, "error: %s", err)
 			return
 		}
@@ -383,10 +404,20 @@ func SendWithTimeout(socketPath, command string, timeout time.Duration) (string,
 		return "", fmt.Errorf("sending command: %w", err)
 	}
 
-	buf := make([]byte, 256)
-	n, err := conn.Read(buf)
+	// Half-close the write side so the server knows the request is complete and
+	// can read it whole without a fixed-size buffer. This stays compatible with
+	// OLD servers: they single-read the request (short commands are unaffected)
+	// and close the conn after replying, so the ReadAll below still ends at EOF.
+	if uc, ok := conn.(*net.UnixConn); ok {
+		_ = uc.CloseWrite()
+	}
+
+	// Read the full reply until EOF instead of a single 256-byte read, which
+	// truncated long responses (e.g. a get-command over 256B) into false
+	// "command changed" warnings.
+	resp, err := io.ReadAll(conn)
 	if err != nil {
 		return "", fmt.Errorf("reading response: %w", err)
 	}
-	return string(buf[:n]), nil
+	return string(resp), nil
 }
