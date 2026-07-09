@@ -2,13 +2,9 @@ package cmd
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 
-	"github.com/git-treeline/cli/internal/format"
 	"github.com/git-treeline/cli/internal/proxy"
-	"github.com/git-treeline/cli/internal/registry"
 	"github.com/spf13/cobra"
 )
 
@@ -79,22 +75,9 @@ Related commands:
 }
 
 func inferTargetPort() (int, error) {
-	cwd, err := os.Getwd()
+	alloc, err := currentAllocation()
 	if err != nil {
 		return 0, err
 	}
-	absPath, _ := filepath.Abs(cwd)
-
-	reg := registry.New("")
-	entry := reg.Find(absPath)
-	if entry == nil {
-		return 0, errNoAllocation(absPath)
-	}
-
-	ports := format.GetPorts(format.Allocation(entry))
-	if len(ports) == 0 {
-		return 0, errNoAllocationNoPorts(absPath)
-	}
-
-	return ports[0], nil
+	return alloc.PrimaryPort()
 }

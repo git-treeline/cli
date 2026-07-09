@@ -3,11 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 
-	"github.com/git-treeline/cli/internal/format"
-	"github.com/git-treeline/cli/internal/registry"
 	"github.com/spf13/cobra"
 )
 
@@ -24,21 +20,13 @@ var portCmd = &cobra.Command{
 	Long:  `Prints the primary allocated port for the current directory's worktree. Useful for scripts, agents, and CI that need the port without parsing status output.`,
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cwd, err := os.Getwd()
+		alloc, err := currentAllocation()
 		if err != nil {
-			return err
+			return cliErr(cmd, err)
 		}
-		absPath, _ := filepath.Abs(cwd)
-
-		reg := registry.New("")
-		entry := reg.Find(absPath)
-		if entry == nil {
-			return cliErr(cmd, errNoAllocation(absPath))
-		}
-
-		ports := format.GetPorts(format.Allocation(entry))
+		ports := alloc.Ports()
 		if len(ports) == 0 {
-			return cliErr(cmd, errNoAllocationNoPorts(absPath))
+			return cliErr(cmd, errNoAllocationNoPorts(alloc.Path))
 		}
 
 		if portJSON {

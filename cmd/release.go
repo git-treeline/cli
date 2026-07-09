@@ -263,38 +263,53 @@ func runReleaseBatch(project string, all bool) error {
 		return nil
 	}
 
-	if releaseDropDB {
+	count, err := releaseAndTeardown(reg, allocs, releaseDropDB, releaseRemoveWorktree, releaseForce)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Released %d allocation(s).\n", count)
+	return nil
+}
+
+// releaseAndTeardown is the shared destructive tail of every batch release
+// path (release --project/--all, prune --merged): optional DB drop, registry
+// removal, runtime teardown (supervisor + hosts), and optional worktree dir
+// removal. Kept in one place so the two commands cannot drift on ordering —
+// DBs drop while the registry entries still exist (their metadata identifies
+// the DBs), and teardown runs after removal so the hosts re-sync reflects the
+// new route set.
+func releaseAndTeardown(reg *registry.Registry, allocs []registry.Allocation, dropDB, removeWT, force bool) (int, error) {
+	if dropDB {
 		formatAllocs := make([]format.Allocation, len(allocs))
 		for i, a := range allocs {
 			formatAllocs[i] = format.Allocation(a)
 		}
 		if err := format.DropDatabases(formatAllocs); err != nil {
-			return err
+			return 0, err
 		}
 	}
 
 	paths := make([]string, 0, len(allocs))
 	for _, a := range allocs {
-		if wt, ok := a["worktree"].(string); ok {
+		if wt := format.GetStr(format.Allocation(a), "worktree"); wt != "" {
 			paths = append(paths, wt)
 		}
 	}
 
 	count, err := reg.ReleaseMany(paths)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	teardownRuntimeState(allocs)
 
-	if releaseRemoveWorktree {
+	if removeWT {
 		for _, p := range paths {
-			removeWorktreeDir(p, releaseForce)
+			removeWorktreeDir(p, force)
 		}
 	}
-
-	fmt.Printf("Released %d allocation(s).\n", count)
-	return nil
+	return count, nil
 }
 
 // teardownRuntimeState cleans up the non-registry runtime state left behind

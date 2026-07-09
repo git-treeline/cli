@@ -12,9 +12,7 @@ import (
 	"github.com/git-treeline/cli/internal/format"
 	"github.com/git-treeline/cli/internal/github"
 	"github.com/git-treeline/cli/internal/registry"
-	"github.com/git-treeline/cli/internal/service"
 	"github.com/git-treeline/cli/internal/setup"
-	"github.com/git-treeline/cli/internal/style"
 	"github.com/git-treeline/cli/internal/worktree"
 	"github.com/spf13/cobra"
 )
@@ -113,24 +111,12 @@ The PR may be given as a bare number or with a leading '#':
 			}
 			printLocalAndRouter(uc, projectName, branch, primaryPort)
 
-			if reviewOpen {
-				if alloc != nil {
-					if len(ports) > 0 {
-						url := buildOpenURL(ports[0], projectName, branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
-						fmt.Printf("Opening %s\n", url)
-						_ = openBrowser(url)
-					}
-				}
+			if alloc != nil {
+				maybeOpenInBrowser(reviewOpen, uc, primaryPort, projectName, branch)
 			}
 
-			if reviewStart {
-				startCmd := pc.StartCommand()
-				if startCmd == "" {
-					fmt.Println(style.Warnf("--start passed but no commands.start configured in .treeline.yml"))
-					return nil
-				}
-				fmt.Println(style.Actionf("Starting: %s", startCmd))
-				return execInWorktree(absPath, startCmd)
+			if handled, err := maybeStartServer(reviewStart, pc, absPath); handled {
+				return err
 			}
 
 			return nil
@@ -156,17 +142,9 @@ The PR may be given as a bare number or with a leading '#':
 		// and treat the command as resumable rather than a dead end.
 		if existing := worktree.FindWorktreeForBranch(branch); existing != "" {
 			fmt.Printf("==> Branch '%s' already checked out at %s\n", branch, existing)
-			reg := registry.New("")
-			alloc := reg.Find(existing)
-
-			if alloc == nil {
-				fmt.Println("==> No allocation found — running setup...")
-				s := setup.New(existing, mainRepo, uc)
-				if _, err := s.Run(); err != nil {
-					return cliErr(cmd, errSetupFailed(err))
-				}
-				reg = registry.New("")
-				alloc = reg.Find(existing)
+			alloc, err := ensureWorktreeAllocation(existing, mainRepo, uc)
+			if err != nil {
+				return cliErr(cmd, err)
 			}
 
 			if alloc != nil {
@@ -174,25 +152,12 @@ The PR may be given as a bare number or with a leading '#':
 				ports := format.GetPorts(format.Allocation(alloc))
 				if len(ports) > 0 {
 					printLocalAndRouter(uc, projectName, branch, ports[0])
-				}
-
-				if reviewOpen {
-					if len(ports) > 0 {
-						url := buildOpenURL(ports[0], projectName, branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
-						fmt.Printf("Opening %s\n", url)
-						_ = openBrowser(url)
-					}
+					maybeOpenInBrowser(reviewOpen, uc, ports[0], projectName, branch)
 				}
 			}
 
-			if reviewStart {
-				startCmd := pc.StartCommand()
-				if startCmd == "" {
-					fmt.Println("Warning: --start passed but no commands.start configured in .treeline.yml")
-					return nil
-				}
-				fmt.Printf("==> Starting: %s\n", startCmd)
-				return execInWorktree(existing, startCmd)
+			if handled, err := maybeStartServer(reviewStart, pc, existing); handled {
+				return err
 			}
 
 			fmt.Printf("\n  cd %s\n", existing)
@@ -224,21 +189,12 @@ The PR may be given as a bare number or with a leading '#':
 			printLocalAndRouter(uc, projectName, alloc.Branch, alloc.Port)
 		}
 
-		if reviewOpen && alloc != nil && alloc.Port > 0 {
-			url := buildOpenURL(alloc.Port, projectName, alloc.Branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
-			fmt.Printf("Opening %s\n", url)
-			_ = openBrowser(url)
+		if alloc != nil {
+			maybeOpenInBrowser(reviewOpen, uc, alloc.Port, projectName, alloc.Branch)
 		}
 
-		if reviewStart {
-			pc = config.LoadProjectConfig(wtPath)
-			startCmd := pc.StartCommand()
-			if startCmd == "" {
-				fmt.Println("Warning: --start passed but no commands.start configured in .treeline.yml")
-				return nil
-			}
-			fmt.Printf("==> Starting: %s\n", startCmd)
-			return execInWorktree(wtPath, startCmd)
+		if handled, err := maybeStartServer(reviewStart, config.LoadProjectConfig(wtPath), wtPath); handled {
+			return err
 		}
 
 		return nil

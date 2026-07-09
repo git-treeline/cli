@@ -677,17 +677,11 @@ func resolveProjectAndBranch(entry format.Allocation) (string, string) {
 }
 
 func findAllocationForCwd() format.Allocation {
-	cwd, err := os.Getwd()
+	wt, err := currentAllocation()
 	if err != nil {
 		return nil
 	}
-	absPath, _ := filepath.Abs(cwd)
-	reg := registry.New("")
-	entry := reg.Find(absPath)
-	if entry == nil {
-		return nil
-	}
-	return format.Allocation(entry)
+	return format.Allocation(wt.Entry)
 }
 
 func printTunnelHint(hostname, domain string) {

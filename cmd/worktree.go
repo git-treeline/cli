@@ -2,10 +2,7 @@ package cmd
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
-	"github.com/git-treeline/cli/internal/registry"
 	"github.com/spf13/cobra"
 )
 
@@ -24,21 +21,14 @@ Example:
   open $(gtl worktree)/.env.local # open the env file in your editor`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cwd, err := os.Getwd()
+		alloc, err := currentAllocation()
 		if err != nil {
-			return err
-		}
-		absPath, _ := filepath.Abs(cwd)
-
-		reg := registry.New("")
-		entry := reg.Find(absPath)
-		if entry == nil {
-			return cliErr(cmd, errNoAllocation(absPath))
+			return cliErr(cmd, err)
 		}
 
-		wt, _ := entry["worktree"].(string)
+		wt, _ := alloc.Entry["worktree"].(string)
 		if wt == "" {
-			wt = absPath
+			wt = alloc.Path
 		}
 		fmt.Println(wt)
 		return nil

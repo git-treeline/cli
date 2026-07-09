@@ -15,11 +15,11 @@ import (
 )
 
 var (
-	pruneStale           bool
-	pruneMerged          bool
-	pruneDropDB          bool
-	pruneForce           bool
-	pruneRemoveWorktree  bool
+	pruneStale          bool
+	pruneMerged         bool
+	pruneDropDB         bool
+	pruneForce          bool
+	pruneRemoveWorktree bool
 )
 
 func init() {
@@ -173,32 +173,9 @@ func runPruneMerged() error {
 		return nil
 	}
 
-	if pruneDropDB {
-		formatAllocs := make([]format.Allocation, len(matches))
-		for i, a := range matches {
-			formatAllocs[i] = format.Allocation(a)
-		}
-		if err := format.DropDatabases(formatAllocs); err != nil {
-			return err
-		}
-	}
-
-	paths := make([]string, 0, len(matches))
-	for _, a := range matches {
-		paths = append(paths, format.GetStr(format.Allocation(a), "worktree"))
-	}
-
-	count, err := reg.ReleaseMany(paths)
+	count, err := releaseAndTeardown(reg, matches, pruneDropDB, pruneRemoveWorktree, pruneForce)
 	if err != nil {
 		return err
-	}
-
-	teardownRuntimeState(matches)
-
-	if pruneRemoveWorktree {
-		for _, p := range paths {
-			removeWorktreeDir(p, pruneForce)
-		}
 	}
 
 	fmt.Printf("Released %d allocation(s).\n", count)

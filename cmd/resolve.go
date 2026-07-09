@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 
 	"github.com/git-treeline/cli/internal/config"
-	"github.com/git-treeline/cli/internal/proxy"
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/resolve"
 	"github.com/git-treeline/cli/internal/service"
@@ -73,7 +72,7 @@ Examples:
 				targetProject, _ := targetAlloc["project"].(string)
 				if targetBranch != "" && targetProject != "" {
 					uc := config.LoadUserConfig("")
-					url = proxy.BuildRouterURL(0, targetProject, targetBranch, uc.RouterDomain(), uc.RouterPort(), svcRunning, service.IsPortForwardConfigured())
+					url = routerURLFor(uc, 0, targetProject, targetBranch)
 				}
 			}
 		}

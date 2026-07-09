@@ -2,15 +2,12 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/format"
 	"github.com/git-treeline/cli/internal/proxy"
-	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/service"
 	"github.com/spf13/cobra"
 )
@@ -24,31 +21,22 @@ var openCmd = &cobra.Command{
 	Short: "Open the current worktree in the browser",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cwd, err := os.Getwd()
+		alloc, err := currentAllocation()
 		if err != nil {
-			return err
+			return cliErr(cmd, err)
 		}
-		absPath, _ := filepath.Abs(cwd)
-
-		reg := registry.New("")
-		entry := reg.Find(absPath)
-		if entry == nil {
-			return cliErr(cmd, errNoAllocation(absPath))
+		port, err := alloc.PrimaryPort()
+		if err != nil {
+			return cliErr(cmd, err)
 		}
 
-		fa := format.Allocation(entry)
-		ports := format.GetPorts(fa)
-		if len(ports) == 0 {
-			return cliErr(cmd, errNoAllocationNoPorts(absPath))
-		}
-
-		pc := config.LoadProjectConfig(absPath)
+		pc := config.LoadProjectConfig(alloc.Path)
 		uc := config.LoadUserConfig("")
 
 		project := pc.Project()
-		branch := format.GetStr(fa, "branch")
+		branch := format.GetStr(format.Allocation(alloc.Entry), "branch")
 
-		url := buildOpenURL(ports[0], project, branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
+		url := buildOpenURL(port, project, branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
 
 		fmt.Printf("Opening %s\n", url)
 		return cliErr(cmd, openBrowser(url))
