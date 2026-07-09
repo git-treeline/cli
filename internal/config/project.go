@@ -656,7 +656,7 @@ func (pc *ProjectConfig) SetProject(name string) error {
 	}
 
 	pc.Data["project"] = name
-	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
+	return atomicWriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
 }
 
 // migrateDefaultBranch rewrites default_branch → merge_target in the YAML
@@ -678,7 +678,7 @@ func (pc *ProjectConfig) migrateDefaultBranch() {
 		return
 	}
 	content := strings.Replace(string(raw), "default_branch:", "merge_target:", 1)
-	_ = os.WriteFile(path, []byte(content), 0o644)
+	_ = atomicWriteFile(path, []byte(content), 0o644)
 }
 
 // migrateCommands rewrites setup_commands/start_command → commands.setup/start
@@ -727,7 +727,7 @@ func (pc *ProjectConfig) migrateCommands() {
 			content = strings.ReplaceAll(content, "\n\n\n", "\n\n")
 		}
 	}
-	_ = os.WriteFile(path, []byte(content), 0o644)
+	_ = atomicWriteFile(path, []byte(content), 0o644)
 }
 
 // rewriteSetupCommands converts the flat setup_commands key into a commands.setup block.
@@ -815,7 +815,7 @@ func (pc *ProjectConfig) migrateEnvFile() {
 	} else {
 		pc.Data["env_file"] = map[string]any{"path": target, "seed_from": source}
 	}
-	_ = os.WriteFile(path, []byte(newContent), 0o644)
+	_ = atomicWriteFile(path, []byte(newContent), 0o644)
 }
 
 // migrateEditor rewrites editor.vscode_title → editor.title in the YAML file
@@ -840,7 +840,7 @@ func (pc *ProjectConfig) migrateEditor() {
 		return
 	}
 	content := strings.Replace(string(raw), "vscode_title:", "title:", 1)
-	_ = os.WriteFile(path, []byte(content), 0o644)
+	_ = atomicWriteFile(path, []byte(content), 0o644)
 }
 
 func (pc *ProjectConfig) migratePortCount() {
@@ -866,7 +866,7 @@ func (pc *ProjectConfig) migratePortCount() {
 
 	_, _ = fmt.Fprintf(os.Stderr, "Warning: ports_needed is deprecated, renamed to port_count in %s\n", path)
 	content = strings.Replace(content, "ports_needed:", "port_count:", 1)
-	_ = os.WriteFile(path, []byte(content), 0o644)
+	_ = atomicWriteFile(path, []byte(content), 0o644)
 }
 
 // rewriteEnvFileToSimple collapses the block-style env_file to a single line.

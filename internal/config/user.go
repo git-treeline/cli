@@ -439,7 +439,32 @@ func (uc *UserConfig) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(uc.Path, append(data, '\n'), platform.PrivateFileMode)
+	return atomicWriteFile(uc.Path, append(data, '\n'), platform.PrivateFileMode)
+}
+
+// atomicWriteFile writes data to path by creating a temp file in the same
+// directory and renaming it into place. A crash or ENOSPC mid-write can only
+// corrupt the discarded temp file, never the live config/.treeline.yml — the
+// rename is atomic, so readers see either the old contents or the new ones.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Chmod(perm)
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 func (uc *UserConfig) Exists() bool {

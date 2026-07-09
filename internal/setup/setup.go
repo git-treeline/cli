@@ -373,7 +373,7 @@ func (s *Setup) writeEnvFile(vars map[string]string) error {
 		source = filepath.Join(s.MainRepo, ".env")
 	}
 	if data, err := os.ReadFile(source); err == nil {
-		_ = os.WriteFile(envPath, data, 0o644)
+		_ = atomicWriteFile(envPath, data, 0o644)
 	}
 
 	for key, value := range vars {
@@ -413,7 +413,32 @@ func updateOrAppend(file, key, value string) error {
 		content += line + "\n"
 	}
 
-	return os.WriteFile(file, []byte(content), 0o644)
+	return atomicWriteFile(file, []byte(content), 0o644)
+}
+
+// atomicWriteFile writes data to path by creating a temp file in the same
+// directory and renaming it into place. A crash or ENOSPC mid-write can only
+// corrupt the discarded temp file, never the live env file — the rename is
+// atomic, so readers see either the old contents or the new ones.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Chmod(perm)
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 func (s *Setup) syncTemplateDatabase() error {
