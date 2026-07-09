@@ -90,7 +90,13 @@ func (r *Router) Run() error {
 		Addr:              addr,
 		Handler:           r,
 		ReadHeaderTimeout: 10 * time.Second,
-		ErrorLog:          log.New(io.Discard, "", 0),
+		// IdleTimeout reaps keep-alive connections a slow or blackholed peer
+		// leaves idle. WriteTimeout is intentionally omitted: this proxy
+		// fronts dev servers that legitimately hold responses open (SSE, HMR
+		// websockets, large artifact downloads), and a wall-clock write
+		// deadline would sever them.
+		IdleTimeout: 120 * time.Second,
+		ErrorLog:    log.New(io.Discard, "", 0),
 	}
 
 	ln, err := net.Listen("tcp", addr)

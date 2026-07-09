@@ -131,6 +131,12 @@ func Run(appPort int, tunnelName, domain string) error {
 		Addr:              fmt.Sprintf("127.0.0.1:%d", proxyPort),
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		// IdleTimeout reaps keep-alive connections a slow or blackholed peer
+		// leaves idle. WriteTimeout is intentionally omitted: this proxy
+		// fronts a dev app that may legitimately stream long-lived responses
+		// (SSE, websockets, large downloads), which a wall-clock write
+		// deadline would sever.
+		IdleTimeout: 120 * time.Second,
 	}
 
 	go func() {
