@@ -45,3 +45,18 @@ jobs:
 
       - name: Test platform-specific packages
         run: go test ./internal/proxy/... ./internal/service/... ./internal/supervisor/...
+
+  ci-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test platform-specific packages
+        run: go test ./internal/proxy/... ./internal/service/... ./internal/supervisor/...
