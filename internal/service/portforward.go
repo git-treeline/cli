@@ -172,7 +172,12 @@ func checkPortForwardDarwin(routerPort int) PortForwardStatus {
 
 func checkPortForwardLinux(routerPort int) PortForwardStatus {
 	st := PortForwardStatus{ConfiguredOnDisk: IsPortForwardConfigured()}
-	out, err := runCmdOutput("/sbin/iptables", "-t", "nat", "-L", "OUTPUT", "-n")
+	ipt, err := resolveIptables()
+	if err != nil {
+		st.Detail = err.Error()
+		return st
+	}
+	out, err := runCmdOutput(ipt, "-t", "nat", "-L", "OUTPUT", "-n")
 	if err != nil {
 		if !st.ConfiguredOnDisk {
 			st.Detail = "not configured"
@@ -220,12 +225,38 @@ func ReloadPortForward() error {
 }
 
 func isLinuxPortForwardConfigured() bool {
-	out, err := exec.Command("/sbin/iptables", "-t", "nat", "-L", "OUTPUT", "-n",
+	ipt, err := resolveIptables()
+	if err != nil {
+		return false
+	}
+	out, err := exec.Command(ipt, "-t", "nat", "-L", "OUTPUT", "-n",
 		"--line-numbers").CombinedOutput()
 	if err != nil {
 		return false
 	}
 	return strings.Contains(string(out), "git-treeline")
+}
+
+// resolveIptables locates the iptables command instead of hardcoding
+// /sbin/iptables (which does not exist on every distro/layout). PATH is
+// preferred so the distro's chosen iptables — including the iptables-nft
+// compatibility shim on nftables-only systems — is used. On systems with
+// neither iptables nor its nft shim, it returns an actionable error that
+// distinguishes "no netfilter tooling at all" from "nftables present but no
+// iptables compatibility command", so the user knows which package to add.
+func resolveIptables() (string, error) {
+	if p, err := exec.LookPath("iptables"); err == nil {
+		return p, nil
+	}
+	for _, candidate := range []string{"/usr/sbin/iptables", "/sbin/iptables", "/usr/bin/iptables"} {
+		if fi, err := os.Stat(candidate); err == nil && !fi.IsDir() {
+			return candidate, nil
+		}
+	}
+	if _, err := exec.LookPath("nft"); err == nil {
+		return "", fmt.Errorf("nftables detected but no iptables compatibility command found — install the iptables-nft package (Debian/Ubuntu: 'sudo apt install iptables'; Fedora: 'sudo dnf install iptables-nft')")
+	}
+	return "", fmt.Errorf("no iptables command found — install iptables (or iptables-nft) to enable 443 port forwarding")
 }
 
 // --- macOS (pf) ---
@@ -486,12 +517,15 @@ func insertPfRules(pfConf string) string {
 // --- Linux (iptables) ---
 
 func installLinuxPortForward(routerPort int) error {
-	portStr := fmt.Sprintf("%d", routerPort)
+	ipt, err := resolveIptables()
+	if err != nil {
+		return err
+	}
 	cmd := exec.Command("sudo", "-p",
 		"\nEnter your password (2 of 2): ",
-		"/sbin/iptables", "-t", "nat", "-A", "OUTPUT",
+		ipt, "-t", "nat", "-A", "OUTPUT",
 		"-p", "tcp", "-d", "127.0.0.1", "--dport", "443",
-		"-j", "REDIRECT", "--to-port", portStr,
+		"-j", "REDIRECT", "--to-port", fmt.Sprintf("%d", routerPort),
 		"-m", "comment", "--comment", "git-treeline")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -505,8 +539,12 @@ func installLinuxPortForward(routerPort int) error {
 }
 
 func uninstallLinuxPortForward() error {
+	ipt, err := resolveIptables()
+	if err != nil {
+		return err
+	}
 	for {
-		out, err := exec.Command("/sbin/iptables", "-t", "nat", "-L", "OUTPUT", "-n",
+		out, err := exec.Command(ipt, "-t", "nat", "-L", "OUTPUT", "-n",
 			"--line-numbers").CombinedOutput()
 		if err != nil || !strings.Contains(string(out), "git-treeline") {
 			break
@@ -521,7 +559,7 @@ func uninstallLinuxPortForward() error {
 			}
 			_ = exec.Command("sudo", "-p",
 				"\nEnter your password to remove port forwarding: ",
-				"/sbin/iptables", "-t", "nat", "-D", "OUTPUT", fields[0]).Run()
+				ipt, "-t", "nat", "-D", "OUTPUT", fields[0]).Run()
 			break
 		}
 	}
