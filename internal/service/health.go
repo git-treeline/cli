@@ -1,6 +1,7 @@
 package service
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/git-treeline/cli/internal/proxy"
 )
 
 // HealthCheck represents a single doctor check result.
@@ -27,34 +30,45 @@ type processInfo struct {
 }
 
 type healthDeps struct {
-	isRunning                  func() bool
-	installedBinaryPath        func() string
-	runningRouterVersion       func() string
-	runningPID                 func() int
-	isPortForwardConfigured    func() bool
-	checkPortForward           func(routerPort int) PortForwardStatus
-	dialTimeout                func(network, address string, timeout time.Duration) (net.Conn, error)
-	httpProbe                  func(url string, timeout time.Duration) (int, error)
-	executable                 func() (string, error)
-	processOnPort              func(port int) processInfo
-	isPfReloadDaemonInstalled  func() bool
-	pfReloadDaemonSupported    bool
+	isRunning                 func() bool
+	installedBinaryPath       func() string
+	runningRouterVersion      func() string
+	runningPID                func() int
+	isPortForwardConfigured   func() bool
+	checkPortForward          func(routerPort int) PortForwardStatus
+	dialTimeout               func(network, address string, timeout time.Duration) (net.Conn, error)
+	httpProbe                 func(url string, timeout time.Duration) (int, error)
+	executable                func() (string, error)
+	processOnPort             func(port int) processInfo
+	isPfReloadDaemonInstalled func() bool
+	pfReloadDaemonSupported   bool
+	routerUsesTLS             func() bool
+	loopbackListen            func(network, address string) (net.Listener, error)
+	// Linux boot-time redirect persistence (systemd oneshot). The macOS
+	// equivalent is the pf-reload LaunchDaemon above; these are the Linux
+	// analog so `gtl doctor` flags a missing persistence unit there too.
+	isPortForwardPersistenceInstalled func() bool
+	portForwardPersistenceSupported   bool
 }
 
 func defaultHealthDeps() healthDeps {
 	return healthDeps{
-		isRunning:                  IsRunning,
-		installedBinaryPath:        InstalledBinaryPath,
-		runningRouterVersion:       RunningRouterVersion,
-		runningPID:                 RunningPID,
-		isPortForwardConfigured:    IsPortForwardConfigured,
-		checkPortForward:           CheckPortForward,
-		dialTimeout:                net.DialTimeout,
-		httpProbe:                  httpProbe,
-		executable:                 os.Executable,
-		processOnPort:              processOnPort,
-		isPfReloadDaemonInstalled:  IsPfReloadDaemonInstalled,
-		pfReloadDaemonSupported:    runtime.GOOS == "darwin",
+		isRunning:                         IsRunning,
+		installedBinaryPath:               InstalledBinaryPath,
+		runningRouterVersion:              RunningRouterVersion,
+		runningPID:                        RunningPID,
+		isPortForwardConfigured:           IsPortForwardConfigured,
+		checkPortForward:                  CheckPortForward,
+		dialTimeout:                       net.DialTimeout,
+		httpProbe:                         httpProbe,
+		executable:                        os.Executable,
+		processOnPort:                     processOnPort,
+		isPfReloadDaemonInstalled:         IsPfReloadDaemonInstalled,
+		pfReloadDaemonSupported:           runtime.GOOS == "darwin",
+		routerUsesTLS:                     proxy.IsCAInstalled,
+		loopbackListen:                    net.Listen,
+		isPortForwardPersistenceInstalled: IsLinuxPortForwardPersistenceInstalled,
+		portForwardPersistenceSupported:   runtime.GOOS == "linux",
 	}
 }
 
@@ -66,6 +80,7 @@ func CheckHealth(routerPort int, cliVersion string) []HealthCheck {
 func checkHealthWith(d healthDeps, routerPort int, cliVersion string) []HealthCheck {
 	var checks []HealthCheck
 
+	checks = append(checks, checkLoopback(d))
 	checks = append(checks, checkServiceRegistered(d))
 	checks = append(checks, checkBinaryMatch(d))
 	checks = append(checks, checkRouterVersion(d, cliVersion))
@@ -75,8 +90,74 @@ func checkHealthWith(d healthDeps, routerPort int, cliVersion string) []HealthCh
 	if d.pfReloadDaemonSupported {
 		checks = append(checks, checkPfReloadDaemon(d))
 	}
+	if d.portForwardPersistenceSupported {
+		checks = append(checks, checkLinuxPortForwardPersistence(d))
+	}
 
 	return checks
+}
+
+// checkLinuxPortForwardPersistence is the Linux analog of checkPfReloadDaemon:
+// it flags the absence of the boot-time systemd oneshot that re-applies the
+// iptables redirect after a reboot when port forwarding is otherwise
+// configured. Linux-only; gated by portForwardPersistenceSupported.
+func checkLinuxPortForwardPersistence(d healthDeps) HealthCheck {
+	if !d.isPortForwardConfigured() {
+		return HealthCheck{
+			Name:   "port_forward_persistence",
+			Status: "ok",
+			Detail: "n/a (port forwarding not configured)",
+		}
+	}
+	if !d.isPortForwardPersistenceInstalled() {
+		return HealthCheck{
+			Name:   "port_forward_persistence",
+			Status: "warn",
+			Detail: "missing — 443 redirect will drop on reboot",
+			Fix:    "gtl serve install",
+		}
+	}
+	return HealthCheck{
+		Name:   "port_forward_persistence",
+		Status: "ok",
+		Detail: "installed (443 redirect survives reboot)",
+	}
+}
+
+// checkLoopback binds a throwaway 127.0.0.1 port and immediately dials it.
+// If binding or dialing fails, the machine's loopback interface is broken or
+// being filtered (a local firewall, VPN kill-switch, or endpoint-security
+// agent). That matters because it invalidates every downstream "router
+// unreachable" verdict: the router could be perfectly healthy while nothing
+// local can reach it. Surfacing this plainly stops doctor from blaming the
+// router for a machine-level network policy.
+func checkLoopback(d healthDeps) HealthCheck {
+	ln, err := d.loopbackListen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return HealthCheck{
+			Name:   "loopback",
+			Status: "error",
+			Detail: fmt.Sprintf("could not bind a 127.0.0.1 port: %v", err),
+			Fix:    "check for a local firewall, VPN, or security agent blocking loopback",
+		}
+	}
+	defer func() { _ = ln.Close() }()
+
+	conn, err := d.dialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		return HealthCheck{
+			Name:   "loopback",
+			Status: "error",
+			Detail: "bound a 127.0.0.1 port but could not connect to it — loopback is being filtered (local firewall, VPN, or security agent)",
+			Fix:    "allow loopback traffic; while this is broken every 'router unreachable' result is meaningless",
+		}
+	}
+	_ = conn.Close()
+	return HealthCheck{
+		Name:   "loopback",
+		Status: "ok",
+		Detail: "127.0.0.1 accepts local connections",
+	}
 }
 
 // checkPfReloadDaemon flags the absence of the boot-time pf reloader when
@@ -263,10 +344,18 @@ func checkRouterListening(d healthDeps, port int) HealthCheck {
 // checkRouterResponding does an end-to-end liveness probe: a real HTTP
 // request to the router's health endpoint. A listening socket is necessary
 // but not sufficient — the router could be deadlocked or panicking on
-// every request. Treats any 2xx/3xx/4xx as alive (the router answered).
-// 5xx or transport error → warn.
+// every request. The scheme must match the router's: it serves TLS whenever
+// the local CA is installed (see runRouter), and a plain-HTTP probe against
+// a TLS listener never gets a health response — it either times out or gets
+// Go's "sent an HTTP request to an HTTPS server" 400, both of which used to
+// misreport a healthy router. The health endpoint returns 200, so anything
+// other than 2xx/3xx means something is wrong.
 func checkRouterResponding(d healthDeps, port int) HealthCheck {
-	url := fmt.Sprintf("http://127.0.0.1:%d/_treeline/health", port)
+	scheme := "http"
+	if d.routerUsesTLS() {
+		scheme = "https"
+	}
+	url := fmt.Sprintf("%s://127.0.0.1:%d/_treeline/health", scheme, port)
 	status, err := d.httpProbe(url, 2*time.Second)
 	if err != nil {
 		return HealthCheck{
@@ -276,11 +365,11 @@ func checkRouterResponding(d healthDeps, port int) HealthCheck {
 			Fix:    "gtl serve restart",
 		}
 	}
-	if status >= 500 {
+	if status >= 400 {
 		return HealthCheck{
 			Name:   "router_responding",
 			Status: "warn",
-			Detail: fmt.Sprintf("router answered with %d", status),
+			Detail: fmt.Sprintf("router answered %d from /_treeline/health", status),
 			Fix:    "gtl serve restart",
 		}
 	}
@@ -289,6 +378,37 @@ func checkRouterResponding(d healthDeps, port int) HealthCheck {
 		Status: "ok",
 		Detail: fmt.Sprintf("HTTP %d from /_treeline/health", status),
 	}
+}
+
+// WaitRouterResponding polls the router's health endpoint until it answers,
+// or until `wait` elapses. Used after a restart: launchd/systemd reporting
+// the service as running (and even the version file being rewritten) only
+// proves the process started, not that it is serving requests.
+func WaitRouterResponding(routerPort int, wait time.Duration) error {
+	d := defaultHealthDeps()
+	deadline := nowFn().Add(wait)
+	for {
+		c := checkRouterResponding(d, routerPort)
+		if c.Status == "ok" {
+			return nil
+		}
+		if !nowFn().Before(deadline) {
+			return fmt.Errorf("%s", c.Detail)
+		}
+		sleepFn(200 * time.Millisecond)
+	}
+}
+
+// routerPortReachable reports whether the router's own listener accepts a
+// loopback connection. Used to distinguish "pf isn't forwarding :443" from
+// "the router is fine but an external filter is blocking :443 specifically".
+func routerPortReachable(d healthDeps, routerPort int) bool {
+	conn, err := d.dialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", routerPort), 2*time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func checkPortForward(d healthDeps, routerPort int) HealthCheck {
@@ -321,6 +441,22 @@ func checkPortForward(d healthDeps, routerPort int) HealthCheck {
 		// Port 443 not reachable. If we read the kernel ruleset and it
 		// didn't show our rule, the diagnosis is "rule missing"; otherwise
 		// it's "loaded but unreachable" — both fix with reload-pf.
+		//
+		// EXCEPTION: if we positively confirmed the rule IS loaded in the
+		// kernel AND the router's own port answers, then pf is doing its
+		// job — some external filter (a VPN killswitch, Little Snitch,
+		// EncryptMe) is intercepting loopback :443. reload-pf cannot fix
+		// that; sending the user there just wastes a sudo round-trip. Point
+		// at the real culprit instead. This was the root cause of the
+		// incident that motivated the doctor overhaul.
+		if st.KernelStateKnown && st.LoadedInKernel && routerPortReachable(d, routerPort) {
+			return HealthCheck{
+				Name:   "port_forwarding",
+				Status: "error",
+				Detail: "port 443 is blocked by something outside gtl (VPN killswitch / packet filter) — not a pf rule problem",
+				Fix:    "check your firewall — a VPN killswitch, Little Snitch, or EncryptMe is intercepting loopback :443 (the pf rule is loaded and the router is up, so reloading pf rules won't help)",
+			}
+		}
 		detail := "rule loaded but port 443 not reachable"
 		if st.KernelStateKnown && !st.LoadedInKernel {
 			detail = st.Detail
@@ -387,9 +523,17 @@ func processOnPort(port int) processInfo {
 }
 
 // httpProbe is the default HTTP liveness implementation. Returns the HTTP
-// status code, or an error if the request couldn't complete.
+// status code, or an error if the request couldn't complete. Certificate
+// verification is skipped: the probe checks liveness, not identity, and the
+// router's per-hostname certs are issued for browser use — trust-store state
+// must not fail the health check.
 func httpProbe(url string, timeout time.Duration) (int, error) {
-	client := &http.Client{Timeout: timeout}
+	client := &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 	resp, err := client.Get(url)
 	if err != nil {
 		return 0, err

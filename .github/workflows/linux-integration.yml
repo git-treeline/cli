@@ -1,0 +1,62 @@
+# D3 VERIFICATION GATE — real Linux 443/HTTPS + CA-trust stack.
+#
+# The Linux port-forwarding, systemd persistence, iptables/nft, system trust
+# store, and NSS (browser) trust paths in internal/service and internal/proxy
+# can only be COMPILE- and unit-checked on the maintainer's macOS machine. This
+# job is the single place where they are actually EXERCISED against a live Linux
+# kernel with root — it installs the REDIRECT rule, starts the router, and
+# asserts a request to :443 reaches it. A green run here is the evidence that
+# decision D3 (Linux parity) holds; a failure here means the Linux stack is
+# broken regardless of what the unit tests say.
+#
+# It is intentionally separate from main.yml (owned elsewhere) and gated behind
+# the `linux_integration` build tag so it never runs in the normal test suite.
+name: linux-integration
+
+on:
+  push:
+    branches: [main, "test/**"]
+    paths:
+      - "internal/service/**"
+      - "internal/proxy/**"
+      - ".github/workflows/linux-integration.yml"
+  pull_request:
+    paths:
+      - "internal/service/**"
+      - "internal/proxy/**"
+      - ".github/workflows/linux-integration.yml"
+  workflow_dispatch:
+
+jobs:
+  linux-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install prerequisites (iptables + NSS tools)
+        run: |
+          sudo apt-get update
+          # iptables: the nat REDIRECT rule the port-forward installs.
+          # libnss3-tools: provides `certutil` for the browser (NSS) trust path.
+          # ca-certificates: provides update-ca-certificates for the system store.
+          sudo apt-get install -y iptables libnss3-tools ca-certificates
+
+      - name: Show environment
+        run: |
+          echo "iptables: $(command -v iptables) -> $(sudo iptables --version 2>&1 | head -1)"
+          echo "certutil: $(command -v certutil || echo MISSING)"
+          echo "systemd:  $(pidof systemd >/dev/null 2>&1 && echo present || echo absent)"
+
+      # Run the tagged tests as root so they can write the nat table and the
+      # system trust store. -E preserves the environment (GOPATH, GOCACHE, PATH,
+      # HOME) so `go` and the tools resolve exactly as for the runner user.
+      - name: Run Linux integration tests (root)
+        run: |
+          sudo -E env "PATH=$PATH" \
+            go test -v -count=1 -tags linux_integration \
+            -run Integration \
+            ./internal/service/... ./internal/proxy/...

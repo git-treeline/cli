@@ -877,3 +877,26 @@ func TestUserConfig_InitFilePermissions(t *testing.T) {
 		t.Errorf("config file mode = %o, want %o", got, platform.PrivateFileMode)
 	}
 }
+
+func TestUserConfig_CorruptRefusesSaveToAvoidDataLoss(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	original := []byte(`{"tunnel":{"tunnels":{"prod":{"domain":"x"}}}` + "\n") // truncated/corrupt JSON
+	if err := os.WriteFile(path, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	uc := LoadUserConfig(path)
+	if err := uc.Save(); err == nil {
+		t.Error("expected Save to refuse overwriting a corrupt config, got nil")
+	}
+
+	// The user's real (corrupt) file must be left untouched, not replaced with defaults.
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(original) {
+		t.Errorf("corrupt config was overwritten:\n got: %s\nwant: %s", after, original)
+	}
+}

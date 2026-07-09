@@ -48,23 +48,55 @@ var doctorCmd = &cobra.Command{
 			return doctorJSONOutput(pc, det, absPath)
 		}
 
+		// One health snapshot for the whole run. The Serve section, the
+		// request-flow diagnosis, and auto-fix must agree with each other;
+		// re-probing per section produced self-contradicting output when a
+		// check flapped between samples.
+		serveChecks := service.CheckHealth(config.LoadUserConfig("").RouterPort(), Version)
+
+		// Section the output so a machine-level investigation isn't muddled
+		// by cwd-specific project state (and vice versa). Machine health —
+		// the serve daemon, router, loopback, port forwarding — is identical
+		// no matter which directory you run doctor from. Project health is
+		// specific to this worktree's config and allocation.
+		hasProject := pc.Exists() || registry.New("").Find(absPath) != nil
+
+		fmt.Println("MACHINE  (serve & router — same from any directory)")
+		doctorServe(serveChecks)
+		doctorPortConfig()
+
+		fmt.Println("\nPROJECT  (this directory)")
+		if !hasProject {
+			doctorLine("Status", "no .treeline.yml or allocation here — nothing project-specific to check")
+			fmt.Println("  (the machine health above is unaffected by the current directory)")
+			if doctorFix {
+				return doctorAutoFix(absPath, pc, serveChecks)
+			}
+			return nil
+		}
 		doctorConfig(pc, det, absPath)
 		doctorProjectDrift(absPath)
-		doctorPortConfig()
 		doctorAllocation(absPath)
 		doctorRuntime(absPath, pc)
-		doctorServe()
 		doctorDiagnostics(det)
-		doctorRequestFlow(absPath, pc)
+		doctorRequestFlow(absPath, pc, serveChecks)
 		if doctorFix {
-			return doctorAutoFix(absPath, pc)
+			return doctorAutoFix(absPath, pc, serveChecks)
 		}
 		return nil
 	},
 }
 
 func doctorJSONOutput(pc *config.ProjectConfig, det *detect.Result, absPath string) error {
-	result := map[string]any{}
+	// Two top-level sections mirror the human output: machine-level health
+	// (serve/router — identical from any directory) vs project-level state
+	// (config/allocation/runtime — specific to this worktree).
+	machine := map[string]any{}
+	project := map[string]any{}
+	result := map[string]any{
+		"machine": machine,
+		"project": project,
+	}
 
 	cfgInfo := map[string]any{}
 	if pc.Exists() {
@@ -78,10 +110,10 @@ func doctorJSONOutput(pc *config.ProjectConfig, det *detect.Result, absPath stri
 	} else {
 		cfgInfo["treeline_yml"] = "missing"
 	}
-	result["config"] = cfgInfo
+	project["config"] = cfgInfo
 
 	if drift := doctorProjectDriftJSON(absPath); drift != nil {
-		result["project_drift"] = drift
+		project["project_drift"] = drift
 	}
 
 	reg := registry.New("")
@@ -97,7 +129,7 @@ func doctorJSONOutput(pc *config.ProjectConfig, det *detect.Result, absPath stri
 	} else {
 		allocInfo["status"] = "not allocated"
 	}
-	result["allocation"] = allocInfo
+	project["allocation"] = allocInfo
 
 	rt := map[string]any{}
 	if alloc != nil {
@@ -113,7 +145,7 @@ func doctorJSONOutput(pc *config.ProjectConfig, det *detect.Result, absPath stri
 	} else {
 		rt["supervisor"] = "not running"
 	}
-	result["runtime"] = rt
+	project["runtime"] = rt
 
 	uc := config.LoadUserConfig("")
 	servePort := uc.RouterPort()
@@ -138,7 +170,7 @@ func doctorJSONOutput(pc *config.ProjectConfig, det *detect.Result, absPath stri
 	} else {
 		serveInfo["ca_cert"] = map[string]any{"status": "not_installed"}
 	}
-	result["serve"] = serveInfo
+	machine["serve"] = serveInfo
 
 	diags := templates.Diagnose(det)
 	if len(diags) > 0 {
@@ -149,7 +181,7 @@ func doctorJSONOutput(pc *config.ProjectConfig, det *detect.Result, absPath stri
 				"message": d.Message,
 			})
 		}
-		result["diagnostics"] = diagList
+		project["diagnostics"] = diagList
 	}
 
 	data, err := json.MarshalIndent(result, "", "  ")
@@ -311,10 +343,10 @@ func doctorRuntime(absPath string, pc *config.ProjectConfig) {
 // → router → router has the route → port forwarding → CA) and surfaces the
 // FIRST failing link as the actionable diagnosis. Everything else is noise
 // when the first link is broken.
-func doctorRequestFlow(absPath string, pc *config.ProjectConfig) {
+func doctorRequestFlow(absPath string, pc *config.ProjectConfig, serveChecks []service.HealthCheck) {
 	fmt.Println("\nRequest flow")
 
-	step := firstFailingStep(absPath, pc)
+	step := evaluateRequestFlow(buildFlowInput(absPath, pc, serveChecks))
 	if step == nil {
 		doctorLine("Status", "✓ all links healthy")
 		return
@@ -345,26 +377,21 @@ type flowInput struct {
 	caInstalled     bool
 }
 
-func firstFailingStep(absPath string, pc *config.ProjectConfig) *flowStep {
-	uc := config.LoadUserConfig("")
-	reg := registry.New("")
-	alloc := reg.Find(absPath)
-
-	in := flowInput{
-		startCommand:  pc.StartCommand(),
-		serviceChecks: service.CheckHealth(uc.RouterPort(), Version),
-		caInstalled:   proxy.IsCAInstalled(),
-	}
-	if alloc != nil {
-		in.allocatedPorts = format.GetPorts(format.Allocation(alloc))
-		if len(in.allocatedPorts) > 0 {
-			in.appListening = allocator.CheckPortsListening(in.allocatedPorts)
+func evaluateRequestFlow(in flowInput) *flowStep {
+	// 0. Loopback sanity. If 127.0.0.1 itself is filtered, every downstream
+	// "unreachable" verdict (app not listening, router port dead, port 443
+	// closed) is a red herring — nothing local can connect regardless of the
+	// router's actual health. Surface this first and plainly.
+	for _, c := range in.serviceChecks {
+		if c.Name == "loopback" && c.Status == "error" {
+			return &flowStep{
+				label:  "loopback (127.0.0.1)",
+				detail: c.Detail + " — this invalidates the 'unreachable' results below; the router itself may be fine",
+				fix:    c.Fix,
+			}
 		}
 	}
-	return evaluateRequestFlow(in)
-}
 
-func evaluateRequestFlow(in flowInput) *flowStep {
 	// 1. App listening on its allocated port?
 	if len(in.allocatedPorts) > 0 && !in.appListening {
 		fix := "start the dev server"
@@ -426,13 +453,11 @@ func evaluateRequestFlow(in flowInput) *flowStep {
 	return nil
 }
 
-func doctorServe() {
-	uc := config.LoadUserConfig("")
-	port := uc.RouterPort()
-
+func doctorServe(checks []service.HealthCheck) {
 	fmt.Println("\nServe")
 
 	displayNames := map[string]string{
+		"loopback":          "Loopback",
 		"service":           "Service",
 		"binary":            "Binary",
 		"router_version":    "Router version",
@@ -442,7 +467,6 @@ func doctorServe() {
 		"pf_reload_daemon":  "pf reboot survival",
 	}
 
-	checks := service.CheckHealth(port, Version)
 	for _, c := range checks {
 		label := displayNames[c.Name]
 		if label == "" {
@@ -548,8 +572,8 @@ func planAutoFix(in flowInput, registryHasOrphans bool) []fixAction {
 	return plan
 }
 
-func doctorAutoFix(absPath string, pc *config.ProjectConfig) error {
-	in := buildFlowInput(absPath, pc)
+func doctorAutoFix(absPath string, pc *config.ProjectConfig, serveChecks []service.HealthCheck) error {
+	in := buildFlowInput(absPath, pc, serveChecks)
 	plan := planAutoFix(in, shouldUseRegistryRepair())
 
 	fmt.Println("\nAuto-fix")
@@ -569,13 +593,12 @@ func doctorAutoFix(absPath string, pc *config.ProjectConfig) error {
 	return nil
 }
 
-func buildFlowInput(absPath string, pc *config.ProjectConfig) flowInput {
-	uc := config.LoadUserConfig("")
+func buildFlowInput(absPath string, pc *config.ProjectConfig, serveChecks []service.HealthCheck) flowInput {
 	reg := registry.New("")
 	alloc := reg.Find(absPath)
 	in := flowInput{
 		startCommand:  pc.StartCommand(),
-		serviceChecks: service.CheckHealth(uc.RouterPort(), Version),
+		serviceChecks: serveChecks,
 		caInstalled:   proxy.IsCAInstalled(),
 	}
 	if alloc != nil {

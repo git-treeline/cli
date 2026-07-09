@@ -2,13 +2,15 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/setup"
@@ -39,25 +41,27 @@ type actionDeps struct {
 
 // Model is the root Bubble Tea model for the gtl dashboard.
 type Model struct {
-	snapshot     Snapshot
-	width        int
-	height       int
-	focus        focusPane
-	cursor       int // selected index into flatList
-	scrollOffset int // first visible index in the list panel
-	flatList     []flatEntry
-	ready        bool
-	polling      bool
-	spinner      spinner.Model
-	filterMode   bool
-	filterText   string
-	showHelp     bool
-	confirmKind  string // "release" or ""
-	quitting     bool
-	inputMode    string // "" or "new_worktree"
-	inputText    string
-	statusMsg    string // transient status message
-	deps         actionDeps
+	snapshot      Snapshot
+	width         int
+	height        int
+	focus         focusPane
+	cursor        int // selected index into flatList
+	scrollOffset  int // first visible index in the list panel
+	flatList      []flatEntry
+	ready         bool
+	polling       bool
+	spinner       spinner.Model
+	filterMode    bool
+	filterText    string
+	showHelp      bool
+	confirmKind   string          // "release" or ""
+	confirmTarget *WorktreeStatus // worktree captured when the confirm overlay opened
+	quitting      bool
+	inputMode     string // "" or "new_worktree"
+	inputText     string
+	statusMsg     string // transient status message
+	pollErr       error  // last poll failure; snapshot below is then stale
+	deps          actionDeps
 }
 
 // flatEntry is a denormalized row in the worktree list.
@@ -69,7 +73,10 @@ type flatEntry struct {
 }
 
 type tickMsg time.Time
-type dataMsg Snapshot
+type dataMsg struct {
+	snapshot Snapshot
+	err      error
+}
 
 func doTick() tea.Cmd {
 	return tea.Tick(pollInterval, func(t time.Time) tea.Msg {
@@ -79,7 +86,8 @@ func doTick() tea.Cmd {
 
 func doPoll() tea.Cmd {
 	return func() tea.Msg {
-		return dataMsg(Poll())
+		snap, err := Poll()
+		return dataMsg{snapshot: snap, err: err}
 	}
 }
 
@@ -89,7 +97,7 @@ func defaultDeps() actionDeps {
 		supervisorSock: supervisor.SocketPath,
 		openURL:        openURLDefault,
 		releaseWorktree: func(wtPath string) error {
-			return exec.Command("git-treeline", "release", "--force", wtPath).Run()
+			return exec.Command(gtlBinaryPath(), "release", "--force", wtPath).Run()
 		},
 		syncEnv: func(wtPath string) error {
 			uc := config.LoadUserConfig("")
@@ -126,6 +134,25 @@ func defaultDeps() actionDeps {
 			return err
 		},
 	}
+}
+
+// gtlBinaryPath resolves the path used to re-invoke the CLI for actions like
+// release. It prefers the currently running executable (so release works
+// regardless of whether the binary is installed as gtl or git-treeline), then
+// falls back to a PATH lookup, and finally to a bare command name.
+func gtlBinaryPath() string {
+	if exe, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			return resolved
+		}
+		return exe
+	}
+	for _, name := range []string{"gtl", "git-treeline"} {
+		if p, err := exec.LookPath(name); err == nil {
+			return p
+		}
+	}
+	return "git-treeline"
 }
 
 func openURLDefault(url string) {

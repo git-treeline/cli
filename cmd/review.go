@@ -24,9 +24,11 @@ var reviewStart bool
 var reviewOpen bool
 
 // parsePRNumber parses a PR number argument, accepting an optional leading '#'
-// (e.g. both "473" and "#473"). PR numbers are positive, so zero and negative
+// (e.g. both "473" and "#473") and surrounding whitespace (e.g. a "#473 "
+// pasted with a trailing space). PR numbers are positive, so zero and negative
 // values are rejected.
 func parsePRNumber(arg string) (int, error) {
+	arg = strings.TrimSpace(arg)
 	n, err := strconv.Atoi(strings.TrimPrefix(arg, "#"))
 	if err != nil {
 		return 0, err
@@ -46,10 +48,14 @@ func init() {
 }
 
 var reviewCmd = &cobra.Command{
-	Use:   "review <PR#>",
+	Use:   "review <PR>",
 	Short: "Check out a pull request into a worktree and run setup",
 	Long: `Fetch a GitHub pull request branch, create a worktree for it, allocate
-resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
+resources, and run setup. Requires the gh CLI (https://cli.github.com).
+
+The PR may be given as a bare number or with a leading '#':
+  gtl review 42
+  gtl review '#42'`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		warnServeNotInstalled()
@@ -58,7 +64,7 @@ resources, and run setup. Requires the gh CLI (https://cli.github.com).`,
 		if err != nil {
 			return cliErr(cmd, &CliError{
 				Message: fmt.Sprintf("Invalid PR number: %s", args[0]),
-				Hint:    "Pass the numeric PR number, e.g. 'gtl review 42'.",
+				Hint:    "Pass the PR number, e.g. 'gtl review 42' or 'gtl review #42'.",
 			})
 		}
 
@@ -257,7 +263,9 @@ func completePRs(cmd *cobra.Command, args []string, toComplete string) ([]string
 	var completions []string
 	if prs, err := github.ListOpenPRs(); err == nil {
 		for _, pr := range prs {
-			completions = append(completions, fmt.Sprintf("%d\t%s", pr.Number, pr.Title))
+			// Emit the '#N' form so the supported syntax is discoverable from
+			// completion; parsePRNumber accepts both '#42' and '42'.
+			completions = append(completions, fmt.Sprintf("#%d\t%s", pr.Number, pr.Title))
 		}
 	}
 	return completions, cobra.ShellCompDirectiveNoFileComp

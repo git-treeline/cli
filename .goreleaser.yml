@@ -43,7 +43,8 @@ brews:
       bin.install "git-treeline"
       bin.install_symlink "git-treeline" => "gtl"
 
-      generate_completions_from_executable(bin/"git-treeline", "completion")
+      # Completions target the 'gtl' command name (the symlink users invoke),
+      # which is what 'git-treeline completion' now emits (#compdef gtl / _gtl).
       generate_completions_from_executable(bin/"git-treeline", "completion", base_name: "gtl")
     post_install: |
       # If the user previously installed the HTTPS router service, bounce it

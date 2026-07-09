@@ -80,6 +80,8 @@ func allHealthy() healthDeps {
 		processOnPort:              func(int) processInfo { return processInfo{Name: "git-treeline", PID: 1234} },
 		isPfReloadDaemonInstalled:  func() bool { return true },
 		pfReloadDaemonSupported:    true,
+		routerUsesTLS:              func() bool { return false },
+		loopbackListen:             net.Listen,
 	}
 }
 
@@ -88,8 +90,8 @@ func allHealthy() healthDeps {
 func TestCheckHealthWith_AllHealthy(t *testing.T) {
 	checks := checkHealthWith(allHealthy(), 8443, "1.0.0")
 
-	if len(checks) != 7 {
-		t.Fatalf("expected 7 checks, got %d", len(checks))
+	if len(checks) != 8 {
+		t.Fatalf("expected 8 checks, got %d", len(checks))
 	}
 	for _, c := range checks {
 		if c.Status != "ok" {
@@ -123,11 +125,14 @@ func TestCheckHealthWith_AllBroken(t *testing.T) {
 		processOnPort:              func(int) processInfo { return processInfo{} },
 		isPfReloadDaemonInstalled:  func() bool { return false },
 		pfReloadDaemonSupported:    true,
+		routerUsesTLS:              func() bool { return false },
+		loopbackListen:             net.Listen,
 	}
 
 	checks := checkHealthWith(d, 8443, "1.0.0")
 
 	expected := map[string]string{
+		"loopback":          "error", // binds, but the fake dialer refuses
 		"service":           "error",
 		"binary":            "warn",
 		"router_version":    "warn",
@@ -145,6 +150,42 @@ func TestCheckHealthWith_AllBroken(t *testing.T) {
 		if c.Status != want {
 			t.Errorf("check %q: got %s, want %s", c.Name, c.Status, want)
 		}
+	}
+}
+
+// --- checkLoopback ---
+
+func TestCheckLoopback_Ok(t *testing.T) {
+	d := allHealthy() // real net.Listen + fake dial that succeeds
+	c := checkLoopback(d)
+	if c.Status != "ok" {
+		t.Errorf("expected ok, got %s (%s)", c.Status, c.Detail)
+	}
+}
+
+func TestCheckLoopback_BindFails(t *testing.T) {
+	d := allHealthy()
+	d.loopbackListen = func(string, string) (net.Listener, error) {
+		return nil, fmt.Errorf("operation not permitted")
+	}
+	c := checkLoopback(d)
+	if c.Status != "error" {
+		t.Fatalf("expected error, got %s", c.Status)
+	}
+	if !strings.Contains(c.Detail, "could not bind") {
+		t.Errorf("expected bind detail, got %q", c.Detail)
+	}
+}
+
+func TestCheckLoopback_DialFails(t *testing.T) {
+	d := allHealthy()
+	d.dialTimeout = fakeDial(false) // bound but nothing can connect
+	c := checkLoopback(d)
+	if c.Status != "error" {
+		t.Fatalf("expected error, got %s", c.Status)
+	}
+	if !strings.Contains(c.Detail, "filtered") {
+		t.Errorf("expected filtered detail, got %q", c.Detail)
 	}
 }
 
@@ -360,6 +401,40 @@ func TestCheckRouterResponding_TransportError(t *testing.T) {
 	}
 }
 
+func TestCheckRouterResponding_4xxIsWarn(t *testing.T) {
+	// A 400 from the health endpoint historically meant the probe hit a TLS
+	// router over plain HTTP (Go's "HTTP request to an HTTPS server" reply).
+	// The endpoint itself only returns 200 — any 4xx means something is wrong.
+	d := allHealthy()
+	d.httpProbe = fakeHTTP(400, nil)
+	c := checkRouterResponding(d, 8443)
+	if c.Status != "warn" {
+		t.Errorf("expected warn for 4xx, got %s (%s)", c.Status, c.Detail)
+	}
+}
+
+func TestCheckRouterResponding_ProbeSchemeMatchesRouter(t *testing.T) {
+	for _, tc := range []struct {
+		tls    bool
+		scheme string
+	}{
+		{tls: false, scheme: "http://"},
+		{tls: true, scheme: "https://"},
+	} {
+		d := allHealthy()
+		d.routerUsesTLS = func() bool { return tc.tls }
+		var gotURL string
+		d.httpProbe = func(url string, _ time.Duration) (int, error) {
+			gotURL = url
+			return 200, nil
+		}
+		checkRouterResponding(d, 8443)
+		if !strings.HasPrefix(gotURL, tc.scheme) {
+			t.Errorf("routerUsesTLS=%v: expected probe URL with %s, got %q", tc.tls, tc.scheme, gotURL)
+		}
+	}
+}
+
 // --- checkPortForward ---
 
 func TestCheckPortForward_Ok(t *testing.T) {
@@ -501,19 +576,40 @@ func TestCheckPfReloadDaemon_OkWhenPfNotConfigured(t *testing.T) {
 	}
 }
 
-func TestCheckPortForward_RuleLoadedButPort443Unreachable(t *testing.T) {
-	d := allHealthy()
+// When the rule is confirmed loaded in the kernel AND the router's own port
+// answers but :443 does not, the culprit is an external filter (VPN
+// killswitch / packet filter), not pf. We must NOT send the user to
+// reload-pf in that case — reload-pf can't fix a loopback intercept.
+func TestCheckPortForward_RuleLoadedButPort443Unreachable_ExternalFirewall(t *testing.T) {
+	d := allHealthy() // fakePF(true, true, true) → loaded in kernel, kernel state known
 	d.dialTimeout = func(_, addr string, _ time.Duration) (net.Conn, error) {
 		if addr == "127.0.0.1:443" {
 			return nil, fmt.Errorf("connection refused")
 		}
-		return fakeConn{}, nil
+		return fakeConn{}, nil // router port (8443) answers
 	}
 	c := checkPortForward(d, 8443)
 	if c.Status != "error" {
 		t.Errorf("expected error, got %s", c.Status)
 	}
+	if strings.Contains(c.Fix, "reload-pf") {
+		t.Errorf("external-firewall diagnosis must not point at reload-pf, got %q", c.Fix)
+	}
+	if !strings.Contains(c.Detail, "outside gtl") {
+		t.Errorf("expected external-firewall detail, got %q", c.Detail)
+	}
+}
+
+// If the router's OWN port is also unreachable, we can't blame an external
+// :443-specific filter — fall back to the reload-pf diagnosis.
+func TestCheckPortForward_RuleLoadedButRouterPortAlsoDown(t *testing.T) {
+	d := allHealthy()
+	d.dialTimeout = fakeDial(false) // nothing reachable, including the router port
+	c := checkPortForward(d, 8443)
+	if c.Status != "error" {
+		t.Errorf("expected error, got %s", c.Status)
+	}
 	if c.Fix != "gtl serve reload-pf" {
-		t.Errorf("expected fix to suggest reload-pf, got %q", c.Fix)
+		t.Errorf("expected reload-pf fix when router port is also down, got %q", c.Fix)
 	}
 }

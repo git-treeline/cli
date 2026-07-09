@@ -71,8 +71,11 @@ func PortDisplay(a Allocation) string {
 }
 
 // DropDatabases drops databases for the given allocations using the appropriate adapter.
-// Prints warnings to stderr for any failures but continues processing remaining databases.
-func DropDatabases(allocs []Allocation) {
+// Prints warnings to stderr for any failures but continues processing remaining
+// databases. Returns a non-nil error naming the databases that failed to drop so
+// callers can report accurately and exit non-zero.
+func DropDatabases(allocs []Allocation) error {
+	var failed []string
 	for _, a := range allocs {
 		db := GetStr(a, "database")
 		if db == "" {
@@ -82,6 +85,7 @@ func DropDatabases(allocs []Allocation) {
 		adapter, err := database.ForAdapter(adapterName, nil)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: %s, skipping database drop for %s\n", err, db)
+			failed = append(failed, db)
 			continue
 		}
 		dropTarget := db
@@ -91,21 +95,27 @@ func DropDatabases(allocs []Allocation) {
 		fmt.Printf("==> Dropping database %s\n", db)
 		if err := adapter.Drop(dropTarget); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to drop database %s: %s\n", db, err)
+			failed = append(failed, db)
 		}
 	}
+	if len(failed) > 0 {
+		return fmt.Errorf("failed to drop database(s): %s", strings.Join(failed, ", "))
+	}
+	return nil
 }
 
-// DropSingleDB drops the database for a single allocation.
-func DropSingleDB(alloc Allocation, worktreePath string) {
+// DropSingleDB drops the database for a single allocation. Returns a non-nil
+// error if the drop failed so callers can report accurately and exit non-zero.
+func DropSingleDB(alloc Allocation, worktreePath string) error {
 	db := GetStr(alloc, "database")
 	if db == "" {
-		return
+		return nil
 	}
 	adapterName := GetStr(alloc, "database_adapter")
 	adapter, err := database.ForAdapter(adapterName, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: %s, skipping database drop\n", err)
-		return
+		return fmt.Errorf("dropping database %s: %w", db, err)
 	}
 	dropTarget := db
 	if adapterName == "sqlite" {
@@ -114,5 +124,7 @@ func DropSingleDB(alloc Allocation, worktreePath string) {
 	fmt.Printf("==> Dropping database %s\n", db)
 	if err := adapter.Drop(dropTarget); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to drop database: %s\n", err)
+		return fmt.Errorf("dropping database %s: %w", db, err)
 	}
+	return nil
 }

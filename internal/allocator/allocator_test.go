@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/git-treeline/cli/internal/config"
@@ -601,7 +602,7 @@ func TestBranchReservation_MatchesWorktree(t *testing.T) {
 		"port": {
 			"base": 3000,
 			"increment": 10,
-			"reservations": {"myapp/staging": 6000}
+			"reservations": {"myapp/staging": 6100}
 		},
 		"redis": {"strategy": "prefixed", "url": "redis://localhost:6379"}
 	}`), 0o644)
@@ -617,8 +618,8 @@ func TestBranchReservation_MatchesWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if alloc.Port != 6000 {
-		t.Errorf("expected branch-reserved port 6000, got %d", alloc.Port)
+	if alloc.Port != 6100 {
+		t.Errorf("expected branch-reserved port 6100, got %d", alloc.Port)
 	}
 }
 
@@ -935,6 +936,78 @@ func TestReuseExisting_PortConflict(t *testing.T) {
 	}
 }
 
+// reusePortHeldAllocator builds an allocator whose registry already holds an
+// allocation for /tmp/test-wt on port 49990, with base configured elsewhere so
+// a fresh block lands away from 49990.
+func reusePortHeldAllocator(t *testing.T) *Allocator {
+	t.Helper()
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "registry.json")
+	regData := `{"version":1,"allocations":[{"project":"test","worktree":"/tmp/test-wt","worktree_name":"test-wt","port":49990,"ports":[49990],"database":"","database_adapter":"postgresql"}]}`
+	_ = os.WriteFile(regPath, []byte(regData), 0o644)
+	reg := registry.New(regPath)
+
+	confPath := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(confPath, []byte(`{"port":{"base":49980,"increment":10}}`), 0o644)
+	uc := config.LoadUserConfig(confPath)
+
+	projDir := filepath.Join(dir, "project")
+	_ = os.MkdirAll(projDir, 0o755)
+	_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"), []byte("project: test\n"), 0o644)
+	pc := config.LoadProjectConfig(projDir)
+
+	return New(uc, pc, reg)
+}
+
+// TestReuseExisting_OwnServerRunning: when the allocated port is busy but the
+// worktree's own supervisor is live, that's the steady state (its dev server is
+// running) — reuse must keep the same ports rather than rewrite the allocation.
+func TestReuseExisting_OwnServerRunning(t *testing.T) {
+	al := reusePortHeldAllocator(t)
+	al.SupervisorLive = func(string) bool { return true }
+
+	ln, err := net.Listen("tcp", "127.0.0.1:49990")
+	if err != nil {
+		t.Skip("cannot bind test port 49990")
+	}
+	defer func() { _ = ln.Close() }()
+
+	alloc, err := al.Allocate("/tmp/test-wt", "test-wt", false)
+	if err != nil {
+		t.Fatalf("Allocate failed: %v", err)
+	}
+	if !alloc.Reused {
+		t.Error("expected Reused=true when the worktree's own server holds the port")
+	}
+	if alloc.Port != 49990 {
+		t.Errorf("expected reuse of port 49990, got %d", alloc.Port)
+	}
+}
+
+// TestReuseExisting_ForeignSquatter: an allocated port busy with no live
+// supervisor for this worktree is a genuine conflict — reallocate.
+func TestReuseExisting_ForeignSquatter(t *testing.T) {
+	al := reusePortHeldAllocator(t)
+	al.SupervisorLive = func(string) bool { return false }
+
+	ln, err := net.Listen("tcp", "127.0.0.1:49990")
+	if err != nil {
+		t.Skip("cannot bind test port 49990")
+	}
+	defer func() { _ = ln.Close() }()
+
+	alloc, err := al.Allocate("/tmp/test-wt", "test-wt", false)
+	if err != nil {
+		t.Fatalf("Allocate failed: %v", err)
+	}
+	if alloc.Reused {
+		t.Error("expected Reused=false when a foreign process squats the port")
+	}
+	if alloc.Port == 49990 {
+		t.Errorf("expected re-allocation away from squatted port 49990, got %d", alloc.Port)
+	}
+}
+
 func TestBrowserBlockedPorts_NotAllocated(t *testing.T) {
 	for _, port := range []int{6000, 6665, 6666, 6667} {
 		if !browserBlockedPorts[port] {
@@ -1084,5 +1157,154 @@ func TestAllocator_DefaultRouterPortConflict(t *testing.T) {
 	_, err := al.Allocate("/repo/main", "main", true)
 	if err == nil {
 		t.Fatal("expected error when port.base equals default router port (3001)")
+	}
+}
+
+func TestAllocateNew_ZeroPortCount_Errors(t *testing.T) {
+	al, _ := testAllocator(t, 0, "")
+	// PortsNeeded() defaults to 1 when the key is absent, so set it explicitly.
+	al.ProjectConfig.Data["port_count"] = float64(0)
+
+	_, err := al.Allocate("/wt/branch-a", "branch-a", false)
+	if err == nil {
+		t.Fatal("expected error for port_count 0, got nil (would panic on empty block)")
+	}
+	if !strings.Contains(err.Error(), "port_count must be at least 1") {
+		t.Errorf("expected port_count guard error, got: %v", err)
+	}
+}
+
+func TestAllocateNew_NegativePortCount_Errors(t *testing.T) {
+	al, _ := testAllocator(t, 1, "")
+	al.ProjectConfig.Data["port_count"] = float64(-3)
+
+	if _, err := al.Allocate("/wt/branch-a", "branch-a", false); err == nil {
+		t.Fatal("expected error for negative port_count, got nil")
+	}
+}
+
+func TestReservedBase_ConflictsWithRouterPort_Errors(t *testing.T) {
+	dir := t.TempDir()
+	reg := registry.New(filepath.Join(dir, "registry.json"))
+
+	confPath := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(confPath, []byte(`{
+		"port": {"base": 3000, "increment": 10, "reservations": {"myapp/staging": 3001}},
+		"router": {"port": 3001},
+		"redis": {"strategy": "prefixed", "url": "redis://localhost:6379"}
+	}`), 0o644)
+	uc := config.LoadUserConfig(confPath)
+
+	projDir := filepath.Join(dir, "project")
+	_ = os.MkdirAll(projDir, 0o755)
+	_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"), []byte("project: myapp\n"), 0o644)
+	pc := config.LoadProjectConfig(projDir)
+
+	al := New(uc, pc, reg)
+	_, err := al.Allocate("/wt/staging", "staging", false, "staging")
+	if err == nil {
+		t.Fatal("expected error for reserved base colliding with router port")
+	}
+	if !strings.Contains(err.Error(), "router.port") {
+		t.Errorf("expected router.port conflict error, got: %v", err)
+	}
+}
+
+func TestReservedBase_ConflictsWithBrowserBlockedPort_Errors(t *testing.T) {
+	dir := t.TempDir()
+	reg := registry.New(filepath.Join(dir, "registry.json"))
+
+	confPath := filepath.Join(dir, "config.json")
+	// 6000 is on the WHATWG bad-port list.
+	_ = os.WriteFile(confPath, []byte(`{
+		"port": {"base": 3000, "increment": 10, "reservations": {"myapp/staging": 6000}},
+		"redis": {"strategy": "prefixed", "url": "redis://localhost:6379"}
+	}`), 0o644)
+	uc := config.LoadUserConfig(confPath)
+
+	projDir := filepath.Join(dir, "project")
+	_ = os.MkdirAll(projDir, 0o755)
+	_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"), []byte("project: myapp\n"), 0o644)
+	pc := config.LoadProjectConfig(projDir)
+
+	al := New(uc, pc, reg)
+	_, err := al.Allocate("/wt/staging", "staging", false, "staging")
+	if err == nil {
+		t.Fatal("expected error for browser-blocked reserved base")
+	}
+	if !strings.Contains(err.Error(), "browser-blocked") {
+		t.Errorf("expected browser-blocked error, got: %v", err)
+	}
+}
+
+// TestAllocate_Concurrent exercises the transactional allocation path: many
+// goroutines allocate against one shared registry file at once. It asserts zero
+// duplicate ports and zero duplicate Redis DBs across the results — the Redis
+// check is the real regression guard, since the old read→choose→write picked
+// DBs from a stale unlocked snapshot and collided silently. Run under -race.
+func TestAllocate_Concurrent(t *testing.T) {
+	dir := t.TempDir()
+	reg := registry.New(filepath.Join(dir, "registry.json"))
+
+	confPath := filepath.Join(dir, "config.json")
+	// High port base avoids common services; "database" Redis strategy is the
+	// path where collisions were silent.
+	_ = os.WriteFile(confPath, []byte(`{
+		"port": {"base": 40000, "increment": 10},
+		"redis": {"strategy": "database", "databases": 128, "url": "redis://localhost:6379"}
+	}`), 0o644)
+	uc := config.LoadUserConfig(confPath)
+
+	projDir := filepath.Join(dir, "project")
+	_ = os.MkdirAll(projDir, 0o755)
+	_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"),
+		[]byte("project: myapp\ndatabase:\n  adapter: postgresql\n  template: t\n  pattern: \"{template}_{worktree}\"\n"), 0o644)
+	pc := config.LoadProjectConfig(projDir)
+
+	al := New(uc, pc, reg)
+
+	const n = 40
+	type result struct {
+		ports []int
+		db    int
+		err   error
+	}
+	results := make([]result, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			name := fmt.Sprintf("b%d", i)
+			alloc, err := al.Allocate("/wt/"+name, name, false)
+			if err != nil {
+				results[i] = result{err: err}
+				return
+			}
+			results[i] = result{ports: alloc.Ports, db: alloc.RedisDB}
+		}(i)
+	}
+	wg.Wait()
+
+	seenPort := make(map[int]int)
+	seenDB := make(map[int]int)
+	for i, r := range results {
+		if r.err != nil {
+			t.Fatalf("goroutine %d: %v", i, r.err)
+		}
+		for _, p := range r.ports {
+			if prev, ok := seenPort[p]; ok {
+				t.Errorf("duplicate port %d in goroutines %d and %d", p, prev, i)
+			}
+			seenPort[p] = i
+		}
+		if r.db <= 0 {
+			t.Errorf("goroutine %d: expected a positive Redis DB, got %d", i, r.db)
+			continue
+		}
+		if prev, ok := seenDB[r.db]; ok {
+			t.Errorf("duplicate redis_db %d in goroutines %d and %d", r.db, prev, i)
+		}
+		seenDB[r.db] = i
 	}
 }

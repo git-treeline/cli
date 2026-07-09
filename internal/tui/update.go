@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
 )
 
 type envSyncResultMsg struct{ err error }
@@ -21,11 +21,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case dataMsg:
-		m.snapshot = Snapshot(msg)
-		m.flatList = buildFlatList(m.snapshot, m.filterText)
-		m.clampCursor()
 		m.ready = true
 		m.polling = false
+		if msg.err != nil {
+			// Retain the last-known-good snapshot; surface the failure in the
+			// view rather than blanking the dashboard to "0 worktrees".
+			m.pollErr = msg.err
+			return m, nil
+		}
+		m.pollErr = nil
+		m.snapshot = msg.snapshot
+		m.flatList = buildFlatList(m.snapshot, m.filterText)
+		m.clampCursor()
 		return m, nil
 
 	case tickMsg:
@@ -120,7 +127,9 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "o":
 		m.openInBrowser()
 	case "d":
-		if m.selectedWorktree() != nil {
+		if wt := m.selectedWorktree(); wt != nil {
+			target := *wt
+			m.confirmTarget = &target
 			m.confirmKind = "release"
 		}
 
@@ -172,12 +181,14 @@ func (m Model) updateConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y":
 		if m.confirmKind == "release" {
-			cmd := m.releaseWorktree()
+			cmd := m.releaseWorktree(m.confirmTarget)
 			m.confirmKind = ""
+			m.confirmTarget = nil
 			return m, cmd
 		}
 	}
 	m.confirmKind = ""
+	m.confirmTarget = nil
 	return m, nil
 }
 
@@ -398,8 +409,7 @@ func (m *Model) openInBrowser() {
 	m.deps.openURL(url)
 }
 
-func (m *Model) releaseWorktree() tea.Cmd {
-	wt := m.selectedWorktree()
+func (m *Model) releaseWorktree(wt *WorktreeStatus) tea.Cmd {
 	if wt == nil {
 		return nil
 	}

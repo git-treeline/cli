@@ -22,6 +22,7 @@ func init() {
 	reallocateCmd.Flags().StringVar(&reallocateFrom, "from", "", "Scan this directory for treeline projects (recursive, depth 3)")
 	reallocateCmd.Flags().BoolVar(&reallocateApply, "apply", false, "Actually run setup on each candidate (default: dry-run)")
 	reallocateCmd.Flags().BoolVar(&reallocateAllReg, "all-registry", false, "Re-run setup for every entry currently in the registry whose directory still exists")
+	reallocateCmd.ValidArgsFunction = completeRegistryWorktreePaths
 	rootCmd.AddCommand(reallocateCmd)
 }
 

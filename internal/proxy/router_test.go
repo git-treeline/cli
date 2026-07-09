@@ -211,6 +211,69 @@ func TestRouter_HealthEndpointBypassesRouting(t *testing.T) {
 	}
 }
 
+// The default (no Accept/format) response must stay the exact "ok\n" text the
+// liveness probe checkRouterResponding depends on.
+func TestRouter_HealthEndpoint_PlainTextDefault(t *testing.T) {
+	reg := testRegistry(t, nil)
+	router := NewRouter(3000, reg)
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + HealthEndpoint)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("expected text/plain, got %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "ok\n" {
+		t.Errorf("expected \"ok\\n\", got %q", string(body))
+	}
+}
+
+func TestRouter_HealthEndpoint_JSON(t *testing.T) {
+	reg := testRegistry(t, nil)
+	router := NewRouter(3000, reg).WithVersion("9.9.9")
+	router.startedAt = time.Now().Add(-30 * time.Second)
+	router.lastRefresh = time.Now()
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+
+	for _, url := range []string{HealthEndpoint + "?format=json", HealthEndpoint} {
+		req, _ := http.NewRequest("GET", ts.URL+url, nil)
+		if !strings.Contains(url, "format=json") {
+			req.Header.Set("Accept", "application/json")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request failed: %v", err)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+			t.Errorf("%s: expected application/json, got %q", url, ct)
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			t.Fatalf("%s: decode: %v", url, err)
+		}
+		_ = resp.Body.Close()
+		if payload["status"] != "ok" {
+			t.Errorf("%s: status = %v, want ok", url, payload["status"])
+		}
+		if payload["version"] != "9.9.9" {
+			t.Errorf("%s: version = %v, want 9.9.9", url, payload["version"])
+		}
+		if _, ok := payload["uptime_seconds"]; !ok {
+			t.Errorf("%s: missing uptime_seconds", url)
+		}
+		if _, ok := payload["last_refresh"]; !ok {
+			t.Errorf("%s: missing last_refresh", url)
+		}
+	}
+}
+
 func TestRouteKey_LongLabelTruncated(t *testing.T) {
 	key := RouteKey("my-long-company-name", "feature/redesign-entire-authentication-flow-for-enterprise-clients")
 	if len(key) > 63 {
@@ -273,6 +336,22 @@ func TestRouterNotFound(t *testing.T) {
 	}
 }
 
+func TestRouterNotFound_EscapesSubdomain(t *testing.T) {
+	reg := testRegistry(t, nil)
+	router := NewRouter(3000, reg)
+
+	rec := httptest.NewRecorder()
+	router.serveNotFound(rec, `<script>alert(1)</script><img src=x onerror=alert(2)>`)
+
+	body := rec.Body.String()
+	if strings.Contains(body, "<script>") || strings.Contains(body, "<img") {
+		t.Errorf("subdomain was reflected unescaped into 404 page:\n%s", body)
+	}
+	if !strings.Contains(body, "&lt;script&gt;") {
+		t.Errorf("expected HTML-escaped subdomain in body:\n%s", body)
+	}
+}
+
 func TestRouterLoopDetection(t *testing.T) {
 	reg := testRegistry(t, []registry.Allocation{
 		{"project": "salt", "branch": "main", "port": float64(3001), "ports": []any{float64(3001)}, "worktree": "/tmp/salt"},
@@ -296,6 +375,53 @@ func TestRouterLoopDetection(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "Loop Detected") {
 		t.Error("expected loop detection message in body")
+	}
+}
+
+func TestInboundHops_NormalizesClientValues(t *testing.T) {
+	cases := []struct {
+		header string
+		want   int
+	}{
+		{"", 0},
+		{"2", 2},
+		{"-1000000", 0}, // negative can't weaken loop detection
+		{"not-a-number", 0},
+		{"999999", maxProxyHops}, // oversized is capped, not trusted
+	}
+	for _, tc := range cases {
+		req, _ := http.NewRequest("GET", "/", nil)
+		if tc.header != "" {
+			req.Header.Set("X-Gtl-Hops", tc.header)
+		}
+		if got := inboundHops(req); got != tc.want {
+			t.Errorf("inboundHops(%q) = %d, want %d", tc.header, got, tc.want)
+		}
+	}
+}
+
+func TestRouterNegativeHopHeaderStillDetectsLoops(t *testing.T) {
+	reg := testRegistry(t, []registry.Allocation{
+		{"project": "salt", "branch": "main", "port": float64(3001), "ports": []any{float64(3001)}, "worktree": "/tmp/salt"},
+	})
+	router := NewRouter(3000, reg)
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+
+	// A forged negative count must not let a genuine loop slip past the
+	// threshold; the router clamps it to 0 and still increments per hop.
+	req, _ := http.NewRequest("GET", ts.URL+"/", nil)
+	req.Host = "salt-main.localhost:3000"
+	req.Header.Set("X-Gtl-Hops", "-500")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	// Clamped to 0 → below threshold → request is routed (backend down → 502),
+	// but crucially not an unbounded pass-through of the forged counter.
+	if resp.StatusCode == http.StatusLoopDetected {
+		t.Error("negative hop header should be clamped, not trigger 508 here")
 	}
 }
 

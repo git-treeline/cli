@@ -629,9 +629,33 @@ func forceKillSupervisor(sockPath string) (bool, error) {
 	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
 		return false, err
 	}
+	// Killing only the supervisor orphans the child process group, which keeps
+	// holding the port with every handle erased. Reap the whole group via the
+	// pgid the supervisor persisted alongside its PID file.
+	reapChildGroup(sockPath)
 	_ = os.Remove(sockPath)
 	_ = os.Remove(pidPath)
 	return true, nil
+}
+
+// reapChildGroup reads the child pgid sidecar written by the supervisor and
+// SIGKILLs the entire process group so an orphaned dev server can't keep
+// holding the port. It is deliberately defensive: a missing or garbage file,
+// or a pgid that could target the session/init, is a no-op.
+func reapChildGroup(sockPath string) {
+	childPidPath := supervisor.ChildPidPath(sockPath)
+	data, err := os.ReadFile(childPidPath)
+	if err != nil {
+		return
+	}
+	defer func() { _ = os.Remove(childPidPath) }()
+	pgid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pgid <= 1 {
+		return
+	}
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+		return
+	}
 }
 
 // stopOtherSupervisor shuts the existing supervisor down and waits for its

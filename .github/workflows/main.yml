@@ -15,24 +15,32 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Test
-        run: go test ./...
+      - name: Test (race)
+        run: go test -race ./...
 
       - name: Vet
         run: go vet ./...
 
       - name: Lint
         uses: golangci/golangci-lint-action@v9
-        with:
-          version: latest
 
       - name: Vulnerability check
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
 
-      - name: Build
-        run: go build .
+      - name: Build (all platforms)
+        run: |
+          go build ./...
+          GOOS=linux go build ./...
+
+      - name: Smoke test the binary
+        run: |
+          go build -o /tmp/gtl .
+          /tmp/gtl version
+          /tmp/gtl --help >/dev/null
+          /tmp/gtl status --json >/dev/null
+          /tmp/gtl completion bash >/dev/null
 
   ci-macos:
     runs-on: macos-latest
@@ -43,5 +51,9 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Test platform-specific packages
-        run: go test ./internal/proxy/... ./internal/service/... ./internal/supervisor/...
+      # Full suite on the primary platform (launchd, pfctl, keychain, /etc/hosts).
+      - name: Test (race)
+        run: go test -race ./...
+
+      - name: Build
+        run: go build ./...

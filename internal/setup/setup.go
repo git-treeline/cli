@@ -100,6 +100,7 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	resolverPkg := resolve.New(s.Registry, s.WorktreePath, branch)
 	s.Resolver = resolverPkg.Resolve
 	hadExisting := s.Registry.Find(s.WorktreePath) != nil
+	s.Allocator.DryRun = s.Options.DryRun
 	alloc, err := s.Allocator.Allocate(s.WorktreePath, worktreeName, isMain, branch)
 	if err != nil {
 		return nil, err
@@ -128,7 +129,10 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	} else {
 		s.log("Allocating port %d for '%s'", alloc.Port, worktreeName)
 	}
-	if !alloc.Reused {
+	// A new (non-main) allocation is already persisted atomically inside the
+	// allocator's registry transaction; only the main-worktree path, which
+	// selects without persisting, needs to be written here.
+	if !alloc.Reused && isMain {
 		if err := s.Registry.Allocate(alloc.ToRegistryEntry()); err != nil {
 			return nil, fmt.Errorf("registering allocation: %w", err)
 		}
@@ -364,12 +368,18 @@ func (s *Setup) writeEnvFile(vars map[string]string) error {
 	target := s.ProjectConfig.EnvFileTarget()
 	envPath := filepath.Join(s.WorktreePath, target)
 
-	source := filepath.Join(s.MainRepo, s.ProjectConfig.EnvFileSource())
-	if _, err := os.Stat(source); err != nil {
-		source = filepath.Join(s.MainRepo, ".env")
-	}
-	if data, err := os.ReadFile(source); err == nil {
-		_ = os.WriteFile(envPath, data, 0o644)
+	// Seed from the main repo's env file only on first provisioning. On a
+	// re-run (setup/refresh) the worktree env already exists and may hold
+	// manual edits — copying the seed over it would destroy them before the
+	// updateOrAppend pass below re-applies gtl's vars. Update-in-place instead.
+	if _, err := os.Stat(envPath); err != nil {
+		source := filepath.Join(s.MainRepo, s.ProjectConfig.EnvFileSource())
+		if _, err := os.Stat(source); err != nil {
+			source = filepath.Join(s.MainRepo, ".env")
+		}
+		if data, err := os.ReadFile(source); err == nil {
+			_ = atomicWriteFile(envPath, data, 0o644)
+		}
 	}
 
 	for key, value := range vars {
@@ -409,7 +419,32 @@ func updateOrAppend(file, key, value string) error {
 		content += line + "\n"
 	}
 
-	return os.WriteFile(file, []byte(content), 0o644)
+	return atomicWriteFile(file, []byte(content), 0o644)
+}
+
+// atomicWriteFile writes data to path by creating a temp file in the same
+// directory and renaming it into place. A crash or ENOSPC mid-write can only
+// corrupt the discarded temp file, never the live env file — the rename is
+// atomic, so readers see either the old contents or the new ones.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Chmod(perm)
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 func (s *Setup) syncTemplateDatabase() error {
@@ -446,6 +481,12 @@ func (s *Setup) syncTemplateDatabase() error {
 }
 
 func (s *Setup) handleProjectRename() error {
+	// Never treat an unreadable or unparseable config as a rename: Project()
+	// falls back to the directory name in that case, which would look like a
+	// rename and drop the recorded database. Refuse rather than risk data loss.
+	if err := s.ProjectConfig.LoadError(); err != nil {
+		return err
+	}
 	entry := s.Registry.Find(s.WorktreePath)
 	if entry == nil {
 		return nil

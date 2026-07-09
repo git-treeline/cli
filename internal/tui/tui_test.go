@@ -2,9 +2,13 @@ package tui
 
 import (
 	"errors"
+	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/git-treeline/cli/internal/registry"
 )
 
@@ -445,6 +449,76 @@ func TestReleaseResultMsg_SetsStatusOnError(t *testing.T) {
 	}
 }
 
+func TestGtlBinaryPath_ResolvesRunningExecutable(t *testing.T) {
+	got := gtlBinaryPath()
+	if got == "" {
+		t.Fatal("expected non-empty binary path")
+	}
+	// os.Executable succeeds under the test runner, so an absolute path to the
+	// running binary is expected rather than the bare fallback name.
+	if !filepath.IsAbs(got) {
+		t.Errorf("expected absolute path, got %q", got)
+	}
+}
+
+func TestTruncate_RuneAware(t *testing.T) {
+	// A multibyte (CJK) branch name must be cut on a rune boundary and stay
+	// within the cell-width budget.
+	s := "特性ブランチテスト"
+	got := truncate(s, 6)
+	if !utf8.ValidString(got) {
+		t.Errorf("truncate produced invalid UTF-8: %q", got)
+	}
+	if w := lipgloss.Width(got); w > 6 {
+		t.Errorf("truncate exceeded width budget: width=%d, %q", w, got)
+	}
+
+	// A multibyte string within the budget is returned unchanged.
+	if got := truncate("café", 10); got != "café" {
+		t.Errorf("expected café unchanged, got %q", got)
+	}
+}
+
+// --- poll error handling ---
+
+func TestDataMsg_FailedPollRetainsSnapshotAndSurfacesError(t *testing.T) {
+	m := buildTestModel()
+	m.ready = true
+	prior := m.snapshot
+
+	result, _ := m.Update(dataMsg{err: errors.New("registry is corrupt")})
+	rm := result.(Model)
+
+	if rm.pollErr == nil {
+		t.Fatal("expected pollErr to be set on failed poll")
+	}
+	if len(rm.snapshot.Worktrees) != len(prior.Worktrees) {
+		t.Errorf("expected prior snapshot retained (%d worktrees), got %d",
+			len(prior.Worktrees), len(rm.snapshot.Worktrees))
+	}
+	if len(rm.flatList) == 0 {
+		t.Error("expected flatList retained, got empty")
+	}
+
+	bar := rm.renderStatusBar(120)
+	if !strings.Contains(bar, "poll failed") {
+		t.Errorf("expected status bar to surface poll failure, got %q", bar)
+	}
+
+	// A subsequent successful poll clears the error and updates the snapshot.
+	next := Snapshot{Projects: []string{"api"}, Worktrees: []WorktreeStatus{
+		{Project: "api", Branch: "main", WorktreeName: "api-main", Ports: []int{3000}},
+	}}
+	result, _ = rm.Update(dataMsg{snapshot: next})
+	rm = result.(Model)
+	if rm.pollErr != nil {
+		t.Errorf("expected pollErr cleared after successful poll, got %v", rm.pollErr)
+	}
+	if len(rm.snapshot.Worktrees) != 1 {
+		t.Errorf("expected snapshot updated to 1 worktree, got %d", len(rm.snapshot.Worktrees))
+	}
+}
+
 // --- action handoff tests ---
 
 type callRecord struct {
@@ -672,7 +746,7 @@ func TestRestartSupervisor_SendsRestart(t *testing.T) {
 func TestReleaseWorktree_PassesPath(t *testing.T) {
 	var calls []callRecord
 	m := buildTestModelWithDeps(&calls)
-	cmd := m.releaseWorktree()
+	cmd := m.releaseWorktree(m.selectedWorktree())
 	cmd()
 	if len(calls) != 1 || calls[0].action != "releaseWorktree" {
 		t.Fatalf("expected releaseWorktree call, got %v", calls)
@@ -795,6 +869,7 @@ func TestConfirm_YReleasesWorktree(t *testing.T) {
 	var calls []callRecord
 	m := buildTestModelWithDeps(&calls)
 	m.confirmKind = "release"
+	m.confirmTarget = m.selectedWorktree()
 
 	result, cmd := m.updateConfirm(tea.KeyPressMsg(tea.Key{Code: 'y', Text: "y"}))
 	rm := result.(Model)
@@ -810,6 +885,51 @@ func TestConfirm_YReleasesWorktree(t *testing.T) {
 	}
 	if calls[0].args[0] != "/home/dev/api" {
 		t.Errorf("expected /home/dev/api, got %s", calls[0].args[0])
+	}
+}
+
+func TestConfirm_ReleasesCapturedTargetAfterListReorder(t *testing.T) {
+	var calls []callRecord
+	m := buildTestModelWithDeps(&calls)
+	// cursor is on api/main (path /home/dev/api)
+
+	// Open the release-confirm overlay on the selected worktree.
+	res, _ := m.updateNormal(tea.KeyPressMsg(tea.Key{Code: 'd', Text: "d"}))
+	m = res.(Model)
+	if m.confirmKind != "release" || m.confirmTarget == nil {
+		t.Fatalf("expected release confirm open, got kind=%q target=%v", m.confirmKind, m.confirmTarget)
+	}
+	if m.confirmTarget.WorktreePath != "/home/dev/api" {
+		t.Fatalf("expected captured target /home/dev/api, got %s", m.confirmTarget.WorktreePath)
+	}
+
+	// A background poll rebuilds the list and shrinks/reorders it so the
+	// cursor now points at a different worktree while the overlay is open.
+	reordered := Snapshot{
+		Projects: []string{"api"},
+		Worktrees: []WorktreeStatus{
+			{Project: "api", Branch: "feature-x", WorktreeName: "api-feature-x", WorktreePath: "/home/dev/api-feature-x", Ports: []int{3010}},
+		},
+	}
+	res, _ = m.Update(dataMsg{snapshot: reordered})
+	m = res.(Model)
+
+	if sw := m.selectedWorktree(); sw == nil || sw.WorktreePath != "/home/dev/api-feature-x" {
+		t.Fatalf("expected cursor to have moved to api-feature-x, got %v", sw)
+	}
+
+	// Confirming must release the originally-captured api/main, not whatever
+	// the cursor now points at.
+	_, cmd := m.updateConfirm(tea.KeyPressMsg(tea.Key{Code: 'y', Text: "y"}))
+	if cmd == nil {
+		t.Fatal("expected non-nil release cmd")
+	}
+	cmd()
+	if len(calls) != 1 || calls[0].action != "releaseWorktree" {
+		t.Fatalf("expected releaseWorktree call, got %v", calls)
+	}
+	if calls[0].args[0] != "/home/dev/api" {
+		t.Errorf("expected originally-selected /home/dev/api released, got %s", calls[0].args[0])
 	}
 }
 
@@ -857,7 +977,7 @@ func TestReleaseWorktree_NilWhenNoSelection(t *testing.T) {
 	var calls []callRecord
 	m := buildTestModelWithDeps(&calls)
 	m.cursor = 0 // header
-	cmd := m.releaseWorktree()
+	cmd := m.releaseWorktree(m.selectedWorktree())
 	if cmd != nil {
 		t.Error("expected nil cmd when on header")
 	}

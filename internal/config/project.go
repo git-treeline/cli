@@ -73,6 +73,7 @@ var ProjectDefaults = map[string]any{
 type ProjectConfig struct {
 	ProjectRoot string
 	Data        map[string]any
+	loadErr     error
 }
 
 func LoadProjectConfig(projectRoot string) *ProjectConfig {
@@ -98,6 +99,9 @@ func (pc *ProjectConfig) Project() string {
 // when the config is safe to use, otherwise an error naming the offending
 // field with a suggested replacement.
 func (pc *ProjectConfig) Validate() error {
+	if pc.loadErr != nil {
+		return pc.loadErr
+	}
 	if v, ok := pc.Data["project"].(string); ok && v != "" {
 		if !IsValidIdentifier(v) {
 			return fmt.Errorf("project name %q in %s contains invalid characters; must match [a-zA-Z_][a-zA-Z0-9_]* (run `gtl rename %s` to fix)",
@@ -652,7 +656,7 @@ func (pc *ProjectConfig) SetProject(name string) error {
 	}
 
 	pc.Data["project"] = name
-	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
+	return atomicWriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
 }
 
 // migrateDefaultBranch rewrites default_branch → merge_target in the YAML
@@ -674,7 +678,7 @@ func (pc *ProjectConfig) migrateDefaultBranch() {
 		return
 	}
 	content := strings.Replace(string(raw), "default_branch:", "merge_target:", 1)
-	_ = os.WriteFile(path, []byte(content), 0o644)
+	_ = atomicWriteFile(path, []byte(content), 0o644)
 }
 
 // migrateCommands rewrites setup_commands/start_command → commands.setup/start
@@ -723,7 +727,7 @@ func (pc *ProjectConfig) migrateCommands() {
 			content = strings.ReplaceAll(content, "\n\n\n", "\n\n")
 		}
 	}
-	_ = os.WriteFile(path, []byte(content), 0o644)
+	_ = atomicWriteFile(path, []byte(content), 0o644)
 }
 
 // rewriteSetupCommands converts the flat setup_commands key into a commands.setup block.
@@ -811,7 +815,7 @@ func (pc *ProjectConfig) migrateEnvFile() {
 	} else {
 		pc.Data["env_file"] = map[string]any{"path": target, "seed_from": source}
 	}
-	_ = os.WriteFile(path, []byte(newContent), 0o644)
+	_ = atomicWriteFile(path, []byte(newContent), 0o644)
 }
 
 // migrateEditor rewrites editor.vscode_title → editor.title in the YAML file
@@ -836,7 +840,7 @@ func (pc *ProjectConfig) migrateEditor() {
 		return
 	}
 	content := strings.Replace(string(raw), "vscode_title:", "title:", 1)
-	_ = os.WriteFile(path, []byte(content), 0o644)
+	_ = atomicWriteFile(path, []byte(content), 0o644)
 }
 
 func (pc *ProjectConfig) migratePortCount() {
@@ -862,7 +866,7 @@ func (pc *ProjectConfig) migratePortCount() {
 
 	_, _ = fmt.Fprintf(os.Stderr, "Warning: ports_needed is deprecated, renamed to port_count in %s\n", path)
 	content = strings.Replace(content, "ports_needed:", "port_count:", 1)
-	_ = os.WriteFile(path, []byte(content), 0o644)
+	_ = atomicWriteFile(path, []byte(content), 0o644)
 }
 
 // rewriteEnvFileToSimple collapses the block-style env_file to a single line.
@@ -916,15 +920,35 @@ var projectKnownKeys = map[string]bool{
 func (pc *ProjectConfig) load() map[string]any {
 	raw, err := os.ReadFile(pc.configPath())
 	if err != nil {
+		// A missing config file is legitimate — fall back to defaults. Any
+		// other read failure (permissions, I/O) is recorded so callers don't
+		// treat an unreadable config as an empty one.
+		if !os.IsNotExist(err) {
+			pc.loadErr = fmt.Errorf("reading %s: %w", ProjectConfigFile, err)
+		}
 		return copyMap(ProjectDefaults)
 	}
 
 	var yamlData map[string]any
-	if err := yaml.Unmarshal(raw, &yamlData); err != nil || yamlData == nil {
+	if err := yaml.Unmarshal(raw, &yamlData); err != nil {
+		// A syntax error must not silently degrade to defaults — that lets
+		// Project() fall back to the directory name and can trigger data loss
+		// downstream (e.g. a bogus project rename). Surface it via Validate().
+		pc.loadErr = fmt.Errorf("parsing %s: %w", ProjectConfigFile, err)
+		return copyMap(ProjectDefaults)
+	}
+	if yamlData == nil {
 		return copyMap(ProjectDefaults)
 	}
 
 	WarnUnknownKeys(yamlData, projectKnownKeys, ProjectConfigFile)
 
 	return DeepMerge(ProjectDefaults, yamlData)
+}
+
+// LoadError reports a failure to read or parse the project config file. It is
+// nil when the config loaded cleanly or was simply absent (defaults applied).
+// Callers about to take a config-derived destructive action should consult it.
+func (pc *ProjectConfig) LoadError() error {
+	return pc.loadErr
 }

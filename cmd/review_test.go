@@ -11,6 +11,9 @@ func TestParsePRNumber(t *testing.T) {
 	}{
 		{name: "bare number", arg: "473", want: 473},
 		{name: "leading hash", arg: "#473", want: 473},
+		{name: "trailing whitespace", arg: "#473 ", want: 473},
+		{name: "surrounding whitespace", arg: "  473\n", want: 473},
+		{name: "hash and trailing whitespace bare", arg: "473\t", want: 473},
 		{name: "single digit", arg: "5", want: 5},
 		{name: "single digit with hash", arg: "#5", want: 5},
 		{name: "non-numeric", arg: "abc", wantErr: true},

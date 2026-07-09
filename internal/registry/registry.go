@@ -143,29 +143,88 @@ func (r *Registry) FindProjectBranch(project, branch string) Allocation {
 }
 
 func (r *Registry) UsedPorts() []int {
+	return allocationsUsedPorts(r.Allocations())
+}
+
+func (r *Registry) UsedRedisDbs() []int {
+	return allocationsUsedRedisDbs(r.Allocations())
+}
+
+// allocationsUsedPorts derives every port claimed by the given allocations,
+// covering both the "ports" array and the legacy single "port" field. It is a
+// pure function so it can be evaluated against an in-lock RegistryData snapshot.
+func allocationsUsedPorts(allocs []Allocation) []int {
 	var ports []int
-	for _, a := range r.Allocations() {
-		if ps, ok := a["ports"].([]any); ok {
-			for _, p := range ps {
-				if f, ok := p.(float64); ok {
-					ports = append(ports, int(f))
-				}
-			}
-		} else if p, ok := a["port"].(float64); ok {
-			ports = append(ports, int(p))
-		}
+	for _, a := range allocs {
+		ports = append(ports, ExtractPorts(a)...)
 	}
 	return ports
 }
 
-func (r *Registry) UsedRedisDbs() []int {
+// allocationsUsedRedisDbs derives every Redis database index claimed by the
+// given allocations. Pure, for the same reason as allocationsUsedPorts.
+func allocationsUsedRedisDbs(allocs []Allocation) []int {
 	var dbs []int
-	for _, a := range r.Allocations() {
+	for _, a := range allocs {
 		if v, ok := a["redis_db"].(float64); ok {
 			dbs = append(dbs, int(v))
 		}
 	}
 	return dbs
+}
+
+// UsedResources is the in-lock snapshot of already-claimed resources handed to
+// an AllocateTx compute callback so it can choose non-colliding values.
+type UsedResources struct {
+	Ports    []int
+	RedisDbs []int
+}
+
+// AllocateTx performs resource selection and persistence as a single locked
+// transaction. Under one lock acquisition it computes the resources already in
+// use (excluding any prior entry for worktree, which is being replaced), invokes
+// compute to choose a new allocation against that fresh state, and — only if
+// compute succeeds — applies the same worktree-filtering, links-preservation,
+// allocated_at stamping and append that Allocate does before saving. If compute
+// returns an error nothing is written. This closes the read→choose→write race
+// where two concurrent callers pick the same Redis DB from a stale snapshot.
+func (r *Registry) AllocateTx(worktree string, compute func(used UsedResources) (Allocation, error)) (Allocation, error) {
+	resolved := resolvePath(worktree)
+	var result Allocation
+	err := r.withLockE(func(data *RegistryData) error {
+		filtered := make([]Allocation, 0, len(data.Allocations))
+		var links map[string]any
+		for _, a := range data.Allocations {
+			if GetString(a, "worktree") != resolved {
+				filtered = append(filtered, a)
+			} else if l, ok := a["links"].(map[string]any); ok && len(l) > 0 {
+				links = l
+			}
+		}
+
+		entry, cerr := compute(UsedResources{
+			Ports:    allocationsUsedPorts(filtered),
+			RedisDbs: allocationsUsedRedisDbs(filtered),
+		})
+		if cerr != nil {
+			return cerr
+		}
+
+		entry["worktree"] = resolved
+		if links != nil {
+			entry["links"] = links
+		}
+		if entry["allocated_at"] == nil {
+			entry["allocated_at"] = time.Now().UTC().Format(time.RFC3339)
+		}
+		data.Allocations = append(filtered, entry)
+		result = entry
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (r *Registry) Allocate(entry Allocation) error {
@@ -345,20 +404,41 @@ func (r *Registry) EdgesFor(ref RepoRef) []Edge {
 	return result
 }
 
-// Relate creates a durable, symmetric edge between two endpoints. It is
-// idempotent: relating an already-related pair is a no-op success. Returns
-// true when a new edge was created, false when the pair already existed.
-// edgeType defaults to "related" when empty.
-func (r *Registry) Relate(a, b RepoRef, edgeType string) (bool, error) {
+// RelateOutcome reports how Relate reconciled a (pair, type) request against
+// the stored edge for that pair.
+type RelateOutcome int
+
+const (
+	// RelateUnchanged means the pair already existed with the requested type.
+	RelateUnchanged RelateOutcome = iota
+	// RelateCreated means a new edge was inserted.
+	RelateCreated
+	// RelateUpdated means the pair existed but its Type was changed.
+	RelateUpdated
+)
+
+// Relate creates or reconciles a durable, symmetric edge between two endpoints.
+// Edges dedupe on the (A, B) pair regardless of type, so re-relating an existing
+// pair with a different edgeType updates the stored Type in place rather than
+// silently dropping the request. It is idempotent: re-relating with the same
+// type is a no-op. edgeType defaults to "related" when empty. Returns which of
+// create / update / no-op occurred.
+func (r *Registry) Relate(a, b RepoRef, edgeType string) (RelateOutcome, error) {
 	if edgeType == "" {
 		edgeType = "related"
 	}
 	ca, cb := canonicalEdge(a, b)
-	created := false
+	outcome := RelateCreated
 	err := r.withLock(func(data *RegistryData) {
-		for _, e := range data.Edges {
+		for i, e := range data.Edges {
 			if e.A == ca && e.B == cb {
-				return // already related — no-op
+				if e.Type == edgeType {
+					outcome = RelateUnchanged
+				} else {
+					data.Edges[i].Type = edgeType
+					outcome = RelateUpdated
+				}
+				return
 			}
 		}
 		data.Edges = append(data.Edges, Edge{
@@ -367,9 +447,8 @@ func (r *Registry) Relate(a, b RepoRef, edgeType string) (bool, error) {
 			Type:      edgeType,
 			CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		})
-		created = true
 	})
-	return created, err
+	return outcome, err
 }
 
 // Unrelate removes the edge between two endpoints. It is idempotent:
@@ -390,6 +469,74 @@ func (r *Registry) Unrelate(a, b RepoRef) (bool, error) {
 		data.Edges = filtered
 	})
 	return removed, err
+}
+
+// GCDanglingEdges removes relationship edges whose BOTH endpoints are
+// unresolvable according to resolvable, returning the removed edges. The
+// two-sided rule is deliberately conservative: an edge with even one live
+// endpoint is kept, so an edge pointing at a worktree that is only temporarily
+// archived (its sibling still checked out) survives to be re-linked later. Only
+// edges where neither side maps to anything live are treated as truly obsolete
+// (typo'd or long-abandoned) and reclaimed.
+func (r *Registry) GCDanglingEdges(resolvable func(RepoRef) bool) ([]Edge, error) {
+	var removed []Edge
+	err := r.withLock(func(data *RegistryData) {
+		filtered := make([]Edge, 0, len(data.Edges))
+		for _, e := range data.Edges {
+			if !resolvable(e.A) && !resolvable(e.B) {
+				removed = append(removed, e)
+				continue
+			}
+			filtered = append(filtered, e)
+		}
+		data.Edges = filtered
+	})
+	return removed, err
+}
+
+// OrphanedBranchAllocations returns allocations whose worktree directory still
+// exists on disk but whose recorded branch no longer resolves in that
+// worktree's git repo. These are the inverse of the usual stale case: the dir
+// survives (so PruneStale keeps it) yet its route points at a branch that was
+// deleted underneath it, leaving a live-looking allocation aimed at nothing.
+func (r *Registry) OrphanedBranchAllocations() []Allocation {
+	return r.orphanedBranchAllocations(branchExistsInWorktree)
+}
+
+// orphanedBranchAllocations is the testable core of OrphanedBranchAllocations
+// with the git branch-existence check injected.
+func (r *Registry) orphanedBranchAllocations(branchExists func(worktree, branch string) bool) []Allocation {
+	var out []Allocation
+	for _, a := range r.Allocations() {
+		wt := GetString(a, "worktree")
+		branch := GetString(a, "branch")
+		if wt == "" || branch == "" {
+			continue
+		}
+		info, err := os.Stat(wt)
+		if err != nil || !info.IsDir() {
+			continue // directory gone — that's ordinary staleness, not this case
+		}
+		if !branchExists(wt, branch) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// branchExistsInWorktree reports whether branch still resolves as a local ref
+// in the git repo backing the given worktree directory. A failed git call is
+// treated as "exists" so a transient/unreadable repo never mislabels a live
+// allocation as orphaned.
+func branchExistsInWorktree(worktreePath, branch string) bool {
+	err := exec.Command("git", "-C", worktreePath, "show-ref", "--verify", "--quiet", "refs/heads/"+branch).Run()
+	if err == nil {
+		return true
+	}
+	// Distinguish "branch missing" (exit 1) from "git couldn't run" (other):
+	// only a clean non-zero exit means the ref is genuinely absent.
+	var exit *exec.ExitError
+	return !errors.As(err, &exit)
 }
 
 func (r *Registry) Prune() (int, error) {
@@ -482,6 +629,16 @@ func listGitWorktreesFor(dir string) map[string]bool {
 }
 
 func (r *Registry) withLock(fn func(data *RegistryData)) error {
+	return r.withLockE(func(data *RegistryData) error {
+		fn(data)
+		return nil
+	})
+}
+
+// withLockE runs fn under the exclusive registry file lock, saving only when fn
+// returns nil. Callers that must abort the transaction (leaving the file
+// untouched) return a non-nil error from fn.
+func (r *Registry) withLockE(fn func(data *RegistryData) error) error {
 	if err := os.MkdirAll(filepath.Dir(r.Path), platform.DirMode); err != nil {
 		return err
 	}
@@ -504,8 +661,10 @@ func (r *Registry) withLock(fn func(data *RegistryData)) error {
 			waited := time.Since(start).Round(time.Millisecond)
 			return fmt.Errorf(
 				"timed out after %s waiting for registry lock\n\n"+
-					"  Another gtl process may be holding the lock.\n"+
-					"  If no other process is running: rm %s",
+					"  Another gtl process is holding the lock. Find and quit it, then retry.\n"+
+					"  The lock (%s) releases automatically when that process exits — even\n"+
+					"  on a crash — so do not delete it; removing the file breaks mutual\n"+
+					"  exclusion for any process still running",
 				waited, lockPath)
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -516,7 +675,9 @@ func (r *Registry) withLock(fn func(data *RegistryData)) error {
 	if err != nil {
 		return err
 	}
-	fn(&data)
+	if err := fn(&data); err != nil {
+		return err
+	}
 	return r.save(data)
 }
 

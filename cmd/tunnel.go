@@ -32,6 +32,7 @@ func init() {
 	tunnelCmd.AddCommand(tunnelSetupCmd)
 	tunnelCmd.AddCommand(tunnelStatusCmd)
 	tunnelCmd.AddCommand(tunnelDefaultCmd)
+	tunnelRemoveCmd.Flags().BoolVarP(&tunnelRemoveYes, "yes", "y", false, "skip confirmation prompt")
 	tunnelCmd.AddCommand(tunnelRemoveCmd)
 	tunnelCmd.AddCommand(tunnelResetCmd)
 	tunnelResetCmd.Flags().BoolVarP(&tunnelResetYes, "yes", "y", false, "skip confirmation prompt")
@@ -39,6 +40,7 @@ func init() {
 }
 
 var tunnelResetYes bool
+var tunnelRemoveYes bool
 
 var tunnelCmd = &cobra.Command{
 	Use:   "tunnel [port]",
@@ -447,6 +449,13 @@ tunnels (random *.trycloudflare.com URLs).`,
 			})
 		}
 
+		if !tunnelRemoveYes {
+			if !confirm.Prompt(fmt.Sprintf("Remove tunnel %q from local config?", name), false, nil) {
+				fmt.Println("Aborted.")
+				return nil
+			}
+		}
+
 		wasDefault := uc.TunnelDefault() == name
 		newDefault := uc.DeleteTunnel(name)
 		if err := uc.Save(); err != nil {
@@ -522,7 +531,9 @@ the right permissions.`,
 		if !tunnelResetYes {
 			fmt.Println()
 			if !confirm.Prompt("Continue?", false, nil) {
-				return cliErr(cmd, &CliError{Message: "Aborted."})
+				// Match every other command's abort: plain message, exit 0.
+				fmt.Println("Aborted.")
+				return nil
 			}
 		}
 

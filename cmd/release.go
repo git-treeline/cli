@@ -9,19 +9,22 @@ import (
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/confirm"
 	"github.com/git-treeline/cli/internal/format"
+	"github.com/git-treeline/cli/internal/proxy"
 	"github.com/git-treeline/cli/internal/registry"
+	"github.com/git-treeline/cli/internal/service"
 	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/style"
+	"github.com/git-treeline/cli/internal/supervisor"
 	"github.com/git-treeline/cli/internal/worktree"
 	"github.com/spf13/cobra"
 )
 
 var (
-	releaseDropDB        bool
-	releaseProject       string
-	releaseAll           bool
-	releaseForce         bool
-	releaseDryRun        bool
+	releaseDropDB         bool
+	releaseProject        string
+	releaseAll            bool
+	releaseForce          bool
+	releaseDryRun         bool
 	releaseRemoveWorktree bool
 )
 
@@ -147,12 +150,19 @@ func runReleaseSingle(args []string) error {
 	}
 
 	if releaseDropDB {
-		format.DropSingleDB(fa, absPath)
+		if err := format.DropSingleDB(fa, absPath); err != nil {
+			return err
+		}
 	}
 
 	if _, err := reg.Release(absPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to release allocation: %s\n", err)
+		return fmt.Errorf("failed to release allocation: %w", err)
 	}
+	// Tear down runtime state left behind by the allocation: stop the worktree's
+	// supervisor (which otherwise keeps holding the port) and drop its managed
+	// /etc/hosts entry. Runs after the registry removal so hosts re-sync reflects
+	// the new route set. DB drop stays opt-in above.
+	teardownRuntimeState([]registry.Allocation{alloc})
 	fmt.Printf("==> Released resources for %s\n", filepath.Base(absPath))
 
 	if len(ports) > 1 {
@@ -258,7 +268,9 @@ func runReleaseBatch(project string, all bool) error {
 		for i, a := range allocs {
 			formatAllocs[i] = format.Allocation(a)
 		}
-		format.DropDatabases(formatAllocs)
+		if err := format.DropDatabases(formatAllocs); err != nil {
+			return err
+		}
 	}
 
 	paths := make([]string, 0, len(allocs))
@@ -273,6 +285,8 @@ func runReleaseBatch(project string, all bool) error {
 		return err
 	}
 
+	teardownRuntimeState(allocs)
+
 	if releaseRemoveWorktree {
 		for _, p := range paths {
 			removeWorktreeDir(p, releaseForce)
@@ -281,6 +295,93 @@ func runReleaseBatch(project string, all bool) error {
 
 	fmt.Printf("Released %d allocation(s).\n", count)
 	return nil
+}
+
+// teardownRuntimeState cleans up the non-registry runtime state left behind
+// after allocations are released or pruned: each worktree's supervisor process
+// (which keeps holding the allocated port until told to shut down) and the
+// worktree's managed /etc/hosts entry. Routes self-heal via the router's
+// registry refresh, so routing is deliberately untouched here.
+//
+// Call this AFTER the allocations have been removed from the registry: the
+// hosts re-sync recomputes the managed block from current registry state, so
+// the released worktrees must already be gone for their entries to drop.
+func teardownRuntimeState(released []registry.Allocation) {
+	teardownRuntimeStateWith(released, stopWorktreeSupervisor, cleanManagedHosts)
+}
+
+// teardownRuntimeStateWith is the testable core of teardownRuntimeState with
+// the supervisor-stop and hosts-cleanup seams injected, so tests can assert
+// which worktrees are stopped without touching real sockets or /etc/hosts.
+func teardownRuntimeStateWith(released []registry.Allocation, stopSupervisor func(string), cleanHosts func([]registry.Allocation)) {
+	for _, a := range released {
+		wt := format.GetStr(format.Allocation(a), "worktree")
+		if wt == "" {
+			continue
+		}
+		stopSupervisor(wt)
+	}
+	cleanHosts(released)
+}
+
+// stopWorktreeSupervisor asks a worktree's supervisor to shut down via its
+// control socket. Best-effort: a missing socket ("not running") and any other
+// send error are ignored, since teardown must not fail just because the
+// supervisor was never started or already exited.
+func stopWorktreeSupervisor(worktreePath string) {
+	sock := supervisor.SocketPath(worktreePath)
+	if _, err := os.Stat(sock); err != nil {
+		return // no socket — supervisor not running
+	}
+	_, _ = supervisor.Send(sock, "shutdown")
+}
+
+// cleanManagedHosts re-syncs the managed /etc/hosts block after the given
+// worktrees have been released, but only when hosts-sync is actually active
+// (a managed block exists) AND at least one released worktree had an entry in
+// it. This keeps `gtl release`/`gtl prune` from prompting for sudo on machines
+// that never opted into hosts management. Route hostnames are recomputed from
+// the current (already-released) registry, so the removed entries drop out.
+func cleanManagedHosts(released []registry.Allocation) {
+	managed, err := service.ManagedHosts()
+	if err != nil || len(managed) == 0 {
+		return // hosts-sync not active — nothing managed to clean
+	}
+	domain := config.LoadUserConfig("").RouterDomain()
+	if !hostsCleanupNeeded(released, managed, domain) {
+		return
+	}
+
+	if err := service.SyncHosts(routeHostnames(domain)); err != nil {
+		fmt.Fprintln(os.Stderr, style.Warnf("could not update /etc/hosts: %v", err))
+	}
+}
+
+// hostsCleanupNeeded reports whether a hosts re-sync is warranted: true only
+// when at least one released allocation's route hostname appears in the
+// currently managed /etc/hosts block. Pure decision logic, so the "don't
+// prompt for sudo unless we actually manage one of these entries" rule can be
+// tested without reading /etc/hosts.
+func hostsCleanupNeeded(released []registry.Allocation, managed []string, domain string) bool {
+	if len(managed) == 0 {
+		return false
+	}
+	have := make(map[string]bool, len(managed))
+	for _, h := range managed {
+		have[h] = true
+	}
+	for _, a := range released {
+		fa := format.Allocation(a)
+		project := format.GetStr(fa, "project")
+		if project == "" {
+			continue
+		}
+		host := proxy.RouteKey(project, format.GetStr(fa, "branch")) + "." + domain
+		if have[host] {
+			return true
+		}
+	}
+	return false
 }
 
 // isInsideDir reports whether cwd is equal to or a child of dir.

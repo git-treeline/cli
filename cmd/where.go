@@ -9,6 +9,7 @@ import (
 )
 
 func init() {
+	whereCmd.ValidArgsFunction = completeRegistryBranch
 	rootCmd.AddCommand(whereCmd)
 }
 

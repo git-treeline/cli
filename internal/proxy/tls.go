@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"container/list"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -146,17 +147,19 @@ func certNeedsRegeneration(certFile string) bool {
 	return time.Until(cert.NotAfter) < certRenewalBuffer
 }
 
-// EnsureCA generates a local CA if one doesn't exist or is expiring within 7
-// days. Returns the path to the CA certificate (for trusting).
-func EnsureCA() (string, error) {
+// EnsureCA generates a local CA if one doesn't exist, is expiring within 7
+// days, or lacks X.509 name constraints covering domain. Returns the path to
+// the CA certificate (for trusting). The name constraints scope the CA to
+// localhost plus the router's configured domain and the loopback IP ranges,
+// so a stolen ca-key.pem can only MITM those names — not arbitrary public
+// hosts.
+func EnsureCA(domain string) (string, error) {
 	if err := os.MkdirAll(certsDir(), 0o700); err != nil {
 		return "", err
 	}
 
-	if !certNeedsRegeneration(caCertPath()) {
-		if _, err := os.Stat(caKeyPath()); err == nil {
-			return caCertPath(), nil
-		}
+	if !caNeedsRegen(domain) {
+		return caCertPath(), nil
 	}
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -166,14 +169,17 @@ func EnsureCA() (string, error) {
 
 	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	tmpl := &x509.Certificate{
-		SerialNumber:          serial,
-		Subject:               pkix.Name{Organization: []string{"git-treeline"}, CommonName: "git-treeline Local CA"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-		MaxPathLen:            0,
+		SerialNumber:                serial,
+		Subject:                     pkix.Name{Organization: []string{"git-treeline"}, CommonName: "git-treeline Local CA"},
+		NotBefore:                   time.Now().Add(-time.Hour),
+		NotAfter:                    time.Now().Add(10 * 365 * 24 * time.Hour),
+		KeyUsage:                    x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid:       true,
+		IsCA:                        true,
+		MaxPathLen:                  0,
+		PermittedDNSDomainsCritical: true,
+		PermittedDNSDomains:         permittedDNSDomains(domain),
+		PermittedIPRanges:           loopbackIPRanges(),
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
@@ -198,20 +204,114 @@ func EnsureCA() (string, error) {
 	return caCertPath(), nil
 }
 
+// permittedDNSDomains returns the dNSName constraints for the local CA:
+// always "localhost" (covers *.localhost) plus the configured router domain
+// (covers *.domain) when it's a distinct custom TLD.
+func permittedDNSDomains(domain string) []string {
+	domains := []string{"localhost"}
+	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
+	if domain != "" && domain != "localhost" {
+		domains = append(domains, domain)
+	}
+	return domains
+}
+
+// loopbackIPRanges returns the iPAddress constraints for the local CA,
+// covering only the IPv4/IPv6 loopback ranges the leaf certs carry.
+func loopbackIPRanges() []*net.IPNet {
+	_, v4, _ := net.ParseCIDR("127.0.0.0/8")
+	_, v6, _ := net.ParseCIDR("::1/128")
+	return []*net.IPNet{v4, v6}
+}
+
+// caNeedsRegen reports whether the on-disk CA must be (re)generated: it is
+// missing, its key is missing, it is expiring within the renewal buffer, or
+// its name constraints don't cover the current domain (e.g. an older,
+// unconstrained CA from before name constraints were introduced).
+func caNeedsRegen(domain string) bool {
+	if certNeedsRegeneration(caCertPath()) {
+		return true
+	}
+	if _, err := os.Stat(caKeyPath()); err != nil {
+		return true
+	}
+	return !caCoversDomain(caCertPath(), domain)
+}
+
+// CANeedsRegen reports whether EnsureCA(domain) would replace the on-disk CA.
+// Callers use this to remove the stale trusted root before EnsureCA overwrites
+// ca.pem (the untrust helpers match by the file's current content).
+func CANeedsRegen(domain string) bool { return caNeedsRegen(domain) }
+
+// caCoversDomain reports whether the CA at certFile carries name constraints
+// that include "localhost" and domain. An unconstrained CA returns false so it
+// is regenerated.
+func caCoversDomain(certFile, domain string) bool {
+	data, err := os.ReadFile(certFile)
+	if err != nil {
+		return false
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return false
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return false
+	}
+	if len(cert.PermittedDNSDomains) == 0 {
+		return false
+	}
+	have := make(map[string]bool, len(cert.PermittedDNSDomains))
+	for _, d := range cert.PermittedDNSDomains {
+		have[strings.ToLower(d)] = true
+	}
+	for _, want := range permittedDNSDomains(domain) {
+		if !have[want] {
+			return false
+		}
+	}
+	return true
+}
+
+// hostAllowedFor reports whether an SNI hostname is within the CA's name
+// constraints: localhost (and *.localhost) always, plus the configured domain
+// (and *.domain) when set. Off-domain names are rejected before any keygen.
+func hostAllowedFor(hostname, domain string) bool {
+	hostname = strings.ToLower(strings.TrimSuffix(hostname, "."))
+	if hostname == "localhost" || strings.HasSuffix(hostname, ".localhost") {
+		return true
+	}
+	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
+	if domain == "" || domain == "localhost" {
+		return false
+	}
+	return hostname == domain || strings.HasSuffix(hostname, "."+domain)
+}
+
 // CertManager generates per-hostname TLS certificates on demand, signed by
 // the local CA. This avoids wildcard certs (*.localhost) which Safari and
 // Chromium reject for the .localhost TLD.
 type CertManager struct {
 	caKey  *ecdsa.PrivateKey
 	caCert *x509.Certificate
-	mu     sync.RWMutex
-	cache  map[string]*tls.Certificate
+	domain string
+	mu     sync.Mutex
+	cache  map[string]*list.Element
+	lru    *list.List // front = most recently used
+}
+
+// cacheEntry is a value held in the LRU list.
+type cacheEntry struct {
+	hostname string
+	cert     *tls.Certificate
 }
 
 // NewCertManager loads the local CA and returns a manager that generates
-// per-hostname certs via GetCertificate. Returns an error if the CA hasn't
-// been created yet (user needs to run 'gtl serve install').
-func NewCertManager() (*CertManager, error) {
+// per-hostname certs via GetCertificate for SNIs within domain. Returns an
+// error if the CA hasn't been created yet (user needs to run
+// 'gtl serve install').
+func NewCertManager(domain string) (*CertManager, error) {
 	caKeyPEM, err := os.ReadFile(caKeyPath())
 	if err != nil {
 		return nil, fmt.Errorf("CA key not found — run 'gtl serve install': %w", err)
@@ -242,30 +342,43 @@ func NewCertManager() (*CertManager, error) {
 	return &CertManager{
 		caKey:  caKey,
 		caCert: caCert,
-		cache:  make(map[string]*tls.Certificate),
+		domain: domain,
+		cache:  make(map[string]*list.Element),
+		lru:    list.New(),
 	}, nil
 }
 
 const maxCachedCerts = 1000
 
 // GetCertificate is a tls.Config callback that returns a cert with an exact
-// SAN for the requested hostname. The cache is capped to prevent unbounded
-// growth from garbage hostnames.
+// SAN for the requested hostname. Issued certs are kept in an LRU cache
+// capped at maxCachedCerts entries: even in-domain SNI floods (each a fresh
+// keygen + CA signature) can only occupy a bounded amount of memory, and old
+// entries are evicted rather than the cache freezing while issuance
+// continues unbounded.
 func (cm *CertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	hostname := hello.ServerName
 	if hostname == "" {
 		hostname = "localhost"
 	}
-
-	cm.mu.RLock()
-	cert, ok := cm.cache[hostname]
-	cm.mu.RUnlock()
-	if ok {
-		leaf, _ := x509.ParseCertificate(cert.Certificate[0])
-		if leaf != nil && time.Until(leaf.NotAfter) > certRenewalBuffer {
-			return cert, nil
-		}
+	if !hostAllowedFor(hostname, cm.domain) {
+		return nil, fmt.Errorf("SNI %q is outside the CA name constraints", hostname)
 	}
+
+	cm.mu.Lock()
+	if el, ok := cm.cache[hostname]; ok {
+		ent := el.Value.(*cacheEntry)
+		leaf, _ := x509.ParseCertificate(ent.cert.Certificate[0])
+		if leaf != nil && time.Until(leaf.NotAfter) > certRenewalBuffer {
+			cm.lru.MoveToFront(el)
+			cm.mu.Unlock()
+			return ent.cert, nil
+		}
+		// Expiring/unparseable: drop and reissue below.
+		cm.lru.Remove(el)
+		delete(cm.cache, hostname)
+	}
+	cm.mu.Unlock()
 
 	cert, err := cm.issueCert(hostname)
 	if err != nil {
@@ -273,14 +386,31 @@ func (cm *CertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certific
 	}
 
 	cm.mu.Lock()
-	if len(cm.cache) < maxCachedCerts {
-		cm.cache[hostname] = cert
+	defer cm.mu.Unlock()
+	// Another goroutine may have issued and cached this hostname while we were
+	// signing; prefer the cached one so callers share a single cert.
+	if el, ok := cm.cache[hostname]; ok {
+		cm.lru.MoveToFront(el)
+		return el.Value.(*cacheEntry).cert, nil
 	}
-	cm.mu.Unlock()
+	el := cm.lru.PushFront(&cacheEntry{hostname: hostname, cert: cert})
+	cm.cache[hostname] = el
+	for cm.lru.Len() > maxCachedCerts {
+		back := cm.lru.Back()
+		if back == nil {
+			break
+		}
+		cm.lru.Remove(back)
+		delete(cm.cache, back.Value.(*cacheEntry).hostname)
+	}
 	return cert, nil
 }
 
 func (cm *CertManager) issueCert(hostname string) (*tls.Certificate, error) {
+	if !hostAllowedFor(hostname, cm.domain) {
+		return nil, fmt.Errorf("SNI %q is outside the CA name constraints", hostname)
+	}
+
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
@@ -431,10 +561,22 @@ func trustLinux(caCertFile string) error {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	// The system OpenSSL store above is what curl/wget/CLI tools consult.
+	// Browsers in the Chrome/Chromium/Brave and Firefox families do NOT use
+	// it for TLS server trust — they carry their own per-user NSS databases.
+	// Without this step `gtl serve install` "succeeds" yet every browser
+	// still rejects the cert. NSS updates are per-user (no sudo), so they
+	// run after the sudo'd system step. Failure here is non-fatal: CLI trust
+	// still works and we tell the user how to fix browser trust.
+	trustNSS(caCertFile)
+	return nil
 }
 
 func untrustLinux() error {
+	untrustNSS()
 	cfg := linuxTrustConfigs[detectLinuxDistro()]
 	certFile := filepath.Join(cfg.certDir, "git-treeline.crt")
 	script := fmt.Sprintf("/bin/rm -f '%s' && %s", certFile, cfg.updateCommand)
@@ -448,4 +590,132 @@ func untrustLinux() error {
 		return fmt.Errorf("failed to remove CA from trust store: %w", err)
 	}
 	return nil
+}
+
+// nssRunCmd runs a certutil invocation. Overridable in tests so NSS trust
+// logic can be exercised without a real certutil binary or NSS databases.
+var nssRunCmd = func(name string, args ...string) error {
+	return exec.Command(name, args...).Run()
+}
+
+// nssCertName is the nickname our CA is stored under inside every NSS
+// database. Stable (and dev-suffixed) so untrustNSS can find and delete it.
+func nssCertName() string { return "git-treeline" + platform.DevSuffix() }
+
+// trustNSS installs the CA into the NSS databases browsers actually consult
+// for TLS server trust: the shared Chromium-family store at ~/.pki/nssdb and
+// every Firefox profile (native, snap, and flatpak). Mirrors mkcert's
+// approach. Degrades gracefully — a missing certutil prints an actionable
+// install hint and returns without failing the overall install.
+func trustNSS(caCertFile string) {
+	certutil, err := exec.LookPath("certutil")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "  Note: 'certutil' not found — Chrome/Chromium/Brave/Firefox will not trust the CA.")
+		fmt.Fprintln(os.Stderr, "        Install it, then re-run 'gtl serve install':")
+		fmt.Fprintln(os.Stderr, "          Debian/Ubuntu: sudo apt install libnss3-tools")
+		fmt.Fprintln(os.Stderr, "          Fedora/RHEL:   sudo dnf install nss-tools")
+		fmt.Fprintln(os.Stderr, "          Arch:          sudo pacman -S nss")
+		return
+	}
+
+	home := homeDir()
+	dbs := nssDBDirs(home)
+
+	// Ensure the Chromium-family shared DB exists even on a fresh machine
+	// (no browser has created it yet), so the CA is trusted the first time
+	// Chrome/Brave launches. mkcert does the same.
+	chromium := filepath.Join(home, ".pki", "nssdb")
+	if !containsNSSDir(dbs, chromium) {
+		if err := os.MkdirAll(chromium, 0o755); err == nil {
+			if err := nssRunCmd(certutil, "-N", "--empty-password", "-d", "sql:"+chromium); err == nil {
+				dbs = append(dbs, "sql:"+chromium)
+			}
+		}
+	}
+
+	name := nssCertName()
+	installed := 0
+	for _, db := range dbs {
+		// Delete any stale entry first so re-running install is idempotent
+		// (certutil -A errors on a duplicate nickname).
+		_ = nssRunCmd(certutil, "-d", db, "-D", "-n", name)
+		if err := nssRunCmd(certutil, "-d", db, "-A", "-t", "C,,", "-n", name, "-i", caCertFile); err == nil {
+			installed++
+		}
+	}
+	if installed > 0 {
+		fmt.Printf("  Trusted CA in %d browser store(s) (NSS).\n", installed)
+	}
+}
+
+// untrustNSS removes the CA from every NSS database it can find. Best-effort
+// and silent — a missing certutil or DB just means nothing to remove.
+func untrustNSS() {
+	certutil, err := exec.LookPath("certutil")
+	if err != nil {
+		return
+	}
+	name := nssCertName()
+	for _, db := range nssDBDirs(homeDir()) {
+		_ = nssRunCmd(certutil, "-d", db, "-D", "-n", name)
+	}
+}
+
+func homeDir() string {
+	h, _ := os.UserHomeDir()
+	return h
+}
+
+// nssDBDirs returns the certutil "-d" arguments for every existing NSS
+// database on this machine, each carrying the sql:/dbm: prefix that matches
+// its on-disk format (cert9.db → sql:, legacy cert8.db → dbm:). Pure: it
+// only inspects the filesystem and creates nothing.
+func nssDBDirs(home string) []string {
+	var dirs []string
+	chromium := filepath.Join(home, ".pki", "nssdb")
+	if p := nssDBPrefix(chromium); p != "" {
+		dirs = append(dirs, p)
+	}
+	for _, root := range firefoxProfileRoots(home) {
+		matches, _ := filepath.Glob(filepath.Join(root, "*"))
+		for _, profile := range matches {
+			if p := nssDBPrefix(profile); p != "" {
+				dirs = append(dirs, p)
+			}
+		}
+	}
+	return dirs
+}
+
+// firefoxProfileRoots returns the directories under which Firefox profiles
+// live for native, snap, and flatpak installs. Each may hold zero or more
+// profile subdirectories.
+func firefoxProfileRoots(home string) []string {
+	return []string{
+		filepath.Join(home, ".mozilla", "firefox"),
+		filepath.Join(home, "snap", "firefox", "common", ".mozilla", "firefox"),
+		filepath.Join(home, ".var", "app", "org.mozilla.firefox", ".mozilla", "firefox"),
+	}
+}
+
+// nssDBPrefix returns the certutil "-d" value for an NSS database directory,
+// or "" when the directory holds no NSS database. Modern NSS uses cert9.db
+// (sql: backend); legacy profiles use cert8.db (dbm: backend).
+func nssDBPrefix(dir string) string {
+	if _, err := os.Stat(filepath.Join(dir, "cert9.db")); err == nil {
+		return "sql:" + dir
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cert8.db")); err == nil {
+		return "dbm:" + dir
+	}
+	return ""
+}
+
+func containsNSSDir(dbs []string, dir string) bool {
+	for _, db := range dbs {
+		if strings.TrimPrefix(strings.TrimPrefix(db, "sql:"), "dbm:") == dir {
+			return true
+		}
+	}
+	return false
 }

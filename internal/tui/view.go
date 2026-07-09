@@ -194,8 +194,8 @@ func (m *Model) renderDetailPanel(width, height int) string {
 		sort.Strings(linkKeys)
 		for _, k := range linkKeys {
 			b.WriteString("    ")
-			b.WriteString(linkIndicatorStyle.Render("⇄ "+k))
-			b.WriteString(detailValue.Render(" → "+wt.Links[k]))
+			b.WriteString(linkIndicatorStyle.Render("⇄ " + k))
+			b.WriteString(detailValue.Render(" → " + wt.Links[k]))
 			b.WriteString("\n")
 		}
 	}
@@ -276,6 +276,10 @@ func (m *Model) renderStatusBar(width int) string {
 		stats += " · tunnel: " + m.snapshot.TunnelDomain
 	}
 
+	if m.pollErr != nil {
+		stats += " · " + statusErrorStyle.Render("⚠ poll failed (stale): "+m.pollErr.Error())
+	}
+
 	if m.statusMsg != "" {
 		stats += " · " + m.statusMsg
 	}
@@ -339,7 +343,7 @@ func (m *Model) renderHelpOverlay() string {
 // --- Confirm overlay ---
 
 func (m *Model) renderConfirmOverlay() string {
-	wt := m.selectedWorktree()
+	wt := m.confirmTarget
 	if wt == nil {
 		return ""
 	}
@@ -370,11 +374,31 @@ func truncate(s string, max int) string {
 	if max <= 0 {
 		return ""
 	}
-	if len(s) <= max {
+	if lipgloss.Width(s) <= max {
 		return s
 	}
 	if max <= 3 {
-		return s[:max]
+		return truncateToWidth(s, max)
 	}
-	return s[:max-3] + "..."
+	return truncateToWidth(s, max-3) + "..."
+}
+
+// truncateToWidth returns the longest prefix of s whose display width does not
+// exceed max cells, counting multi-cell runes (e.g. CJK) correctly and never
+// cutting mid-rune.
+func truncateToWidth(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	width := 0
+	var b strings.Builder
+	for _, r := range s {
+		w := lipgloss.Width(string(r))
+		if width+w > max {
+			break
+		}
+		b.WriteRune(r)
+		width += w
+	}
+	return b.String()
 }

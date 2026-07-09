@@ -2,13 +2,20 @@ package service
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/git-treeline/cli/internal/platform"
 )
+
+// pfDialTimeout is overridable in tests so the Linux 443-dial fallback can be
+// exercised deterministically without a real listener.
+var pfDialTimeout = net.DialTimeout
 
 const (
 	basePfAnchorName = "dev.treeline.router"
@@ -172,14 +179,24 @@ func checkPortForwardDarwin(routerPort int) PortForwardStatus {
 
 func checkPortForwardLinux(routerPort int) PortForwardStatus {
 	st := PortForwardStatus{ConfiguredOnDisk: IsPortForwardConfigured()}
-	out, err := runCmdOutput("/sbin/iptables", "-t", "nat", "-L", "OUTPUT", "-n")
+	ipt, err := resolveIptables()
 	if err != nil {
-		if !st.ConfiguredOnDisk {
-			st.Detail = "not configured"
+		st.Detail = err.Error()
+		return linuxDialFallback(st)
+	}
+	out, err := runCmdOutput(ipt, "-t", "nat", "-L", "OUTPUT", "-n")
+	if err != nil {
+		// Non-root: the nat table is unreadable (`iptables -t nat -L` needs
+		// root/CAP_NET_ADMIN). KernelStateKnown stays false so the 443 dial
+		// below is the authoritative signal — mirroring the darwin path,
+		// which also treats a live :443 as the reliable evidence when the
+		// ruleset can't be read without sudo.
+		if st.ConfiguredOnDisk {
+			st.Detail = "kernel ruleset not readable without sudo — verifying via port 443"
 		} else {
-			st.Detail = "could not read iptables (need root or CAP_NET_ADMIN)"
+			st.Detail = "not configured"
 		}
-		return st
+		return linuxDialFallback(st)
 	}
 	st.KernelStateKnown = true
 	body := string(out)
@@ -189,6 +206,29 @@ func checkPortForwardLinux(routerPort int) PortForwardStatus {
 	}
 	if !st.LoadedInKernel && st.ConfiguredOnDisk {
 		st.Detail = "iptables rule missing in current ruleset (run 'gtl serve reload-pf')"
+	}
+	return st
+}
+
+// linuxDialFallback consults port 443 when the kernel ruleset could not be
+// read without privilege. A successful dial is authoritative evidence that a
+// redirect is live, so it marks the setup configured even when neither the
+// on-disk marker nor the (root-only) nat table could confirm it — so status,
+// doctor, open and uninstall all agree with reality for a working non-root
+// install. No-op when the kernel state was actually read. Mirrors the darwin
+// health-check dial.
+func linuxDialFallback(st PortForwardStatus) PortForwardStatus {
+	if st.KernelStateKnown {
+		return st
+	}
+	conn, err := pfDialTimeout("tcp", "127.0.0.1:443", 2*time.Second)
+	if err != nil {
+		return st
+	}
+	_ = conn.Close()
+	st.ConfiguredOnDisk = true
+	if st.Detail == "" || st.Detail == "not configured" {
+		st.Detail = "443 redirect is live (verified by dial; kernel ruleset not readable without sudo)"
 	}
 	return st
 }
@@ -205,27 +245,102 @@ func ReloadPortForward() error {
 	case "darwin":
 		return reloadPf()
 	case "linux":
-		// Linux installs iptables rules directly; reapplying them is the
-		// only "reload" available. The install function already short-
-		// circuits when rules are present, but we want it to reapply
-		// unconditionally — the linux install path is idempotent so we
-		// just call it again.
-		// We don't have the routerPort here, so the caller should use
-		// InstallPortForward(routerPort) instead. ReloadPortForward is
-		// macOS-focused; on Linux we return a hint.
-		return fmt.Errorf("on Linux, run 'gtl serve install' to reapply iptables rules")
+		// Re-apply the iptables redirect (idempotently) from the port stored
+		// in the persistence unit. This is what doctor --fix, status and
+		// `serve restart --pf` all advertise — previously it errored on Linux,
+		// so the recommended repair always failed.
+		return reapplyLinuxPortForward()
 	default:
 		return fmt.Errorf("port forwarding not supported on %s", runtime.GOOS)
 	}
 }
 
 func isLinuxPortForwardConfigured() bool {
-	out, err := exec.Command("/sbin/iptables", "-t", "nat", "-L", "OUTPUT", "-n",
+	// The persistence unit file is the sudo-free on-disk marker (the Linux
+	// analog of pf.conf on macOS): its presence means an install ran. Prefer
+	// it so a non-root caller — who cannot read the nat table — still sees a
+	// working setup as "configured".
+	if _, err := os.Stat(linuxPortForwardUnitPath()); err == nil {
+		return true
+	}
+	ipt, err := resolveIptables()
+	if err != nil {
+		return false
+	}
+	out, err := exec.Command(ipt, "-t", "nat", "-L", "OUTPUT", "-n",
 		"--line-numbers").CombinedOutput()
 	if err != nil {
 		return false
 	}
 	return strings.Contains(string(out), "git-treeline")
+}
+
+// --- Linux boot-time persistence (systemd oneshot; iptables analog of the
+// macOS pf-reload LaunchDaemon) ---
+
+const baseLinuxPortForwardUnit = "git-treeline-portforward"
+
+func linuxPortForwardUnitName() string {
+	return baseLinuxPortForwardUnit + platform.DevSuffix() + ".service"
+}
+
+func linuxPortForwardUnitPath() string {
+	return "/etc/systemd/system/" + linuxPortForwardUnitName()
+}
+
+// linuxPortForwardUnitBody is the systemd oneshot unit that re-applies the
+// 443→router redirect at boot. Type=oneshot + RemainAfterExit keeps it shown
+// as active after the rule is in place; the ExecStart is idempotent
+// (check-or-add) so a manual `systemctl restart` never stacks duplicates.
+func linuxPortForwardUnitBody(ipt string, routerPort int) string {
+	spec := strings.Join(linuxRedirectRuleSpec(routerPort), " ")
+	return fmt.Sprintf(`[Unit]
+Description=git-treeline 443 to router port redirect
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '%s -t nat -C OUTPUT %s 2>/dev/null || %s -t nat -A OUTPUT %s'
+
+[Install]
+WantedBy=multi-user.target
+`, ipt, spec, ipt, spec)
+}
+
+// IsLinuxPortForwardPersistenceInstalled reports whether the boot-time
+// redirect unit is installed AND enabled (so systemd will actually run it at
+// boot). Read-only; `systemctl is-enabled` does not require root.
+func IsLinuxPortForwardPersistenceInstalled() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	if _, err := os.Stat(linuxPortForwardUnitPath()); err != nil {
+		return false
+	}
+	return runCmd("systemctl", "is-enabled", "--quiet", linuxPortForwardUnitName()) == nil
+}
+
+// resolveIptables locates the iptables command instead of hardcoding
+// /sbin/iptables (which does not exist on every distro/layout). PATH is
+// preferred so the distro's chosen iptables — including the iptables-nft
+// compatibility shim on nftables-only systems — is used. On systems with
+// neither iptables nor its nft shim, it returns an actionable error that
+// distinguishes "no netfilter tooling at all" from "nftables present but no
+// iptables compatibility command", so the user knows which package to add.
+func resolveIptables() (string, error) {
+	if p, err := exec.LookPath("iptables"); err == nil {
+		return p, nil
+	}
+	for _, candidate := range []string{"/usr/sbin/iptables", "/sbin/iptables", "/usr/bin/iptables"} {
+		if fi, err := os.Stat(candidate); err == nil && !fi.IsDir() {
+			return candidate, nil
+		}
+	}
+	if _, err := exec.LookPath("nft"); err == nil {
+		return "", fmt.Errorf("nftables detected but no iptables compatibility command found — install the iptables-nft package (Debian/Ubuntu: 'sudo apt install iptables'; Fedora: 'sudo dnf install iptables-nft')")
+	}
+	return "", fmt.Errorf("no iptables command found — install iptables (or iptables-nft) to enable 443 port forwarding")
 }
 
 // --- macOS (pf) ---
@@ -485,14 +600,85 @@ func insertPfRules(pfConf string) string {
 
 // --- Linux (iptables) ---
 
-func installLinuxPortForward(routerPort int) error {
-	portStr := fmt.Sprintf("%d", routerPort)
-	cmd := exec.Command("sudo", "-p",
-		"\nEnter your password (2 of 2): ",
-		"/sbin/iptables", "-t", "nat", "-A", "OUTPUT",
+// linuxRedirectRuleSpec is the iptables rule specification (everything after
+// the chain name) that redirects loopback :443 to routerPort, tagged with our
+// comment marker. Shared by the check (-C) and add (-A) verbs so an install
+// never stacks a duplicate rule.
+func linuxRedirectRuleSpec(routerPort int) []string {
+	return []string{
 		"-p", "tcp", "-d", "127.0.0.1", "--dport", "443",
-		"-j", "REDIRECT", "--to-port", portStr,
-		"-m", "comment", "--comment", "git-treeline")
+		"-j", "REDIRECT", "--to-port", fmt.Sprintf("%d", routerPort),
+		"-m", "comment", "--comment", "git-treeline",
+	}
+}
+
+// linuxInstallScript returns the `sh -c` body run in one sudo session. The
+// iptables rule is applied idempotently (`-C` check gates `-A` add so re-runs
+// never stack duplicates) and gates overall success (`|| exit 1`). The
+// boot-time persistence unit is then installed best-effort: it is masked with
+// `|| true` so that a systemd-less host (e.g. WSL2 without systemd) still gets
+// a working redirect for this session — the missing persistence is surfaced
+// separately by `gtl doctor`, not by aborting the whole install.
+func linuxInstallScript(ipt string, routerPort int, tmpUnitPath string) string {
+	spec := strings.Join(linuxRedirectRuleSpec(routerPort), " ")
+	unit := linuxPortForwardUnitName()
+	unitPath := linuxPortForwardUnitPath()
+	return fmt.Sprintf(
+		"{ %s -t nat -C OUTPUT %s 2>/dev/null || %s -t nat -A OUTPUT %s; } || exit 1; "+
+			"{ cp '%s' '%s' && chmod 644 '%s' && systemctl daemon-reload && systemctl enable '%s'; } || true",
+		ipt, spec, ipt, spec,
+		tmpUnitPath, unitPath, unitPath, unit,
+	)
+}
+
+// linuxUninstallScript returns a bounded `sh -c` body that first tears down
+// the boot-time persistence unit (best-effort), then deletes our REDIRECT
+// rules by line number until none remain, running as root (so the ruleset is
+// readable even for a non-root caller under sudo). Exit codes for the rule
+// removal: 0 = clean, 1 = a delete was denied/failed, 2 = gave up after the
+// cap. The bound and explicit exit codes replace the old unbounded loop that
+// could spin forever re-prompting for sudo when the delete was denied.
+func linuxUninstallScript(ipt string) string {
+	unit := linuxPortForwardUnitName()
+	unitPath := linuxPortForwardUnitPath()
+	return fmt.Sprintf(
+		"{ systemctl disable '%s' 2>/dev/null; rm -f '%s'; systemctl daemon-reload 2>/dev/null; } || true; "+
+			"i=0; while [ $i -lt 20 ]; do "+
+			"n=$(%s -t nat -L OUTPUT -n --line-numbers 2>/dev/null | awk '/git-treeline/{print $1; exit}'); "+
+			"[ -z \"$n\" ] && exit 0; "+
+			"%s -t nat -D OUTPUT \"$n\" || exit 1; "+
+			"i=$((i+1)); done; exit 2",
+		unit, unitPath, ipt, ipt)
+}
+
+func installLinuxPortForward(routerPort int) error {
+	return applyLinuxPortForward(routerPort, "\nEnter your password (2 of 2): ")
+}
+
+// applyLinuxPortForward applies the redirect and (re)installs the boot-time
+// persistence unit in one sudo session. Shared by first-time install and
+// reload-pf; the only difference is the sudo prompt. Idempotent — safe to run
+// repeatedly.
+func applyLinuxPortForward(routerPort int, prompt string) error {
+	ipt, err := resolveIptables()
+	if err != nil {
+		return err
+	}
+
+	tmpUnit, err := os.CreateTemp("", "treeline-portforward-*.service")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmpUnit.Name()) }()
+	if _, err := tmpUnit.WriteString(linuxPortForwardUnitBody(ipt, routerPort)); err != nil {
+		return err
+	}
+	if err := tmpUnit.Close(); err != nil {
+		return err
+	}
+
+	cmd := exec.Command("sudo", "-p", prompt,
+		"sh", "-c", linuxInstallScript(ipt, routerPort, tmpUnit.Name()))
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -501,31 +687,74 @@ func installLinuxPortForward(routerPort int) error {
 	}
 
 	fmt.Printf("  Port forwarding configured (443 → %d).\n", routerPort)
+	if !IsLinuxPortForwardPersistenceInstalled() {
+		fmt.Println("  Note: boot-time persistence not enabled — the redirect may not survive a reboot.")
+		fmt.Println("        Re-run 'gtl serve install' on a systemd host, or re-apply with 'gtl serve reload-pf'.")
+	}
 	return nil
 }
 
-func uninstallLinuxPortForward() error {
-	for {
-		out, err := exec.Command("/sbin/iptables", "-t", "nat", "-L", "OUTPUT", "-n",
-			"--line-numbers").CombinedOutput()
-		if err != nil || !strings.Contains(string(out), "git-treeline") {
-			break
-		}
-		for _, line := range strings.Split(string(out), "\n") {
-			if !strings.Contains(line, "git-treeline") {
-				continue
+// reapplyLinuxPortForward re-applies the iptables redirect from the router
+// port recorded in the persistence unit. This is the Linux `reload-pf`: after
+// a reboot or network flush cleared the running nat rule, it puts the rule
+// back without the user having to re-run the full install. The persistence
+// unit (written at install time, survives on disk) is the authoritative
+// source of the port — so no config import is needed here.
+func reapplyLinuxPortForward() error {
+	port, ok := linuxRouterPortFromUnit()
+	if !ok {
+		return fmt.Errorf("cannot determine the router port to reapply — no persistence unit at %s; run 'gtl serve install'", linuxPortForwardUnitPath())
+	}
+	return applyLinuxPortForward(port, "\nEnter your password to reload port forwarding: ")
+}
+
+// linuxRouterPortFromUnit extracts the --to-port value from the persistence
+// unit's ExecStart. Returns false when the unit is absent or unparseable.
+func linuxRouterPortFromUnit() (int, bool) {
+	data, err := os.ReadFile(linuxPortForwardUnitPath())
+	if err != nil {
+		return 0, false
+	}
+	return parseToPort(string(data))
+}
+
+// parseToPort finds the "--to-port N" argument in an iptables command line.
+func parseToPort(s string) (int, bool) {
+	fields := strings.Fields(s)
+	for i, f := range fields {
+		if f == "--to-port" && i+1 < len(fields) {
+			v := strings.Trim(fields[i+1], "'\"")
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				return n, true
 			}
-			fields := strings.Fields(line)
-			if len(fields) == 0 {
-				continue
-			}
-			_ = exec.Command("sudo", "-p",
-				"\nEnter your password to remove port forwarding: ",
-				"/sbin/iptables", "-t", "nat", "-D", "OUTPUT", fields[0]).Run()
-			break
 		}
 	}
-	return nil
+	return 0, false
+}
+
+func uninstallLinuxPortForward() error {
+	ipt, err := resolveIptables()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command("sudo", "-p",
+		"\nEnter your password to remove port forwarding: ",
+		"sh", "-c", linuxUninstallScript(ipt))
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	err = cmd.Run()
+	if err == nil {
+		return nil
+	}
+	switch launchctlExitCode(err) {
+	case 1:
+		return fmt.Errorf("could not remove port-forwarding rule — iptables delete was denied")
+	case 2:
+		return fmt.Errorf("gave up removing port-forwarding rules after 20 attempts; remove manually with: sudo iptables -t nat -F OUTPUT")
+	default:
+		return fmt.Errorf("removing port forwarding failed: %w", err)
+	}
 }
 
 // GeneratePfAnchor returns the pf anchor content for testing.

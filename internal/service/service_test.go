@@ -33,6 +33,16 @@ func TestGeneratePlist(t *testing.T) {
 	}
 }
 
+func TestRouterLogFiles(t *testing.T) {
+	stdout, stderr := RouterLogFiles()
+	if !strings.HasSuffix(stdout, "git-treeline/router.log") {
+		t.Errorf("stdout log path = %q, want .../git-treeline/router.log", stdout)
+	}
+	if !strings.HasSuffix(stderr, "git-treeline/router.err") {
+		t.Errorf("stderr log path = %q, want .../git-treeline/router.err", stderr)
+	}
+}
+
 func TestResolveStablePath_NonCellar(t *testing.T) {
 	got := resolveStablePath("/usr/local/bin/gtl")
 	if got != "/usr/local/bin/gtl" {

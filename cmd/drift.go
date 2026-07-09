@@ -176,7 +176,7 @@ func resolveRegistryDrift(absPath, yamlName, registryName string, reg *registry.
 	}
 	fmt.Fprintln(os.Stderr)
 
-	if !promptDefaultYes("  Proceed?") {
+	if !promptProceed("  Proceed?") {
 		return &CliError{Message: "Aborted."}
 	}
 
@@ -216,9 +216,11 @@ func revertProjectInYAML(absPath, registryName string) error {
 }
 
 // promptChoice reads a numeric choice in [1, max] from driftReader.
-// Returns 0 if the input is invalid or out of range.
+// Returns 0 if the input is invalid or out of range. The prompt is written to
+// stderr so it stays visible when the caller's stdout is piped — the drift menu
+// it belongs to is on stderr too.
 func promptChoice(max int) int {
-	fmt.Printf("  Enter choice [1-%d]: ", max)
+	fmt.Fprintf(os.Stderr, "  Enter choice [1-%d]: ", max)
 	line, _ := driftReader.ReadString('\n')
 	var n int
 	if _, err := fmt.Sscanf(strings.TrimSpace(line), "%d", &n); err == nil && n >= 1 && n <= max {
@@ -227,15 +229,18 @@ func promptChoice(max int) int {
 	return 0
 }
 
-// promptDefaultYes asks a [Y/n] question where Enter defaults to yes.
-func promptDefaultYes(message string) bool {
-	fmt.Printf("%s [Y/n] ", message)
+// promptProceed asks a default-NO [y/N] confirmation, matching the tool-wide
+// convention (internal/confirm). The prompt is written to stderr — the same
+// stream as the surrounding drift menu — so piping stdout doesn't hide the
+// question. Reads from driftReader so tests can drive it.
+func promptProceed(message string) bool {
+	fmt.Fprintf(os.Stderr, "%s [y/N] ", message)
 	line, err := driftReader.ReadString('\n')
 	if err != nil && line == "" {
 		return false // EOF with no input — treat as abort
 	}
 	answer := strings.TrimSpace(strings.ToLower(line))
-	return answer == "" || answer == "y" || answer == "yes"
+	return answer == "y" || answer == "yes"
 }
 
 // doctorProjectDrift reports project name drift as a diagnostic finding.

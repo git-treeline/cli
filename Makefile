@@ -1,9 +1,12 @@
 GOBIN ?= $(shell go env GOPATH)/bin
 
-.PHONY: test vet lint vulncheck build ci
+.PHONY: test test-e2e vet lint vulncheck build ci
 
 test:
 	go test ./...
+
+test-e2e:
+	go test -tags e2e ./test/e2e/... -run TestWorktreeLifecycle -v
 
 vet:
 	go vet ./...

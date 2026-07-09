@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,8 +39,9 @@ const (
 const DefaultRedisDatabases = 16
 
 type UserConfig struct {
-	Path string
-	Data map[string]any
+	Path    string
+	Data    map[string]any
+	loadErr error
 }
 
 func LoadUserConfig(path string) *UserConfig {
@@ -427,6 +429,9 @@ func (uc *UserConfig) Set(dottedKey string, value any) {
 }
 
 func (uc *UserConfig) Save() error {
+	if uc.loadErr != nil {
+		return fmt.Errorf("refusing to overwrite %s: it failed to parse and saving would discard its contents: %w", uc.Path, uc.loadErr)
+	}
 	if err := os.MkdirAll(filepath.Dir(uc.Path), platform.DirMode); err != nil {
 		return err
 	}
@@ -434,7 +439,32 @@ func (uc *UserConfig) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(uc.Path, append(data, '\n'), platform.PrivateFileMode)
+	return atomicWriteFile(uc.Path, append(data, '\n'), platform.PrivateFileMode)
+}
+
+// atomicWriteFile writes data to path by creating a temp file in the same
+// directory and renaming it into place. A crash or ENOSPC mid-write can only
+// corrupt the discarded temp file, never the live config/.treeline.yml — the
+// rename is atomic, so readers see either the old contents or the new ones.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Chmod(perm)
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 func (uc *UserConfig) Exists() bool {
@@ -487,6 +517,10 @@ func (uc *UserConfig) load() map[string]any {
 
 	var userData map[string]any
 	if err := json.Unmarshal(raw, &userData); err != nil {
+		// The file exists but is corrupt. Record the failure so Save() refuses
+		// to overwrite the user's real config (reservations, tunnels, editor
+		// overrides) with laundered defaults. Run in defaults for this session.
+		uc.loadErr = fmt.Errorf("parsing %s: %w", filepath.Base(uc.Path), err)
 		return copyMap(UserDefaults)
 	}
 

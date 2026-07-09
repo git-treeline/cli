@@ -348,15 +348,15 @@ database:
       app: cv-prod
       var: DATABASE_URL       # optional (default); falls back to discrete PG* vars
     staging:
-      via: url                # universal escape hatch
-      env: STAGING_DATABASE_URL   # a local env var holding postgres://...
+      via: env                # read the URL from a local environment variable
+      var: STAGING_DATABASE_URL   # the local env var holding postgres://...
   extensions:
     require: [pg_trgm, citext]    # CREATE EXTENSION IF NOT EXISTS before restore
     strip:   [pgaudit]            # commented out of the restore TOC (cloud-only extensions)
   sslmode: require                # optional; defaults to require
 ```
 
-Source types (`via:`) are `fly` (reads the Fly app's environment) and `url` (reads a local environment variable). Both require the remote host to be directly reachable from your machine — managed/hosted Postgres such as Crunchy Bridge, Fly-hosted, or RDS with a public endpoint. Internal-only hosts (e.g. `*.internal`/`*.flycast`) aren't supported yet; `pull` reports this clearly when it can't connect.
+Source types (`via:`) are `fly` (reads the Fly app's environment), `heroku` (reads the Heroku app's config vars), and `env` (reads a local environment variable named by `var:`). All require the remote host to be directly reachable from your machine — managed/hosted Postgres such as Crunchy Bridge, Fly-hosted, or RDS with a public endpoint. Internal-only hosts (e.g. `*.internal`/`*.flycast`) aren't supported yet; `pull` reports this clearly when it can't connect.
 
 ### 17. Resolve cross-worktree services
 
@@ -879,6 +879,10 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl serve install` | | One-time setup: CA trust, port forwarding, background service |
 | `gtl serve status` | | Show router routes and service health |
 | `gtl serve uninstall` | | Remove CA trust, port forwarding, and service |
+| `gtl serve restart` | `--pf` `--if-installed` | Restart the router daemon (verifies it answers before reporting success) |
+| `gtl serve reload-pf` | | Reapply the 443→router port-forwarding rules (macOS pf / Linux iptables) |
+| `gtl serve logs` | `--follow`/`-f` | Print or tail the router log (journalctl on Linux) |
+| `gtl serve hosts sync` / `clean` | | Add/remove managed `/etc/hosts` entries for the router domain |
 | `gtl serve alias [name] [port]` | `--remove` | Add/remove/list static subdomain aliases. Port auto-detected from current directory when omitted |
 | `gtl proxy <port> [target]` | `--tls` | Forward traffic from a stable port to a worktree port |
 | `gtl tunnel [port]` | `--domain` `--tunnel` | Expose a local port via Cloudflare tunnel (quick or named) |
@@ -888,7 +892,14 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl tunnel remove <name>` | | Remove a named tunnel from local config |
 | `gtl share [port]` | `--tunnel` `--tailscale` | Private share URL (Cloudflare token-gated or Tailscale tailnet) |
 | `gtl config` | | Show or initialize user-level config |
-| `gtl db` | `name` `reset` `restore` `drop` — `name --json` | Manage worktree databases |
+| `gtl db` | `name` `reset` `restore` `drop` (`reset`/`restore`/`drop` take `--force`/`-f` `--dry-run`) — `name --json` | Manage worktree databases |
+| `gtl list` | `--json` | Scriptable, non-interactive list of all registered worktrees |
+| `gtl nuke` | `--force`/`-f` | Machine-wide recovery: kill processes holding gtl ports and clear stale supervisors |
+| `gtl relate <target>` | `--from` `--type` | Link the current worktree to another (durable, survives archive/recreate) |
+| `gtl unrelate <target>` / `gtl related` | `--json` | Remove a relationship / list the current worktree's relationships |
+| `gtl rename <new-name>` | | Rename the project across registry, reservations, and databases |
+| `gtl reallocate [PATH...]` | `--apply` `--all-registry` | Preview (default) or apply re-allocation for specific worktrees |
+| `gtl registry` | `validate` (`--json`) `repair` `forget <path>` | Inspect and repair the allocation registry |
 | `gtl dashboard` | aliases: `dash`, `ui` | Interactive TUI for monitoring and managing all worktrees |
 | `gtl mcp` | | MCP server for AI agents (started automatically by your editor) |
 | `gtl version` | | Print version |

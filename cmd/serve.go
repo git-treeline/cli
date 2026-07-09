@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/confirm"
@@ -42,6 +44,8 @@ func init() {
 	serveCmd.AddCommand(serveRestartCmd)
 	serveCmd.AddCommand(serveReloadPFCmd)
 	serveCmd.AddCommand(serveStatusCmd)
+	serveLogsCmd.Flags().BoolVarP(&serveLogsFollow, "follow", "f", false, "Follow the log output (tail -f / journalctl -f)")
+	serveCmd.AddCommand(serveLogsCmd)
 	serveCmd.AddCommand(serveRunCmd)
 	serveHostsCmd.AddCommand(serveHostsSyncCmd)
 	serveHostsCmd.AddCommand(serveHostsCleanCmd)
@@ -52,7 +56,7 @@ func init() {
 }
 
 var (
-	serveRestartReloadPF   bool
+	serveRestartReloadPF    bool
 	serveRestartIfInstalled bool
 )
 
@@ -91,7 +95,14 @@ should not be an error).`,
 				Hint:    "If this persists, run 'gtl serve install' for a full reset.",
 			})
 		}
-		fmt.Println(style.Dimf("Router restarted (running %s).", Version))
+		routerPort := config.LoadUserConfig("").RouterPort()
+		if err := service.WaitRouterResponding(routerPort, 5*time.Second); err != nil {
+			return cliErr(cmd, &CliError{
+				Message: fmt.Sprintf("Router restarted but is not answering health checks: %v", err),
+				Hint:    "Check the router logs, or run 'gtl serve install' for a full reset.",
+			})
+		}
+		fmt.Println(style.Dimf("Router restarted and responding (running %s).", Version))
 
 		if serveRestartReloadPF {
 			fmt.Println(style.Actionf("Reloading pf rules..."))
@@ -157,7 +168,14 @@ After install, access worktrees at https://{project}-{branch}.{domain}`,
 		fmt.Println()
 		fmt.Println(style.Actionf("Router running."))
 		fmt.Printf("  Status: %s\n", style.Cmd("gtl serve status"))
-		fmt.Printf("  URL:    %s\n", style.Link(fmt.Sprintf("https://{project}-{branch}.%s", domain)))
+		// On Linux, only advertise the clean (port-less) URL when :443 is
+		// actually answering — otherwise show the honest port-URL so we never
+		// claim a redirect that isn't live. macOS keeps the clean URL.
+		if runtime.GOOS == "linux" && !port443Reachable() {
+			fmt.Printf("  URL:    %s\n", style.Link(fmt.Sprintf("https://{project}-{branch}.%s:%d", domain, uc.RouterPort())))
+		} else {
+			fmt.Printf("  URL:    %s\n", style.Link(fmt.Sprintf("https://{project}-{branch}.%s", domain)))
+		}
 		return nil
 	},
 }
@@ -195,7 +213,7 @@ var serveUninstallCmd = &cobra.Command{
 
 		if err := service.CleanHosts(); err != nil {
 			fmt.Fprintln(os.Stderr, style.Warnf("could not clean hosts file: %v", err))
-		} else if runtime.GOOS == "darwin" {
+		} else if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
 			fmt.Println("Hosts entries removed.")
 		}
 		return nil
@@ -265,10 +283,93 @@ var serveStatusCmd = &cobra.Command{
 				fmt.Fprintln(os.Stderr, style.Dimf("  Run: gtl serve hosts sync"))
 				fmt.Fprintln(os.Stderr, style.Dimf("  Or disable: gtl config set warnings.safari false"))
 			}
+		} else if runtime.GOOS == "linux" && domain != "localhost" {
+			// A custom TLD (non-.localhost) needs /etc/hosts entries on Linux
+			// too — the router's new worktree hostnames won't resolve
+			// otherwise, and previously no warning was shown at all.
+			hostnames := routeHostnames(domain)
+			if service.NeedsHostsSync(hostnames) {
+				fmt.Println()
+				fmt.Fprintln(os.Stderr, style.Warnf("Some routes may not resolve (/etc/hosts out of date for .%s).", domain))
+				fmt.Fprintln(os.Stderr, style.Dimf("  Run: gtl serve hosts sync"))
+			}
 		}
 
 		return nil
 	},
+}
+
+var serveLogsFollow bool
+
+var serveLogsCmd = &cobra.Command{
+	Use:   "logs",
+	Short: "Print or tail the router's log",
+	Long: `Show the router daemon's operational log (startup, route refreshes,
+shutdown). On macOS this reads ~/Library/Logs/git-treeline/router.{log,err};
+on Linux it reads the systemd journal for the router unit.
+
+Pass --follow/-f to stream new lines as they arrive (Ctrl+C to stop).`,
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+			return cliErr(cmd, &CliError{
+				Message: fmt.Sprintf("gtl serve logs requires macOS or Linux (detected %s).", runtime.GOOS),
+			})
+		}
+		return runServeLogs(cmd, serveLogsFollow)
+	},
+}
+
+// runServeLogs streams the router's log to stdout. macOS logs are plain files
+// captured by launchd (router.log/router.err); Linux logs live in the systemd
+// journal. --follow maps to `tail -F` / `journalctl -f`; otherwise we show a
+// recent tail so the command returns promptly.
+func runServeLogs(cmd *cobra.Command, follow bool) error {
+	if runtime.GOOS == "darwin" {
+		stdout, stderr := service.RouterLogFiles()
+		if !fileExists(stdout) && !fileExists(stderr) {
+			return cliErr(cmd, &CliError{
+				Message: "No router logs found yet.",
+				Hint:    "Start the router with 'gtl serve install' (logs appear once it runs).",
+			})
+		}
+	}
+
+	stdout, stderr := service.RouterLogFiles()
+	name, args := serveLogsCommand(runtime.GOOS, follow, stdout, stderr, service.SystemdUnit())
+	c := exec.Command(name, args...)
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	c.Stdin = os.Stdin
+	return c.Run()
+}
+
+// serveLogsCommand builds the log-viewer command (name + args) for a platform
+// without running it. macOS tails the launchd stdout/stderr files; Linux reads
+// the systemd journal. --follow maps to `tail -F` / `journalctl -f`; otherwise
+// a bounded recent tail. Pure so the per-platform selection is testable.
+func serveLogsCommand(goos string, follow bool, stdout, stderr, unit string) (name string, args []string) {
+	const recentLines = "200"
+	switch goos {
+	case "darwin":
+		if follow {
+			// -F keeps following across log rotation / re-creation.
+			args = append(args, "-F")
+		} else {
+			args = append(args, "-n", recentLines)
+		}
+		args = append(args, stdout, stderr)
+		return "tail", args
+	case "linux":
+		args = []string{"--user", "-u", unit, "--no-pager"}
+		if follow {
+			args = append(args, "-f")
+		} else {
+			args = append(args, "-n", recentLines)
+		}
+		return "journalctl", args
+	}
+	return "", nil
 }
 
 var serveRunCmd = &cobra.Command{
@@ -288,6 +389,7 @@ func runRouter() error {
 	reg := registry.New("")
 	router := proxy.NewRouter(port, reg).
 		WithBaseDomain(domain).
+		WithVersion(Version).
 		WithAliases(func() map[string]int { return config.LoadUserConfig("").RouterAliases() }).
 		WithAliases(projectAliases(reg))
 	if proxy.IsCAInstalled() {
@@ -546,8 +648,8 @@ var serveHostsCleanCmd = &cobra.Command{
 	Use:   "clean",
 	Short: "Remove all git-treeline entries from /etc/hosts",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if runtime.GOOS != "darwin" {
-			fmt.Println("Nothing to clean (hosts sync is macOS-only).")
+		if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+			fmt.Println("Nothing to clean (hosts sync is macOS/Linux only).")
 			return nil
 		}
 		if err := service.CleanHosts(); err != nil {

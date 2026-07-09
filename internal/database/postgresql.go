@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
+	"syscall"
+
+	"github.com/git-treeline/cli/internal/platform"
 )
 
 // dbIdentifierRe validates PostgreSQL identifiers to prevent SQL injection.
@@ -15,10 +18,6 @@ import (
 // a letter or underscore. This regex is checked before any identifier is
 // used in SQL queries or shell commands.
 var dbIdentifierRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
-
-// Per-template lock for serializing concurrent database clones.
-// createdb --template requires exclusive access to the template database.
-var templateLocks sync.Map
 
 // PostgreSQL implements the Adapter interface for PostgreSQL databases.
 // Clone uses createdb --template, Drop uses dropdb --if-exists.
@@ -94,10 +93,24 @@ func (pg *PostgreSQL) Clone(template, target string) error {
 		return fmt.Errorf("invalid database identifier: %q", template)
 	}
 
-	mu := getTemplateLock(template)
-	mu.Lock()
-	defer mu.Unlock()
+	// Serialize clones of this template across every gtl process on the host.
+	// createdb --template requires the template to have no other sessions, and
+	// two concurrent `gtl new` runs cloning the same template would otherwise
+	// race — each terminating the other's connections mid-clone. A flock on a
+	// per-template lock file (advisory, released on unlock or process exit)
+	// provides cross-process mutual exclusion; an in-process sync.Mutex could
+	// not, since separate gtl invocations don't share memory.
+	unlock, err := lockTemplate(template)
+	if err != nil {
+		return fmt.Errorf("locking template %s: %w", template, err)
+	}
+	defer unlock()
 
+	// Terminate sessions still connected to the template (e.g. a lingering app
+	// or an interrupted earlier clone) so createdb isn't rejected. Scoped by
+	// datname = template, this only touches sessions on THIS template; because
+	// the flock above serializes same-template clones, it can never kill a
+	// concurrent clone's own createdb connection.
 	// SAFETY: template is validated by dbIdentifierRe above, which only allows
 	// [a-zA-Z_][a-zA-Z0-9_]* — no quotes, semicolons, or special characters.
 	// This prevents SQL injection in the pg_terminate_backend query.
@@ -174,7 +187,27 @@ func isCustomFormat(path string) bool {
 	return n == 5 && string(header) == "PGDMP"
 }
 
-func getTemplateLock(template string) *sync.Mutex {
-	actual, _ := templateLocks.LoadOrStore(template, &sync.Mutex{})
-	return actual.(*sync.Mutex)
+// lockTemplate acquires an exclusive, cross-process advisory lock keyed on the
+// template name and returns a release function. The lock file lives under the
+// gtl config dir so every gtl invocation on the host agrees on the same path.
+// template is pre-validated by dbIdentifierRe, so it is safe as a filename
+// component (no path separators or traversal).
+func lockTemplate(template string) (func(), error) {
+	dir := filepath.Join(platform.ConfigDir(), "locks")
+	if err := os.MkdirAll(dir, platform.DirMode); err != nil {
+		return nil, err
+	}
+	lockPath := filepath.Join(dir, "template-"+template+".lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, platform.PrivateFileMode)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
 }

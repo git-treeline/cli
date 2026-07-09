@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/confirm"
 	"github.com/git-treeline/cli/internal/database"
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/worktree"
@@ -15,10 +16,24 @@ import (
 
 var dbResetFrom string
 var dbNameJSON bool
+var (
+	dbDropForce     bool
+	dbDropDryRun    bool
+	dbResetForce    bool
+	dbResetDryRun   bool
+	dbRestoreForce  bool
+	dbRestoreDryRun bool
+)
 
 func init() {
 	dbResetCmd.Flags().StringVar(&dbResetFrom, "from", "", "Clone from this database instead of the configured template")
 	dbNameCmd.Flags().BoolVar(&dbNameJSON, "json", false, "Output as JSON")
+	dbDropCmd.Flags().BoolVarP(&dbDropForce, "force", "f", false, "Skip the confirmation prompt")
+	dbDropCmd.Flags().BoolVar(&dbDropDryRun, "dry-run", false, "Print what would happen without making changes")
+	dbResetCmd.Flags().BoolVarP(&dbResetForce, "force", "f", false, "Skip the confirmation prompt")
+	dbResetCmd.Flags().BoolVar(&dbResetDryRun, "dry-run", false, "Print what would happen without making changes")
+	dbRestoreCmd.Flags().BoolVarP(&dbRestoreForce, "force", "f", false, "Skip the confirmation prompt")
+	dbRestoreCmd.Flags().BoolVar(&dbRestoreDryRun, "dry-run", false, "Print what would happen without making changes")
 	dbPullCmd.Flags().BoolVarP(&dbPullForce, "force", "f", false, "Skip the confirmation prompt")
 	dbPullCmd.Flags().BoolVar(&dbPullDryRun, "dry-run", false, "Resolve and print the plan without making changes")
 	dbPullCmd.Flags().BoolVar(&dbPullDebug, "debug", false, "Echo each command (passwords redacted)")
@@ -77,6 +92,15 @@ var dbDropCmd = &cobra.Command{
 			fmt.Printf("Database %s does not exist\n", info.target)
 			return nil
 		}
+		if dbDropDryRun {
+			fmt.Printf("Would drop database %s. (dry-run)\n", info.target)
+			return nil
+		}
+		prompt := fmt.Sprintf("This will DROP worktree db '%s'.", info.target)
+		if !confirm.Prompt(prompt, dbDropForce, nil) {
+			fmt.Println("Aborted.")
+			return nil
+		}
 		if err := info.adapter.Drop(info.target); err != nil {
 			return fmt.Errorf("dropping database: %w", err)
 		}
@@ -105,6 +129,16 @@ in .treeline.yml. Use --from to clone from a different database instead.`,
 				Message: "No template database configured and no --from specified.",
 				Hint:    "Set 'database.template' in .treeline.yml, or pass --from <db_name>.",
 			})
+		}
+
+		if dbResetDryRun {
+			fmt.Printf("Would drop %s and re-clone from %s. (dry-run)\n", info.target, source)
+			return nil
+		}
+		prompt := fmt.Sprintf("This will DROP and re-clone worktree db '%s' from %s.", info.target, source)
+		if !confirm.Prompt(prompt, dbResetForce, nil) {
+			fmt.Println("Aborted.")
+			return nil
 		}
 
 		fmt.Printf("==> Dropping %s\n", info.target)
@@ -140,6 +174,16 @@ pg_dump file. Supports both custom format and plain SQL dumps.`,
 		info, err := resolveDB()
 		if err != nil {
 			return err
+		}
+
+		if dbRestoreDryRun {
+			fmt.Printf("Would drop %s and restore from %s. (dry-run)\n", info.target, dumpFile)
+			return nil
+		}
+		prompt := fmt.Sprintf("This will DROP and restore worktree db '%s' from %s.", info.target, dumpFile)
+		if !confirm.Prompt(prompt, dbRestoreForce, nil) {
+			fmt.Println("Aborted.")
+			return nil
 		}
 
 		fmt.Printf("==> Dropping %s\n", info.target)

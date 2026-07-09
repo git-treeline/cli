@@ -10,7 +10,7 @@ cd cli
 make ci
 ```
 
-Requires Go 1.24+ and optionally `golangci-lint` and `govulncheck` (auto-installed by `make ci` if missing).
+Requires Go 1.26+ and optionally `golangci-lint` and `govulncheck` (auto-installed by `make ci` if missing).
 
 ## Making changes
 
