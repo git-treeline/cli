@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"net"
@@ -336,7 +337,7 @@ func (r *Router) serveNotFound(w http.ResponseWriter, subdomain string) {
 	w.WriteHeader(http.StatusNotFound)
 
 	var body strings.Builder
-	fmt.Fprintf(&body, "<p>No route matches <code>%s</code>.</p>", subdomain)
+	fmt.Fprintf(&body, "<p>No route matches <code>%s</code>.</p>", html.EscapeString(subdomain))
 	if len(routes) > 0 {
 		body.WriteString("<p>Available routes:</p><table><tr><th>Route</th><th>Port</th></tr>")
 		for _, k := range sortedKeys(routes) {

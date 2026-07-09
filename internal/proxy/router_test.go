@@ -273,6 +273,22 @@ func TestRouterNotFound(t *testing.T) {
 	}
 }
 
+func TestRouterNotFound_EscapesSubdomain(t *testing.T) {
+	reg := testRegistry(t, nil)
+	router := NewRouter(3000, reg)
+
+	rec := httptest.NewRecorder()
+	router.serveNotFound(rec, `<script>alert(1)</script><img src=x onerror=alert(2)>`)
+
+	body := rec.Body.String()
+	if strings.Contains(body, "<script>") || strings.Contains(body, "<img") {
+		t.Errorf("subdomain was reflected unescaped into 404 page:\n%s", body)
+	}
+	if !strings.Contains(body, "&lt;script&gt;") {
+		t.Errorf("expected HTML-escaped subdomain in body:\n%s", body)
+	}
+}
+
 func TestRouterLoopDetection(t *testing.T) {
 	reg := testRegistry(t, []registry.Allocation{
 		{"project": "salt", "branch": "main", "port": float64(3001), "ports": []any{float64(3001)}, "worktree": "/tmp/salt"},
