@@ -163,3 +163,17 @@ func TestLinuxDialFallback_NoopWhenKernelKnown(t *testing.T) {
 type fakePFConn struct{ net.Conn }
 
 func (fakePFConn) Close() error { return nil }
+
+func TestParseToPort(t *testing.T) {
+	body := linuxPortForwardUnitBody("/usr/sbin/iptables", 3001)
+	got, ok := parseToPort(body)
+	if !ok || got != 3001 {
+		t.Errorf("parseToPort(unit body) = %d,%v; want 3001,true", got, ok)
+	}
+	if _, ok := parseToPort("no port here"); ok {
+		t.Error("parseToPort should fail when --to-port is absent")
+	}
+	if got, ok := parseToPort("--to-port '8443'"); !ok || got != 8443 {
+		t.Errorf("parseToPort quoted = %d,%v; want 8443,true", got, ok)
+	}
+}

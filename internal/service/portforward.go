@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -244,15 +245,11 @@ func ReloadPortForward() error {
 	case "darwin":
 		return reloadPf()
 	case "linux":
-		// Linux installs iptables rules directly; reapplying them is the
-		// only "reload" available. The install function already short-
-		// circuits when rules are present, but we want it to reapply
-		// unconditionally — the linux install path is idempotent so we
-		// just call it again.
-		// We don't have the routerPort here, so the caller should use
-		// InstallPortForward(routerPort) instead. ReloadPortForward is
-		// macOS-focused; on Linux we return a hint.
-		return fmt.Errorf("on Linux, run 'gtl serve install' to reapply iptables rules")
+		// Re-apply the iptables redirect (idempotently) from the port stored
+		// in the persistence unit. This is what doctor --fix, status and
+		// `serve restart --pf` all advertise — previously it errored on Linux,
+		// so the recommended repair always failed.
+		return reapplyLinuxPortForward()
 	default:
 		return fmt.Errorf("port forwarding not supported on %s", runtime.GOOS)
 	}
@@ -655,6 +652,14 @@ func linuxUninstallScript(ipt string) string {
 }
 
 func installLinuxPortForward(routerPort int) error {
+	return applyLinuxPortForward(routerPort, "\nEnter your password (2 of 2): ")
+}
+
+// applyLinuxPortForward applies the redirect and (re)installs the boot-time
+// persistence unit in one sudo session. Shared by first-time install and
+// reload-pf; the only difference is the sudo prompt. Idempotent — safe to run
+// repeatedly.
+func applyLinuxPortForward(routerPort int, prompt string) error {
 	ipt, err := resolveIptables()
 	if err != nil {
 		return err
@@ -672,8 +677,7 @@ func installLinuxPortForward(routerPort int) error {
 		return err
 	}
 
-	cmd := exec.Command("sudo", "-p",
-		"\nEnter your password (2 of 2): ",
+	cmd := exec.Command("sudo", "-p", prompt,
 		"sh", "-c", linuxInstallScript(ipt, routerPort, tmpUnit.Name()))
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -688,6 +692,44 @@ func installLinuxPortForward(routerPort int) error {
 		fmt.Println("        Re-run 'gtl serve install' on a systemd host, or re-apply with 'gtl serve reload-pf'.")
 	}
 	return nil
+}
+
+// reapplyLinuxPortForward re-applies the iptables redirect from the router
+// port recorded in the persistence unit. This is the Linux `reload-pf`: after
+// a reboot or network flush cleared the running nat rule, it puts the rule
+// back without the user having to re-run the full install. The persistence
+// unit (written at install time, survives on disk) is the authoritative
+// source of the port — so no config import is needed here.
+func reapplyLinuxPortForward() error {
+	port, ok := linuxRouterPortFromUnit()
+	if !ok {
+		return fmt.Errorf("cannot determine the router port to reapply — no persistence unit at %s; run 'gtl serve install'", linuxPortForwardUnitPath())
+	}
+	return applyLinuxPortForward(port, "\nEnter your password to reload port forwarding: ")
+}
+
+// linuxRouterPortFromUnit extracts the --to-port value from the persistence
+// unit's ExecStart. Returns false when the unit is absent or unparseable.
+func linuxRouterPortFromUnit() (int, bool) {
+	data, err := os.ReadFile(linuxPortForwardUnitPath())
+	if err != nil {
+		return 0, false
+	}
+	return parseToPort(string(data))
+}
+
+// parseToPort finds the "--to-port N" argument in an iptables command line.
+func parseToPort(s string) (int, bool) {
+	fields := strings.Fields(s)
+	for i, f := range fields {
+		if f == "--to-port" && i+1 < len(fields) {
+			v := strings.Trim(fields[i+1], "'\"")
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				return n, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func uninstallLinuxPortForward() error {
