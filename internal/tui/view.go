@@ -194,8 +194,8 @@ func (m *Model) renderDetailPanel(width, height int) string {
 		sort.Strings(linkKeys)
 		for _, k := range linkKeys {
 			b.WriteString("    ")
-			b.WriteString(linkIndicatorStyle.Render("⇄ "+k))
-			b.WriteString(detailValue.Render(" → "+wt.Links[k]))
+			b.WriteString(linkIndicatorStyle.Render("⇄ " + k))
+			b.WriteString(detailValue.Render(" → " + wt.Links[k]))
 			b.WriteString("\n")
 		}
 	}
@@ -339,7 +339,7 @@ func (m *Model) renderHelpOverlay() string {
 // --- Confirm overlay ---
 
 func (m *Model) renderConfirmOverlay() string {
-	wt := m.selectedWorktree()
+	wt := m.confirmTarget
 	if wt == nil {
 		return ""
 	}

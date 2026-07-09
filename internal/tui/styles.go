@@ -64,4 +64,3 @@ var (
 	linkIndicatorStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#FFAA33"))
 )
-

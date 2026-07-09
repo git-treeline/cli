@@ -672,7 +672,7 @@ func TestRestartSupervisor_SendsRestart(t *testing.T) {
 func TestReleaseWorktree_PassesPath(t *testing.T) {
 	var calls []callRecord
 	m := buildTestModelWithDeps(&calls)
-	cmd := m.releaseWorktree()
+	cmd := m.releaseWorktree(m.selectedWorktree())
 	cmd()
 	if len(calls) != 1 || calls[0].action != "releaseWorktree" {
 		t.Fatalf("expected releaseWorktree call, got %v", calls)
@@ -795,6 +795,7 @@ func TestConfirm_YReleasesWorktree(t *testing.T) {
 	var calls []callRecord
 	m := buildTestModelWithDeps(&calls)
 	m.confirmKind = "release"
+	m.confirmTarget = m.selectedWorktree()
 
 	result, cmd := m.updateConfirm(tea.KeyPressMsg(tea.Key{Code: 'y', Text: "y"}))
 	rm := result.(Model)
@@ -810,6 +811,51 @@ func TestConfirm_YReleasesWorktree(t *testing.T) {
 	}
 	if calls[0].args[0] != "/home/dev/api" {
 		t.Errorf("expected /home/dev/api, got %s", calls[0].args[0])
+	}
+}
+
+func TestConfirm_ReleasesCapturedTargetAfterListReorder(t *testing.T) {
+	var calls []callRecord
+	m := buildTestModelWithDeps(&calls)
+	// cursor is on api/main (path /home/dev/api)
+
+	// Open the release-confirm overlay on the selected worktree.
+	res, _ := m.updateNormal(tea.KeyPressMsg(tea.Key{Code: 'd', Text: "d"}))
+	m = res.(Model)
+	if m.confirmKind != "release" || m.confirmTarget == nil {
+		t.Fatalf("expected release confirm open, got kind=%q target=%v", m.confirmKind, m.confirmTarget)
+	}
+	if m.confirmTarget.WorktreePath != "/home/dev/api" {
+		t.Fatalf("expected captured target /home/dev/api, got %s", m.confirmTarget.WorktreePath)
+	}
+
+	// A background poll rebuilds the list and shrinks/reorders it so the
+	// cursor now points at a different worktree while the overlay is open.
+	reordered := Snapshot{
+		Projects: []string{"api"},
+		Worktrees: []WorktreeStatus{
+			{Project: "api", Branch: "feature-x", WorktreeName: "api-feature-x", WorktreePath: "/home/dev/api-feature-x", Ports: []int{3010}},
+		},
+	}
+	res, _ = m.Update(dataMsg(reordered))
+	m = res.(Model)
+
+	if sw := m.selectedWorktree(); sw == nil || sw.WorktreePath != "/home/dev/api-feature-x" {
+		t.Fatalf("expected cursor to have moved to api-feature-x, got %v", sw)
+	}
+
+	// Confirming must release the originally-captured api/main, not whatever
+	// the cursor now points at.
+	res, cmd := m.updateConfirm(tea.KeyPressMsg(tea.Key{Code: 'y', Text: "y"}))
+	if cmd == nil {
+		t.Fatal("expected non-nil release cmd")
+	}
+	cmd()
+	if len(calls) != 1 || calls[0].action != "releaseWorktree" {
+		t.Fatalf("expected releaseWorktree call, got %v", calls)
+	}
+	if calls[0].args[0] != "/home/dev/api" {
+		t.Errorf("expected originally-selected /home/dev/api released, got %s", calls[0].args[0])
 	}
 }
 
@@ -857,7 +903,7 @@ func TestReleaseWorktree_NilWhenNoSelection(t *testing.T) {
 	var calls []callRecord
 	m := buildTestModelWithDeps(&calls)
 	m.cursor = 0 // header
-	cmd := m.releaseWorktree()
+	cmd := m.releaseWorktree(m.selectedWorktree())
 	if cmd != nil {
 		t.Error("expected nil cmd when on header")
 	}

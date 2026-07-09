@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/setup"
@@ -39,25 +39,26 @@ type actionDeps struct {
 
 // Model is the root Bubble Tea model for the gtl dashboard.
 type Model struct {
-	snapshot     Snapshot
-	width        int
-	height       int
-	focus        focusPane
-	cursor       int // selected index into flatList
-	scrollOffset int // first visible index in the list panel
-	flatList     []flatEntry
-	ready        bool
-	polling      bool
-	spinner      spinner.Model
-	filterMode   bool
-	filterText   string
-	showHelp     bool
-	confirmKind  string // "release" or ""
-	quitting     bool
-	inputMode    string // "" or "new_worktree"
-	inputText    string
-	statusMsg    string // transient status message
-	deps         actionDeps
+	snapshot      Snapshot
+	width         int
+	height        int
+	focus         focusPane
+	cursor        int // selected index into flatList
+	scrollOffset  int // first visible index in the list panel
+	flatList      []flatEntry
+	ready         bool
+	polling       bool
+	spinner       spinner.Model
+	filterMode    bool
+	filterText    string
+	showHelp      bool
+	confirmKind   string          // "release" or ""
+	confirmTarget *WorktreeStatus // worktree captured when the confirm overlay opened
+	quitting      bool
+	inputMode     string // "" or "new_worktree"
+	inputText     string
+	statusMsg     string // transient status message
+	deps          actionDeps
 }
 
 // flatEntry is a denormalized row in the worktree list.
