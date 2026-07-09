@@ -1,11 +1,66 @@
 package cmd
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/git-treeline/cli/internal/service"
 )
+
+// serveLogsCommand selects the right viewer and args per platform without
+// tailing real files: macOS tails the two launchd log files; Linux reads the
+// systemd journal. --follow switches to the streaming form.
+func TestServeLogsCommand_DarwinRecent(t *testing.T) {
+	name, args := serveLogsCommand("darwin", false, "/logs/out.log", "/logs/err.log", "unit")
+	if name != "tail" {
+		t.Errorf("expected tail, got %q", name)
+	}
+	want := []string{"-n", "200", "/logs/out.log", "/logs/err.log"}
+	if !reflect.DeepEqual(args, want) {
+		t.Errorf("args = %v, want %v", args, want)
+	}
+}
+
+func TestServeLogsCommand_DarwinFollow(t *testing.T) {
+	name, args := serveLogsCommand("darwin", true, "/logs/out.log", "/logs/err.log", "unit")
+	if name != "tail" {
+		t.Errorf("expected tail, got %q", name)
+	}
+	want := []string{"-F", "/logs/out.log", "/logs/err.log"}
+	if !reflect.DeepEqual(args, want) {
+		t.Errorf("args = %v, want %v", args, want)
+	}
+}
+
+func TestServeLogsCommand_LinuxRecent(t *testing.T) {
+	name, args := serveLogsCommand("linux", false, "", "", "gtl-router.service")
+	if name != "journalctl" {
+		t.Errorf("expected journalctl, got %q", name)
+	}
+	want := []string{"--user", "-u", "gtl-router.service", "--no-pager", "-n", "200"}
+	if !reflect.DeepEqual(args, want) {
+		t.Errorf("args = %v, want %v", args, want)
+	}
+}
+
+func TestServeLogsCommand_LinuxFollow(t *testing.T) {
+	name, args := serveLogsCommand("linux", true, "", "", "gtl-router.service")
+	if name != "journalctl" {
+		t.Errorf("expected journalctl, got %q", name)
+	}
+	want := []string{"--user", "-u", "gtl-router.service", "--no-pager", "-f"}
+	if !reflect.DeepEqual(args, want) {
+		t.Errorf("args = %v, want %v", args, want)
+	}
+}
+
+func TestServeLogsCommand_UnsupportedPlatform(t *testing.T) {
+	name, args := serveLogsCommand("windows", false, "a", "b", "u")
+	if name != "" || args != nil {
+		t.Errorf("expected empty command on unsupported platform, got %q %v", name, args)
+	}
+}
 
 func TestFormatPortForwardStatus_NotConfigured(t *testing.T) {
 	got := formatPortForwardStatus(service.PortForwardStatus{}, 3001)

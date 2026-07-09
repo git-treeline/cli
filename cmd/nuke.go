@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -40,25 +41,39 @@ This is a blunt recovery tool. It does NOT touch the registry, databases, or
 git worktrees; it only reclaims runtime processes and sockets.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		reg := registry.New("")
-		plan := buildNukePlan(reg)
-
-		if plan.empty() {
-			fmt.Println("Nothing to nuke — no gtl processes or stale sockets found.")
+		killed, cleared, ran := runNuke(reg, nukeForce, nil, portHolder, killProcess)
+		if !ran {
 			return nil
 		}
-
-		// Preview everything that will be killed BEFORE doing anything.
-		printNukePlan(plan)
-
-		if !confirm.Prompt("Kill these processes and clear these sockets?", nukeForce, nil) {
-			fmt.Println("Aborted.")
-			return nil
-		}
-
-		killed, cleared := executeNukePlan(plan)
 		fmt.Printf("\nDone. Killed %d process(es), cleared %d supervisor socket(s).\n", killed, cleared)
 		return nil
 	},
+}
+
+// runNuke is the testable core of `gtl nuke`: it builds the plan, previews it,
+// gates on confirmation, and (only when confirmed) executes. The process
+// discovery (holder) and kill seams are injected so tests can drive the
+// selection and gating logic without touching real processes. ran reports
+// whether the destructive phase actually ran (false when there was nothing to
+// do or the user declined), so the caller knows whether to print the summary.
+func runNuke(reg *registry.Registry, force bool, reader io.Reader, holder func(int) (int, string), kill func(int) bool) (killed, cleared int, ran bool) {
+	plan := buildNukePlanWith(reg, holder)
+
+	if plan.empty() {
+		fmt.Println("Nothing to nuke — no gtl processes or stale sockets found.")
+		return 0, 0, false
+	}
+
+	// Preview everything that will be killed BEFORE doing anything.
+	printNukePlan(plan)
+
+	if !confirm.Prompt("Kill these processes and clear these sockets?", force, reader) {
+		fmt.Println("Aborted.")
+		return 0, 0, false
+	}
+
+	killed, cleared = executeNukePlanWith(plan, holder, kill)
+	return killed, cleared, true
 }
 
 // portTarget is one port and the process (if any) holding it.
@@ -79,6 +94,12 @@ func (p nukePlan) empty() bool { return len(p.ports) == 0 && len(p.sockets) == 0
 // buildNukePlan gathers every gtl-allocated port, the process holding each, and
 // every existing supervisor socket across the registry.
 func buildNukePlan(reg *registry.Registry) nukePlan {
+	return buildNukePlanWith(reg, portHolder)
+}
+
+// buildNukePlanWith is the testable core of buildNukePlan with the
+// process-discovery seam injected.
+func buildNukePlanWith(reg *registry.Registry, holder func(int) (int, string)) nukePlan {
 	var plan nukePlan
 
 	seenPort := make(map[int]bool)
@@ -87,7 +108,7 @@ func buildNukePlan(reg *registry.Registry) nukePlan {
 			continue
 		}
 		seenPort[port] = true
-		pid, name := portHolder(port)
+		pid, name := holder(port)
 		if pid <= 0 || pid == os.Getpid() {
 			continue // nothing holding it, or it's us — leave alone
 		}
@@ -141,6 +162,12 @@ func printNukePlan(plan nukePlan) {
 // killed, then leftover sockets are cleared. Returns counts of processes killed
 // and sockets cleared.
 func executeNukePlan(plan nukePlan) (killed, cleared int) {
+	return executeNukePlanWith(plan, portHolder, killProcess)
+}
+
+// executeNukePlanWith is the testable core of executeNukePlan with the
+// process-discovery and kill seams injected.
+func executeNukePlanWith(plan nukePlan, holder func(int) (int, string), kill func(int) bool) (killed, cleared int) {
 	// Phase 1: ask supervisors to shut down cleanly; this releases most ports.
 	for _, sock := range plan.sockets {
 		_, _ = supervisor.Send(sock, "shutdown")
@@ -149,14 +176,14 @@ func executeNukePlan(plan nukePlan) (killed, cleared int) {
 	// Phase 2: kill whatever still holds each port.
 	for _, t := range plan.ports {
 		// Re-check: a supervisor shutdown above may have already freed it.
-		pid, _ := portHolder(t.port)
+		pid, _ := holder(t.port)
 		if pid <= 0 {
 			continue
 		}
 		if pid == os.Getpid() {
 			continue
 		}
-		if killProcess(pid) {
+		if kill(pid) {
 			killed++
 			fmt.Printf("  Killed pid %d (port %d)\n", pid, t.port)
 		} else {

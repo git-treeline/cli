@@ -56,7 +56,7 @@ func init() {
 }
 
 var (
-	serveRestartReloadPF   bool
+	serveRestartReloadPF    bool
 	serveRestartIfInstalled bool
 )
 
@@ -325,11 +325,7 @@ Pass --follow/-f to stream new lines as they arrive (Ctrl+C to stop).`,
 // journal. --follow maps to `tail -F` / `journalctl -f`; otherwise we show a
 // recent tail so the command returns promptly.
 func runServeLogs(cmd *cobra.Command, follow bool) error {
-	const recentLines = "200"
-
-	var c *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
+	if runtime.GOOS == "darwin" {
 		stdout, stderr := service.RouterLogFiles()
 		if !fileExists(stdout) && !fileExists(stderr) {
 			return cliErr(cmd, &CliError{
@@ -337,7 +333,25 @@ func runServeLogs(cmd *cobra.Command, follow bool) error {
 				Hint:    "Start the router with 'gtl serve install' (logs appear once it runs).",
 			})
 		}
-		args := []string{}
+	}
+
+	stdout, stderr := service.RouterLogFiles()
+	name, args := serveLogsCommand(runtime.GOOS, follow, stdout, stderr, service.SystemdUnit())
+	c := exec.Command(name, args...)
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	c.Stdin = os.Stdin
+	return c.Run()
+}
+
+// serveLogsCommand builds the log-viewer command (name + args) for a platform
+// without running it. macOS tails the launchd stdout/stderr files; Linux reads
+// the systemd journal. --follow maps to `tail -F` / `journalctl -f`; otherwise
+// a bounded recent tail. Pure so the per-platform selection is testable.
+func serveLogsCommand(goos string, follow bool, stdout, stderr, unit string) (name string, args []string) {
+	const recentLines = "200"
+	switch goos {
+	case "darwin":
 		if follow {
 			// -F keeps following across log rotation / re-creation.
 			args = append(args, "-F")
@@ -345,21 +359,17 @@ func runServeLogs(cmd *cobra.Command, follow bool) error {
 			args = append(args, "-n", recentLines)
 		}
 		args = append(args, stdout, stderr)
-		c = exec.Command("tail", args...)
+		return "tail", args
 	case "linux":
-		args := []string{"--user", "-u", service.SystemdUnit(), "--no-pager"}
+		args = []string{"--user", "-u", unit, "--no-pager"}
 		if follow {
 			args = append(args, "-f")
 		} else {
 			args = append(args, "-n", recentLines)
 		}
-		c = exec.Command("journalctl", args...)
+		return "journalctl", args
 	}
-
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	c.Stdin = os.Stdin
-	return c.Run()
+	return "", nil
 }
 
 var serveRunCmd = &cobra.Command{

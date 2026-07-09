@@ -20,11 +20,11 @@ import (
 )
 
 var (
-	releaseDropDB        bool
-	releaseProject       string
-	releaseAll           bool
-	releaseForce         bool
-	releaseDryRun        bool
+	releaseDropDB         bool
+	releaseProject        string
+	releaseAll            bool
+	releaseForce          bool
+	releaseDryRun         bool
 	releaseRemoveWorktree bool
 )
 
@@ -307,14 +307,21 @@ func runReleaseBatch(project string, all bool) error {
 // hosts re-sync recomputes the managed block from current registry state, so
 // the released worktrees must already be gone for their entries to drop.
 func teardownRuntimeState(released []registry.Allocation) {
+	teardownRuntimeStateWith(released, stopWorktreeSupervisor, cleanManagedHosts)
+}
+
+// teardownRuntimeStateWith is the testable core of teardownRuntimeState with
+// the supervisor-stop and hosts-cleanup seams injected, so tests can assert
+// which worktrees are stopped without touching real sockets or /etc/hosts.
+func teardownRuntimeStateWith(released []registry.Allocation, stopSupervisor func(string), cleanHosts func([]registry.Allocation)) {
 	for _, a := range released {
 		wt := format.GetStr(format.Allocation(a), "worktree")
 		if wt == "" {
 			continue
 		}
-		stopWorktreeSupervisor(wt)
+		stopSupervisor(wt)
 	}
-	cleanManagedHosts(released)
+	cleanHosts(released)
 }
 
 // stopWorktreeSupervisor asks a worktree's supervisor to shut down via its
@@ -340,13 +347,29 @@ func cleanManagedHosts(released []registry.Allocation) {
 	if err != nil || len(managed) == 0 {
 		return // hosts-sync not active — nothing managed to clean
 	}
+	domain := config.LoadUserConfig("").RouterDomain()
+	if !hostsCleanupNeeded(released, managed, domain) {
+		return
+	}
+
+	if err := service.SyncHosts(routeHostnames(domain)); err != nil {
+		fmt.Fprintln(os.Stderr, style.Warnf("could not update /etc/hosts: %v", err))
+	}
+}
+
+// hostsCleanupNeeded reports whether a hosts re-sync is warranted: true only
+// when at least one released allocation's route hostname appears in the
+// currently managed /etc/hosts block. Pure decision logic, so the "don't
+// prompt for sudo unless we actually manage one of these entries" rule can be
+// tested without reading /etc/hosts.
+func hostsCleanupNeeded(released []registry.Allocation, managed []string, domain string) bool {
+	if len(managed) == 0 {
+		return false
+	}
 	have := make(map[string]bool, len(managed))
 	for _, h := range managed {
 		have[h] = true
 	}
-
-	domain := config.LoadUserConfig("").RouterDomain()
-	affected := false
 	for _, a := range released {
 		fa := format.Allocation(a)
 		project := format.GetStr(fa, "project")
@@ -355,17 +378,10 @@ func cleanManagedHosts(released []registry.Allocation) {
 		}
 		host := proxy.RouteKey(project, format.GetStr(fa, "branch")) + "." + domain
 		if have[host] {
-			affected = true
-			break
+			return true
 		}
 	}
-	if !affected {
-		return
-	}
-
-	if err := service.SyncHosts(routeHostnames(domain)); err != nil {
-		fmt.Fprintln(os.Stderr, style.Warnf("could not update /etc/hosts: %v", err))
-	}
+	return false
 }
 
 // isInsideDir reports whether cwd is equal to or a child of dir.
