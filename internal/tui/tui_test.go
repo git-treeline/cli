@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -443,6 +444,18 @@ func TestReleaseResultMsg_SetsStatusOnError(t *testing.T) {
 	rm := result.(Model)
 	if rm.statusMsg != "release failed: busy" {
 		t.Errorf("expected error status, got %q", rm.statusMsg)
+	}
+}
+
+func TestGtlBinaryPath_ResolvesRunningExecutable(t *testing.T) {
+	got := gtlBinaryPath()
+	if got == "" {
+		t.Fatal("expected non-empty binary path")
+	}
+	// os.Executable succeeds under the test runner, so an absolute path to the
+	// running binary is expected rather than the bare fallback name.
+	if !filepath.IsAbs(got) {
+		t.Errorf("expected absolute path, got %q", got)
 	}
 }
 

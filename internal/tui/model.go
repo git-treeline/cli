@@ -2,7 +2,9 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -95,7 +97,7 @@ func defaultDeps() actionDeps {
 		supervisorSock: supervisor.SocketPath,
 		openURL:        openURLDefault,
 		releaseWorktree: func(wtPath string) error {
-			return exec.Command("git-treeline", "release", "--force", wtPath).Run()
+			return exec.Command(gtlBinaryPath(), "release", "--force", wtPath).Run()
 		},
 		syncEnv: func(wtPath string) error {
 			uc := config.LoadUserConfig("")
@@ -132,6 +134,25 @@ func defaultDeps() actionDeps {
 			return err
 		},
 	}
+}
+
+// gtlBinaryPath resolves the path used to re-invoke the CLI for actions like
+// release. It prefers the currently running executable (so release works
+// regardless of whether the binary is installed as gtl or git-treeline), then
+// falls back to a PATH lookup, and finally to a bare command name.
+func gtlBinaryPath() string {
+	if exe, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			return resolved
+		}
+		return exe
+	}
+	for _, name := range []string{"gtl", "git-treeline"} {
+		if p, err := exec.LookPath(name); err == nil {
+			return p
+		}
+	}
+	return "git-treeline"
 }
 
 func openURLDefault(url string) {
