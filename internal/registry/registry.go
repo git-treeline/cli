@@ -536,10 +536,7 @@ func branchExistsInWorktree(worktreePath, branch string) bool {
 	// Distinguish "branch missing" (exit 1) from "git couldn't run" (other):
 	// only a clean non-zero exit means the ref is genuinely absent.
 	var exit *exec.ExitError
-	if errors.As(err, &exit) {
-		return false
-	}
-	return true
+	return !errors.As(err, &exit)
 }
 
 func (r *Registry) Prune() (int, error) {
@@ -667,7 +664,7 @@ func (r *Registry) withLockE(fn func(data *RegistryData) error) error {
 					"  Another gtl process is holding the lock. Find and quit it, then retry.\n"+
 					"  The lock (%s) releases automatically when that process exits — even\n"+
 					"  on a crash — so do not delete it; removing the file breaks mutual\n"+
-					"  exclusion for any process still running.",
+					"  exclusion for any process still running",
 				waited, lockPath)
 		}
 		time.Sleep(100 * time.Millisecond)

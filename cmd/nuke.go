@@ -157,16 +157,11 @@ func printNukePlan(plan nukePlan) {
 	fmt.Println()
 }
 
-// executeNukePlan carries out the plan. Supervisors are shut down first (a
-// graceful shutdown frees their port), then any process still holding a port is
-// killed, then leftover sockets are cleared. Returns counts of processes killed
-// and sockets cleared.
-func executeNukePlan(plan nukePlan) (killed, cleared int) {
-	return executeNukePlanWith(plan, portHolder, killProcess)
-}
-
-// executeNukePlanWith is the testable core of executeNukePlan with the
-// process-discovery and kill seams injected.
+// executeNukePlanWith carries out the plan with the process-discovery and kill
+// seams injected (for testing). Supervisors are shut down first (a graceful
+// shutdown frees their port), then any process still holding a port is killed,
+// then leftover sockets are cleared. Returns counts of processes killed and
+// sockets cleared.
 func executeNukePlanWith(plan nukePlan, holder func(int) (int, string), kill func(int) bool) (killed, cleared int) {
 	// Phase 1: ask supervisors to shut down cleanly; this releases most ports.
 	for _, sock := range plan.sockets {
@@ -193,9 +188,9 @@ func executeNukePlanWith(plan nukePlan, holder func(int) (int, string), kill fun
 
 	// Phase 3: clear any leftover supervisor sockets / pid files.
 	for _, sock := range plan.sockets {
-		if killed, _ := forceKillSupervisor(sock); killed {
-			// forceKillSupervisor already removed the socket + pid file.
-		}
+		// forceKillSupervisor SIGKILLs a hung supervisor and removes its socket
+		// + pid file; the explicit removes below cover the not-running case.
+		_, _ = forceKillSupervisor(sock)
 		_ = os.Remove(sock)
 		_ = os.Remove(supervisor.PidPath(sock))
 		cleared++

@@ -920,7 +920,7 @@ func TestConfirm_ReleasesCapturedTargetAfterListReorder(t *testing.T) {
 
 	// Confirming must release the originally-captured api/main, not whatever
 	// the cursor now points at.
-	res, cmd := m.updateConfirm(tea.KeyPressMsg(tea.Key{Code: 'y', Text: "y"}))
+	_, cmd := m.updateConfirm(tea.KeyPressMsg(tea.Key{Code: 'y', Text: "y"}))
 	if cmd == nil {
 		t.Fatal("expected non-nil release cmd")
 	}

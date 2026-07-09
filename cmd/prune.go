@@ -178,7 +178,9 @@ func runPruneMerged() error {
 		for i, a := range matches {
 			formatAllocs[i] = format.Allocation(a)
 		}
-		format.DropDatabases(formatAllocs)
+		if err := format.DropDatabases(formatAllocs); err != nil {
+			return err
+		}
 	}
 
 	paths := make([]string, 0, len(matches))

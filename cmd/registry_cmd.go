@@ -103,7 +103,7 @@ func renderValidateJSON(cmd *cobra.Command, issues []registry.Issue) error {
 	if err != nil {
 		return fmt.Errorf("encoding validate report: %w", err)
 	}
-	fmt.Fprintln(os.Stdout, string(data))
+	_, _ = fmt.Fprintln(os.Stdout, string(data))
 	if len(issues) > 0 {
 		return cliErr(cmd, fmt.Errorf("registry has %d unresolved issue(s)", len(issues)))
 	}
