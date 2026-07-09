@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -445,6 +446,46 @@ func TestReleaseResultMsg_SetsStatusOnError(t *testing.T) {
 	}
 }
 
+// --- poll error handling ---
+
+func TestDataMsg_FailedPollRetainsSnapshotAndSurfacesError(t *testing.T) {
+	m := buildTestModel()
+	m.ready = true
+	prior := m.snapshot
+
+	result, _ := m.Update(dataMsg{err: errors.New("registry is corrupt")})
+	rm := result.(Model)
+
+	if rm.pollErr == nil {
+		t.Fatal("expected pollErr to be set on failed poll")
+	}
+	if len(rm.snapshot.Worktrees) != len(prior.Worktrees) {
+		t.Errorf("expected prior snapshot retained (%d worktrees), got %d",
+			len(prior.Worktrees), len(rm.snapshot.Worktrees))
+	}
+	if len(rm.flatList) == 0 {
+		t.Error("expected flatList retained, got empty")
+	}
+
+	bar := rm.renderStatusBar(120)
+	if !strings.Contains(bar, "poll failed") {
+		t.Errorf("expected status bar to surface poll failure, got %q", bar)
+	}
+
+	// A subsequent successful poll clears the error and updates the snapshot.
+	next := Snapshot{Projects: []string{"api"}, Worktrees: []WorktreeStatus{
+		{Project: "api", Branch: "main", WorktreeName: "api-main", Ports: []int{3000}},
+	}}
+	result, _ = rm.Update(dataMsg{snapshot: next})
+	rm = result.(Model)
+	if rm.pollErr != nil {
+		t.Errorf("expected pollErr cleared after successful poll, got %v", rm.pollErr)
+	}
+	if len(rm.snapshot.Worktrees) != 1 {
+		t.Errorf("expected snapshot updated to 1 worktree, got %d", len(rm.snapshot.Worktrees))
+	}
+}
+
 // --- action handoff tests ---
 
 type callRecord struct {
@@ -837,7 +878,7 @@ func TestConfirm_ReleasesCapturedTargetAfterListReorder(t *testing.T) {
 			{Project: "api", Branch: "feature-x", WorktreeName: "api-feature-x", WorktreePath: "/home/dev/api-feature-x", Ports: []int{3010}},
 		},
 	}
-	res, _ = m.Update(dataMsg(reordered))
+	res, _ = m.Update(dataMsg{snapshot: reordered})
 	m = res.(Model)
 
 	if sw := m.selectedWorktree(); sw == nil || sw.WorktreePath != "/home/dev/api-feature-x" {

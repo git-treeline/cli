@@ -63,4 +63,8 @@ var (
 
 	linkIndicatorStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#FFAA33"))
+
+	statusErrorStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(danger)
 )

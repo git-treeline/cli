@@ -21,11 +21,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case dataMsg:
-		m.snapshot = Snapshot(msg)
-		m.flatList = buildFlatList(m.snapshot, m.filterText)
-		m.clampCursor()
 		m.ready = true
 		m.polling = false
+		if msg.err != nil {
+			// Retain the last-known-good snapshot; surface the failure in the
+			// view rather than blanking the dashboard to "0 worktrees".
+			m.pollErr = msg.err
+			return m, nil
+		}
+		m.pollErr = nil
+		m.snapshot = msg.snapshot
+		m.flatList = buildFlatList(m.snapshot, m.filterText)
+		m.clampCursor()
 		return m, nil
 
 	case tickMsg:

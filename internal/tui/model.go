@@ -58,6 +58,7 @@ type Model struct {
 	inputMode     string // "" or "new_worktree"
 	inputText     string
 	statusMsg     string // transient status message
+	pollErr       error  // last poll failure; snapshot below is then stale
 	deps          actionDeps
 }
 
@@ -70,7 +71,10 @@ type flatEntry struct {
 }
 
 type tickMsg time.Time
-type dataMsg Snapshot
+type dataMsg struct {
+	snapshot Snapshot
+	err      error
+}
 
 func doTick() tea.Cmd {
 	return tea.Tick(pollInterval, func(t time.Time) tea.Msg {
@@ -80,7 +84,8 @@ func doTick() tea.Cmd {
 
 func doPoll() tea.Cmd {
 	return func() tea.Msg {
-		return dataMsg(Poll())
+		snap, err := Poll()
+		return dataMsg{snapshot: snap, err: err}
 	}
 }
 

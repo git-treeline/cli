@@ -276,6 +276,10 @@ func (m *Model) renderStatusBar(width int) string {
 		stats += " · tunnel: " + m.snapshot.TunnelDomain
 	}
 
+	if m.pollErr != nil {
+		stats += " · " + statusErrorStyle.Render("⚠ poll failed (stale): "+m.pollErr.Error())
+	}
+
 	if m.statusMsg != "" {
 		stats += " · " + m.statusMsg
 	}

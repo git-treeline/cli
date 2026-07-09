@@ -1,12 +1,17 @@
 package tui
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
 	"sort"
 	"strings"
 
 	"github.com/git-treeline/cli/internal/allocator"
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/format"
+	"github.com/git-treeline/cli/internal/platform"
 	"github.com/git-treeline/cli/internal/proxy"
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/service"
@@ -40,7 +45,14 @@ type Snapshot struct {
 }
 
 // Poll reads the registry and probes each worktree's supervisor and ports.
-func Poll() Snapshot {
+// It returns an error when the registry is present but unreadable or corrupt,
+// so callers can distinguish a load failure from an empty (nothing allocated)
+// registry and avoid blanking the dashboard.
+func Poll() (Snapshot, error) {
+	if err := probeRegistry(); err != nil {
+		return Snapshot{}, err
+	}
+
 	reg := registry.New("")
 	allocs := reg.Allocations()
 
@@ -132,7 +144,27 @@ func Poll() Snapshot {
 		Projects:     projects,
 		ServeRunning: svcRunning,
 		TunnelDomain: tunnelDomain,
+	}, nil
+}
+
+// probeRegistry verifies the registry file can be read and parsed. A missing
+// file is not an error (nothing has been allocated yet); an unreadable or
+// corrupt file is, so a transient failure is not mistaken for an empty
+// registry. registry.Allocations() swallows this error, so we replicate its
+// load here to surface it.
+func probeRegistry() error {
+	raw, err := os.ReadFile(platform.RegistryFile())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("reading registry: %w", err)
 	}
+	var data registry.RegistryData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return fmt.Errorf("registry is corrupt: %w", err)
+	}
+	return nil
 }
 
 func extractLinks(a registry.Allocation) map[string]string {
