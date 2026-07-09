@@ -531,6 +531,83 @@ func (pc *ProjectConfig) MigrateCommand() string {
 	return ""
 }
 
+// ProvisionConfig is the parsed provision: section — the declared, executable
+// answer to "what must be true on a host before gtl setup can succeed for this
+// repo." Present reports whether the section exists at all (absent = no-op).
+type ProvisionConfig struct {
+	Present  bool
+	Apt      []string
+	Services []string
+	Database ProvisionDatabase
+}
+
+// ProvisionDatabase declares how to bring the template database into existence
+// on a fresh host. Template defaults to the top-level database.template — the
+// same database gtl clones worktree databases from — so provision creates THAT
+// database rather than a parallel one. Source names a database.sources.<env>
+// to hydrate from (preferred); Hydrate is a fallback shell command run in the
+// repo dir to build+fill the template when no source is configured.
+type ProvisionDatabase struct {
+	Template string
+	Source   string
+	Hydrate  string
+}
+
+// Provision returns the parsed provision: section. The returned config's
+// Database.Template falls back to the top-level database.template when the
+// provision block doesn't override it, keeping a single source of truth for the
+// name gtl clones worktree databases from.
+func (pc *ProjectConfig) Provision() ProvisionConfig {
+	raw, present := pc.Data["provision"].(map[string]any)
+	cfg := ProvisionConfig{Present: pc.hasProvisionKey()}
+	if !present {
+		// Section present but not a map (or absent): still resolve the template
+		// fallback so callers can provision a top-level template on its own.
+		cfg.Database.Template = pc.DatabaseTemplate()
+		return cfg
+	}
+	cfg.Apt = stringListFromAny(raw["apt"])
+	cfg.Services = stringListFromAny(raw["services"])
+	if db, ok := raw["database"].(map[string]any); ok {
+		if t, ok := db["template"].(string); ok && t != "" {
+			cfg.Database.Template = t
+		}
+		if s, ok := db["source"].(string); ok {
+			cfg.Database.Source = s
+		}
+		if h, ok := db["hydrate"].(string); ok {
+			cfg.Database.Hydrate = h
+		}
+	}
+	if cfg.Database.Template == "" {
+		cfg.Database.Template = pc.DatabaseTemplate()
+	}
+	return cfg
+}
+
+// hasProvisionKey reports whether the provision: key is present in the file at
+// all — used to distinguish "nothing to provision" from a misconfigured block.
+func (pc *ProjectConfig) hasProvisionKey() bool {
+	_, ok := pc.Data["provision"]
+	return ok
+}
+
+// stringListFromAny coerces a YAML sequence into a []string, dropping non-string
+// entries. Returns nil for anything that isn't a sequence.
+func stringListFromAny(v any) []string {
+	raw, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if s, ok := item.(string); ok && s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func (pc *ProjectConfig) DatabaseSyncOnCreate() bool {
 	v, ok := Dig(pc.Data, "database", "sync_on_create").(bool)
 	return ok && v
@@ -830,6 +907,7 @@ var projectKnownKeys = map[string]bool{
 	"project": true, "port_count": true, "env_file": true, "database": true,
 	"copy_files": true, "env": true, "hooks": true, "commands": true,
 	"editor": true, "merge_target": true, "aliases": true, "related_repos": true,
+	"provision": true,
 	// Legacy keys accepted during migration
 	"default_branch": true, "setup_commands": true, "start_command": true,
 	"ports_needed": true,
