@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"container/list"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -295,8 +296,15 @@ type CertManager struct {
 	caKey  *ecdsa.PrivateKey
 	caCert *x509.Certificate
 	domain string
-	mu     sync.RWMutex
-	cache  map[string]*tls.Certificate
+	mu     sync.Mutex
+	cache  map[string]*list.Element
+	lru    *list.List // front = most recently used
+}
+
+// cacheEntry is a value held in the LRU list.
+type cacheEntry struct {
+	hostname string
+	cert     *tls.Certificate
 }
 
 // NewCertManager loads the local CA and returns a manager that generates
@@ -335,15 +343,19 @@ func NewCertManager(domain string) (*CertManager, error) {
 		caKey:  caKey,
 		caCert: caCert,
 		domain: domain,
-		cache:  make(map[string]*tls.Certificate),
+		cache:  make(map[string]*list.Element),
+		lru:    list.New(),
 	}, nil
 }
 
 const maxCachedCerts = 1000
 
 // GetCertificate is a tls.Config callback that returns a cert with an exact
-// SAN for the requested hostname. The cache is capped to prevent unbounded
-// growth from garbage hostnames.
+// SAN for the requested hostname. Issued certs are kept in an LRU cache
+// capped at maxCachedCerts entries: even in-domain SNI floods (each a fresh
+// keygen + CA signature) can only occupy a bounded amount of memory, and old
+// entries are evicted rather than the cache freezing while issuance
+// continues unbounded.
 func (cm *CertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	hostname := hello.ServerName
 	if hostname == "" {
@@ -353,15 +365,20 @@ func (cm *CertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certific
 		return nil, fmt.Errorf("SNI %q is outside the CA name constraints", hostname)
 	}
 
-	cm.mu.RLock()
-	cert, ok := cm.cache[hostname]
-	cm.mu.RUnlock()
-	if ok {
-		leaf, _ := x509.ParseCertificate(cert.Certificate[0])
+	cm.mu.Lock()
+	if el, ok := cm.cache[hostname]; ok {
+		ent := el.Value.(*cacheEntry)
+		leaf, _ := x509.ParseCertificate(ent.cert.Certificate[0])
 		if leaf != nil && time.Until(leaf.NotAfter) > certRenewalBuffer {
-			return cert, nil
+			cm.lru.MoveToFront(el)
+			cm.mu.Unlock()
+			return ent.cert, nil
 		}
+		// Expiring/unparseable: drop and reissue below.
+		cm.lru.Remove(el)
+		delete(cm.cache, hostname)
 	}
+	cm.mu.Unlock()
 
 	cert, err := cm.issueCert(hostname)
 	if err != nil {
@@ -369,10 +386,23 @@ func (cm *CertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certific
 	}
 
 	cm.mu.Lock()
-	if len(cm.cache) < maxCachedCerts {
-		cm.cache[hostname] = cert
+	defer cm.mu.Unlock()
+	// Another goroutine may have issued and cached this hostname while we were
+	// signing; prefer the cached one so callers share a single cert.
+	if el, ok := cm.cache[hostname]; ok {
+		cm.lru.MoveToFront(el)
+		return el.Value.(*cacheEntry).cert, nil
 	}
-	cm.mu.Unlock()
+	el := cm.lru.PushFront(&cacheEntry{hostname: hostname, cert: cert})
+	cm.cache[hostname] = el
+	for cm.lru.Len() > maxCachedCerts {
+		back := cm.lru.Back()
+		if back == nil {
+			break
+		}
+		cm.lru.Remove(back)
+		delete(cm.cache, back.Value.(*cacheEntry).hostname)
+	}
 	return cert, nil
 }
 

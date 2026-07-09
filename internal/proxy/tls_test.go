@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -333,6 +334,44 @@ func TestCertManager_OffDomainSNIRefused(t *testing.T) {
 		if _, err := cm.GetCertificate(&tls.ClientHelloInfo{ServerName: host}); err == nil {
 			t.Errorf("expected off-domain SNI %q to be refused", host)
 		}
+	}
+}
+
+func TestCertManager_EvictsLeastRecentlyUsed(t *testing.T) {
+	withTempCertsDir(t)
+	if _, err := EnsureCA("localhost"); err != nil {
+		t.Fatal(err)
+	}
+	cm, err := NewCertManager("localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Prime the cache to capacity, then keep "keep.localhost" hot.
+	if _, err := cm.GetCertificate(&tls.ClientHelloInfo{ServerName: "keep.localhost"}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxCachedCerts+50; i++ {
+		host := fmt.Sprintf("h%d.localhost", i)
+		if _, err := cm.GetCertificate(&tls.ClientHelloInfo{ServerName: host}); err != nil {
+			t.Fatal(err)
+		}
+		// Touch the hot entry so it stays most-recently-used.
+		if _, err := cm.GetCertificate(&tls.ClientHelloInfo{ServerName: "keep.localhost"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cm.mu.Lock()
+	size := cm.lru.Len()
+	_, hotPresent := cm.cache["keep.localhost"]
+	cm.mu.Unlock()
+
+	if size > maxCachedCerts {
+		t.Errorf("cache exceeded cap: %d > %d", size, maxCachedCerts)
+	}
+	if !hotPresent {
+		t.Error("hot entry was evicted despite being most recently used")
 	}
 }
 
