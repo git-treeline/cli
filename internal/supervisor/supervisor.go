@@ -31,6 +31,14 @@ func PidPath(socketPath string) string {
 	return strings.TrimSuffix(socketPath, ".sock") + ".pid"
 }
 
+// ChildPidPath returns the sidecar file path that records the child's process
+// group id (pgid) corresponding to a socket path. It sits next to PidPath so a
+// force-kill can reap the whole child process group even after every in-process
+// handle is gone.
+func ChildPidPath(socketPath string) string {
+	return strings.TrimSuffix(socketPath, ".sock") + ".child.pid"
+}
+
 type Supervisor struct {
 	Command    string
 	Dir        string
@@ -45,6 +53,7 @@ type Supervisor struct {
 	mu           sync.Mutex
 	child        *exec.Cmd
 	childDone    chan struct{} // closed when current child's Wait() completes
+	stopping     bool          // true while stopChildLocked has released s.mu to wait
 	listener     net.Listener
 	done         chan struct{}
 	shutdownOnce sync.Once
@@ -82,6 +91,7 @@ func (s *Supervisor) Run() error {
 		_ = ln.Close()
 		_ = os.Remove(s.SocketPath)
 		_ = os.Remove(pidPath)
+		_ = os.Remove(ChildPidPath(s.SocketPath))
 	}()
 
 	sigs := make(chan os.Signal, 1)
@@ -107,6 +117,15 @@ func (s *Supervisor) Run() error {
 
 // startChildLocked starts the child process. Caller must hold s.mu.
 func (s *Supervisor) startChildLocked() error {
+	// A stop is in progress and has released s.mu to wait for the old child to
+	// exit. Spawning here would race the restart's own start and leave an
+	// untracked child fighting for the port. Skip — restart starts the fresh
+	// child itself once the stop completes.
+	if s.stopping {
+		s.Log("==> Ignoring start: a stop is in progress")
+		return nil
+	}
+
 	s.Log("==> Starting: %s", s.Command)
 	cmd := exec.Command("sh", "-c", s.Command)
 	cmd.Dir = s.Dir
@@ -129,8 +148,14 @@ func (s *Supervisor) startChildLocked() error {
 	done := make(chan struct{})
 	s.childDone = done
 
+	// Persist the child's pgid (== child pid because Setpgid gives it a fresh
+	// group) so a force-kill can reap the whole group even if this process is
+	// gone. Removed when the child exits, on stop, and on supervisor shutdown.
+	_ = os.WriteFile(ChildPidPath(s.SocketPath), []byte(strconv.Itoa(cmd.Process.Pid)), 0600)
+
 	go func() {
 		_ = cmd.Wait()
+		_ = os.Remove(ChildPidPath(s.SocketPath))
 		close(done)
 		s.mu.Lock()
 		if s.child == cmd {
@@ -159,6 +184,7 @@ func (s *Supervisor) stopChildLocked() {
 	}
 	s.child = nil
 	s.childDone = nil
+	s.stopping = true
 	s.mu.Unlock()
 
 	_ = syscall.Kill(-child.Process.Pid, syscall.SIGTERM)
@@ -172,6 +198,7 @@ func (s *Supervisor) stopChildLocked() {
 	}
 
 	s.mu.Lock()
+	s.stopping = false
 }
 
 func (s *Supervisor) stopChild() {
