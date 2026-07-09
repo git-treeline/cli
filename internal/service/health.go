@@ -1,6 +1,7 @@
 package service
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/git-treeline/cli/internal/proxy"
 )
 
 // HealthCheck represents a single doctor check result.
@@ -39,6 +42,7 @@ type healthDeps struct {
 	processOnPort              func(port int) processInfo
 	isPfReloadDaemonInstalled  func() bool
 	pfReloadDaemonSupported    bool
+	routerUsesTLS              func() bool
 }
 
 func defaultHealthDeps() healthDeps {
@@ -55,6 +59,7 @@ func defaultHealthDeps() healthDeps {
 		processOnPort:              processOnPort,
 		isPfReloadDaemonInstalled:  IsPfReloadDaemonInstalled,
 		pfReloadDaemonSupported:    runtime.GOOS == "darwin",
+		routerUsesTLS:              proxy.IsCAInstalled,
 	}
 }
 
@@ -263,10 +268,18 @@ func checkRouterListening(d healthDeps, port int) HealthCheck {
 // checkRouterResponding does an end-to-end liveness probe: a real HTTP
 // request to the router's health endpoint. A listening socket is necessary
 // but not sufficient — the router could be deadlocked or panicking on
-// every request. Treats any 2xx/3xx/4xx as alive (the router answered).
-// 5xx or transport error → warn.
+// every request. The scheme must match the router's: it serves TLS whenever
+// the local CA is installed (see runRouter), and a plain-HTTP probe against
+// a TLS listener never gets a health response — it either times out or gets
+// Go's "sent an HTTP request to an HTTPS server" 400, both of which used to
+// misreport a healthy router. The health endpoint returns 200, so anything
+// other than 2xx/3xx means something is wrong.
 func checkRouterResponding(d healthDeps, port int) HealthCheck {
-	url := fmt.Sprintf("http://127.0.0.1:%d/_treeline/health", port)
+	scheme := "http"
+	if d.routerUsesTLS() {
+		scheme = "https"
+	}
+	url := fmt.Sprintf("%s://127.0.0.1:%d/_treeline/health", scheme, port)
 	status, err := d.httpProbe(url, 2*time.Second)
 	if err != nil {
 		return HealthCheck{
@@ -276,11 +289,11 @@ func checkRouterResponding(d healthDeps, port int) HealthCheck {
 			Fix:    "gtl serve restart",
 		}
 	}
-	if status >= 500 {
+	if status >= 400 {
 		return HealthCheck{
 			Name:   "router_responding",
 			Status: "warn",
-			Detail: fmt.Sprintf("router answered with %d", status),
+			Detail: fmt.Sprintf("router answered %d from /_treeline/health", status),
 			Fix:    "gtl serve restart",
 		}
 	}
@@ -387,9 +400,17 @@ func processOnPort(port int) processInfo {
 }
 
 // httpProbe is the default HTTP liveness implementation. Returns the HTTP
-// status code, or an error if the request couldn't complete.
+// status code, or an error if the request couldn't complete. Certificate
+// verification is skipped: the probe checks liveness, not identity, and the
+// router's per-hostname certs are issued for browser use — trust-store state
+// must not fail the health check.
 func httpProbe(url string, timeout time.Duration) (int, error) {
-	client := &http.Client{Timeout: timeout}
+	client := &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 	resp, err := client.Get(url)
 	if err != nil {
 		return 0, err

@@ -80,6 +80,7 @@ func allHealthy() healthDeps {
 		processOnPort:              func(int) processInfo { return processInfo{Name: "git-treeline", PID: 1234} },
 		isPfReloadDaemonInstalled:  func() bool { return true },
 		pfReloadDaemonSupported:    true,
+		routerUsesTLS:              func() bool { return false },
 	}
 }
 
@@ -123,6 +124,7 @@ func TestCheckHealthWith_AllBroken(t *testing.T) {
 		processOnPort:              func(int) processInfo { return processInfo{} },
 		isPfReloadDaemonInstalled:  func() bool { return false },
 		pfReloadDaemonSupported:    true,
+		routerUsesTLS:              func() bool { return false },
 	}
 
 	checks := checkHealthWith(d, 8443, "1.0.0")
@@ -357,6 +359,40 @@ func TestCheckRouterResponding_TransportError(t *testing.T) {
 	}
 	if c.Fix != "gtl serve restart" {
 		t.Errorf("expected fix to suggest restart, got %q", c.Fix)
+	}
+}
+
+func TestCheckRouterResponding_4xxIsWarn(t *testing.T) {
+	// A 400 from the health endpoint historically meant the probe hit a TLS
+	// router over plain HTTP (Go's "HTTP request to an HTTPS server" reply).
+	// The endpoint itself only returns 200 — any 4xx means something is wrong.
+	d := allHealthy()
+	d.httpProbe = fakeHTTP(400, nil)
+	c := checkRouterResponding(d, 8443)
+	if c.Status != "warn" {
+		t.Errorf("expected warn for 4xx, got %s (%s)", c.Status, c.Detail)
+	}
+}
+
+func TestCheckRouterResponding_ProbeSchemeMatchesRouter(t *testing.T) {
+	for _, tc := range []struct {
+		tls    bool
+		scheme string
+	}{
+		{tls: false, scheme: "http://"},
+		{tls: true, scheme: "https://"},
+	} {
+		d := allHealthy()
+		d.routerUsesTLS = func() bool { return tc.tls }
+		var gotURL string
+		d.httpProbe = func(url string, _ time.Duration) (int, error) {
+			gotURL = url
+			return 200, nil
+		}
+		checkRouterResponding(d, 8443)
+		if !strings.HasPrefix(gotURL, tc.scheme) {
+			t.Errorf("routerUsesTLS=%v: expected probe URL with %s, got %q", tc.tls, tc.scheme, gotURL)
+		}
 	}
 }
 
