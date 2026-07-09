@@ -348,15 +348,15 @@ database:
       app: cv-prod
       var: DATABASE_URL       # optional (default); falls back to discrete PG* vars
     staging:
-      via: url                # universal escape hatch
-      env: STAGING_DATABASE_URL   # a local env var holding postgres://...
+      via: env                # read the URL from a local environment variable
+      var: STAGING_DATABASE_URL   # the local env var holding postgres://...
   extensions:
     require: [pg_trgm, citext]    # CREATE EXTENSION IF NOT EXISTS before restore
     strip:   [pgaudit]            # commented out of the restore TOC (cloud-only extensions)
   sslmode: require                # optional; defaults to require
 ```
 
-Source types (`via:`) are `fly` (reads the Fly app's environment) and `url` (reads a local environment variable). Both require the remote host to be directly reachable from your machine — managed/hosted Postgres such as Crunchy Bridge, Fly-hosted, or RDS with a public endpoint. Internal-only hosts (e.g. `*.internal`/`*.flycast`) aren't supported yet; `pull` reports this clearly when it can't connect.
+Source types (`via:`) are `fly` (reads the Fly app's environment), `heroku` (reads the Heroku app's config vars), and `env` (reads a local environment variable named by `var:`). All require the remote host to be directly reachable from your machine — managed/hosted Postgres such as Crunchy Bridge, Fly-hosted, or RDS with a public endpoint. Internal-only hosts (e.g. `*.internal`/`*.flycast`) aren't supported yet; `pull` reports this clearly when it can't connect.
 
 ### 17. Resolve cross-worktree services
 
