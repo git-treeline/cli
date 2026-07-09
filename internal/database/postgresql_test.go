@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestParsePsqlListContains(t *testing.T) {
@@ -77,6 +79,7 @@ func (c cmdCall) String() string {
 
 func testPg(t *testing.T, psqlOutput string, failCmd string) (*PostgreSQL, *[]cmdCall) {
 	t.Helper()
+	t.Setenv("GTL_HOME", t.TempDir())
 	var calls []cmdCall
 	pg := &PostgreSQL{
 		execRun: func(name string, args ...string) error {
@@ -238,6 +241,52 @@ func TestPostgreSQL_Clone_TerminateFailureIgnored(t *testing.T) {
 	}
 	if len(*calls) != 2 {
 		t.Fatalf("expected 2 calls, got %d", len(*calls))
+	}
+}
+
+// TestPostgreSQL_Clone_SerializedPerTemplate asserts that concurrent clones of
+// the same template never overlap their createdb calls — the flock serializes
+// them so one template clone can't terminate another's connection mid-flight.
+func TestPostgreSQL_Clone_SerializedPerTemplate(t *testing.T) {
+	t.Setenv("GTL_HOME", t.TempDir())
+
+	var mu sync.Mutex
+	active, maxActive := 0, 0
+	newPg := func() *PostgreSQL {
+		return &PostgreSQL{
+			execRun: func(name string, args ...string) error {
+				if name != "createdb" {
+					return nil
+				}
+				mu.Lock()
+				active++
+				if active > maxActive {
+					maxActive = active
+				}
+				mu.Unlock()
+				time.Sleep(20 * time.Millisecond)
+				mu.Lock()
+				active--
+				mu.Unlock()
+				return nil
+			},
+		}
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := newPg().Clone("myapp_dev", fmt.Sprintf("myapp_feat_%d", i)); err != nil {
+				t.Errorf("clone %d failed: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if maxActive > 1 {
+		t.Fatalf("expected clones serialized per template, saw %d concurrent createdb", maxActive)
 	}
 }
 
@@ -446,6 +495,7 @@ func TestForAdapter_ConnArgsPropagated(t *testing.T) {
 
 func testPgWithConnArgs(t *testing.T, connArgs []string) (*PostgreSQL, *[]cmdCall) {
 	t.Helper()
+	t.Setenv("GTL_HOME", t.TempDir())
 	var calls []cmdCall
 	pg := &PostgreSQL{
 		ConnArgs: connArgs,
