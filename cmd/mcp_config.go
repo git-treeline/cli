@@ -3,9 +3,26 @@ package cmd
 import (
 	"fmt"
 	"os/exec"
+	"sort"
+	"strings"
 
+	gtlmcp "github.com/git-treeline/cli/internal/mcp"
 	"github.com/spf13/cobra"
 )
+
+// mcpToolNames returns the sorted names of every tool the MCP server actually
+// registers, derived from a live server instance so this list can never drift
+// out of sync with internal/mcp.
+func mcpToolNames() []string {
+	srv := gtlmcp.NewServer(Version)
+	tools := srv.ListTools()
+	names := make([]string, 0, len(tools))
+	for name := range tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
 
 func init() {
 	rootCmd.AddCommand(mcpConfigCmd)
@@ -33,7 +50,7 @@ development environments.`,
 		fmt.Println("Claude Code:")
 		fmt.Printf("  claude mcp add gtl -- %s mcp\n", gtlPath)
 		fmt.Println()
-		fmt.Println("Tools provided: status, port, list, doctor, db_name, start, stop, restart, config_get")
+		fmt.Printf("Tools provided: %s\n", strings.Join(mcpToolNames(), ", "))
 		fmt.Println("Resources:      gtl://allocations, gtl://config/user")
 
 		return nil
