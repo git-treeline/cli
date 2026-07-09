@@ -516,6 +516,44 @@ func insertPfRules(pfConf string) string {
 
 // --- Linux (iptables) ---
 
+// linuxRedirectRuleSpec is the iptables rule specification (everything after
+// the chain name) that redirects loopback :443 to routerPort, tagged with our
+// comment marker. Shared by the check (-C) and add (-A) verbs so an install
+// never stacks a duplicate rule.
+func linuxRedirectRuleSpec(routerPort int) []string {
+	return []string{
+		"-p", "tcp", "-d", "127.0.0.1", "--dport", "443",
+		"-j", "REDIRECT", "--to-port", fmt.Sprintf("%d", routerPort),
+		"-m", "comment", "--comment", "git-treeline",
+	}
+}
+
+// linuxInstallScript returns an idempotent `sh -c` body: `iptables -C`
+// (check) exits 0 when our rule is already present, so `-A` (add) only runs
+// when it is absent. Without this, re-running install stacked duplicate
+// REDIRECT rules on every invocation.
+func linuxInstallScript(ipt string, routerPort int) string {
+	spec := strings.Join(linuxRedirectRuleSpec(routerPort), " ")
+	return fmt.Sprintf("%s -t nat -C OUTPUT %s 2>/dev/null || %s -t nat -A OUTPUT %s",
+		ipt, spec, ipt, spec)
+}
+
+// linuxUninstallScript returns a bounded `sh -c` body that deletes our
+// REDIRECT rules by line number until none remain, running as root (so the
+// ruleset is readable even for a non-root caller under sudo). Exit codes:
+// 0 = clean, 1 = a delete was denied/failed, 2 = gave up after the cap. The
+// bound and explicit exit codes replace the old unbounded loop that could
+// spin forever re-prompting for sudo when the delete was denied.
+func linuxUninstallScript(ipt string) string {
+	return fmt.Sprintf(
+		"i=0; while [ $i -lt 20 ]; do "+
+			"n=$(%s -t nat -L OUTPUT -n --line-numbers 2>/dev/null | awk '/git-treeline/{print $1; exit}'); "+
+			"[ -z \"$n\" ] && exit 0; "+
+			"%s -t nat -D OUTPUT \"$n\" || exit 1; "+
+			"i=$((i+1)); done; exit 2",
+		ipt, ipt)
+}
+
 func installLinuxPortForward(routerPort int) error {
 	ipt, err := resolveIptables()
 	if err != nil {
@@ -523,10 +561,7 @@ func installLinuxPortForward(routerPort int) error {
 	}
 	cmd := exec.Command("sudo", "-p",
 		"\nEnter your password (2 of 2): ",
-		ipt, "-t", "nat", "-A", "OUTPUT",
-		"-p", "tcp", "-d", "127.0.0.1", "--dport", "443",
-		"-j", "REDIRECT", "--to-port", fmt.Sprintf("%d", routerPort),
-		"-m", "comment", "--comment", "git-treeline")
+		"sh", "-c", linuxInstallScript(ipt, routerPort))
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -543,27 +578,24 @@ func uninstallLinuxPortForward() error {
 	if err != nil {
 		return err
 	}
-	for {
-		out, err := exec.Command(ipt, "-t", "nat", "-L", "OUTPUT", "-n",
-			"--line-numbers").CombinedOutput()
-		if err != nil || !strings.Contains(string(out), "git-treeline") {
-			break
-		}
-		for _, line := range strings.Split(string(out), "\n") {
-			if !strings.Contains(line, "git-treeline") {
-				continue
-			}
-			fields := strings.Fields(line)
-			if len(fields) == 0 {
-				continue
-			}
-			_ = exec.Command("sudo", "-p",
-				"\nEnter your password to remove port forwarding: ",
-				ipt, "-t", "nat", "-D", "OUTPUT", fields[0]).Run()
-			break
-		}
+	cmd := exec.Command("sudo", "-p",
+		"\nEnter your password to remove port forwarding: ",
+		"sh", "-c", linuxUninstallScript(ipt))
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	err = cmd.Run()
+	if err == nil {
+		return nil
 	}
-	return nil
+	switch launchctlExitCode(err) {
+	case 1:
+		return fmt.Errorf("could not remove port-forwarding rule — iptables delete was denied")
+	case 2:
+		return fmt.Errorf("gave up removing port-forwarding rules after 20 attempts; remove manually with: sudo iptables -t nat -F OUTPUT")
+	default:
+		return fmt.Errorf("removing port forwarding failed: %w", err)
+	}
 }
 
 // GeneratePfAnchor returns the pf anchor content for testing.

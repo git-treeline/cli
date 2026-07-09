@@ -48,3 +48,36 @@ func TestResolveIptables_NoneActionable(t *testing.T) {
 		t.Errorf("error should mention iptables, got: %v", err)
 	}
 }
+
+func TestLinuxInstallScript_Idempotent(t *testing.T) {
+	s := linuxInstallScript("/usr/sbin/iptables", 3001)
+	// Must check before adding so re-runs don't stack duplicate rules.
+	if !strings.Contains(s, "-C OUTPUT") {
+		t.Errorf("install script must check (-C) before adding\nscript: %s", s)
+	}
+	if !strings.Contains(s, "|| /usr/sbin/iptables -t nat -A OUTPUT") {
+		t.Errorf("install script must only add when check fails\nscript: %s", s)
+	}
+	if !strings.Contains(s, "--to-port 3001") {
+		t.Errorf("install script must redirect to router port\nscript: %s", s)
+	}
+	if !strings.Contains(s, "--comment git-treeline") {
+		t.Errorf("install script must tag the rule with our marker\nscript: %s", s)
+	}
+}
+
+func TestLinuxUninstallScript_Bounded(t *testing.T) {
+	s := linuxUninstallScript("/usr/sbin/iptables")
+	if !strings.Contains(s, "[ $i -lt 20 ]") {
+		t.Errorf("uninstall script must be bounded (no infinite loop)\nscript: %s", s)
+	}
+	// Honest exit codes: 0 clean, 1 delete denied, 2 gave up.
+	for _, want := range []string{"exit 0", "|| exit 1", "exit 2"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("uninstall script missing honest exit code %q\nscript: %s", want, s)
+		}
+	}
+	if !strings.Contains(s, "git-treeline") {
+		t.Errorf("uninstall script must target our marked rules\nscript: %s", s)
+	}
+}
