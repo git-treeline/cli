@@ -41,6 +41,8 @@ type Router struct {
 	useTLS       bool
 	baseDomain   string
 	aliasSources []AliasSource
+	logger       *log.Logger
+	running      bool // true once Run() is serving; gates refresh logging
 }
 
 func NewRouter(listenPort int, reg *registry.Registry) *Router {
@@ -49,9 +51,33 @@ func NewRouter(listenPort int, reg *registry.Registry) *Router {
 		registry:   reg,
 		routes:     make(map[string]int),
 		baseDomain: "localhost",
+		logger:     newRouterLogger(),
 	}
 	r.refreshRoutes()
 	return r
+}
+
+// newRouterLogger builds the router's operational logger. Timestamps are UTC
+// (log.LUTC) so router output correlates cleanly with incident timelines
+// across machines and timezones — the bare fmt.Print calls this replaces had
+// no timestamps, so lines couldn't be lined up against anything.
+//
+// launchd/systemd capture this stream to router.log. If these logs ever grow
+// unbounded, a size cap / rotation belongs here — wrap os.Stdout in a
+// rotating writer (e.g. gopkg.in/natefinch/lumberjack.v2) before handing it
+// to log.New. Per-request logging is intentionally NOT done here.
+func newRouterLogger() *log.Logger {
+	return log.New(os.Stdout, "", log.LstdFlags|log.LUTC)
+}
+
+// rlog writes an operational log line through the router's timestamped
+// logger, tolerating a nil logger (e.g. a Router built in a test without
+// NewRouter).
+func (r *Router) rlog(format string, args ...any) {
+	if r.logger == nil {
+		r.logger = newRouterLogger()
+	}
+	r.logger.Printf(format, args...)
 }
 
 // WithBaseDomain sets the local TLD used for subdomain extraction.
@@ -119,6 +145,7 @@ func (r *Router) Run() error {
 		scheme = "https"
 	}
 
+	r.running = true
 	r.refreshRoutes()
 
 	ticker := time.NewTicker(5 * time.Second)
@@ -129,9 +156,9 @@ func (r *Router) Run() error {
 		}
 	}()
 
-	fmt.Printf("Router listening on %s://%s:%d\n", scheme, r.baseDomain, r.listenPort)
+	r.rlog("router listening on %s://%s:%d", scheme, r.baseDomain, r.listenPort)
 	r.printRoutes()
-	fmt.Println("Press Ctrl+C to stop")
+	r.rlog("press Ctrl+C to stop")
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -143,7 +170,7 @@ func (r *Router) Run() error {
 
 	select {
 	case sig := <-quit:
-		fmt.Printf("\nReceived %s, shutting down...\n", sig)
+		r.rlog("received %s, shutting down", sig)
 	case err := <-errCh:
 		return err
 	}
@@ -154,7 +181,7 @@ func (r *Router) Run() error {
 		return fmt.Errorf("shutdown: %w", err)
 	}
 
-	fmt.Println("Router stopped.")
+	r.rlog("router stopped")
 	return nil
 }
 
@@ -290,8 +317,16 @@ func (r *Router) refreshRoutes() {
 	}
 
 	r.mu.Lock()
+	prev := len(r.routes)
 	r.routes = routes
 	r.mu.Unlock()
+
+	// Log only when the active route count changes, and only while serving —
+	// refreshRoutes runs on a 5s ticker (spammy) and also during NewRouter /
+	// gtl serve status (must stay quiet, it's a CLI command not the daemon).
+	if r.running && len(routes) != prev {
+		r.rlog("routes refreshed (%d active)", len(routes))
+	}
 }
 
 // Routes returns a snapshot of the current route table.
@@ -315,13 +350,13 @@ func (r *Router) scheme() string {
 func (r *Router) printRoutes() {
 	routes := r.Routes()
 	if len(routes) == 0 {
-		fmt.Println("No active routes (run gtl setup in a worktree)")
+		r.rlog("no active routes (run gtl setup in a worktree)")
 		return
 	}
 	keys := sortedKeys(routes)
-	fmt.Printf("Active routes (%d):\n", len(keys))
+	r.rlog("active routes (%d):", len(keys))
 	for _, k := range keys {
-		fmt.Printf("  %s://%s.%s → :%d\n", r.scheme(), k, r.baseDomain, routes[k])
+		r.rlog("  %s://%s.%s -> :%d", r.scheme(), k, r.baseDomain, routes[k])
 	}
 }
 
