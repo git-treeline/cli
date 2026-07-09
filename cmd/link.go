@@ -22,6 +22,8 @@ func init() {
 	linkCmd.Flags().BoolVar(&linkJSON, "json", false, "Output as JSON")
 	linkCmd.Flags().BoolVar(&linkRestart, "restart", false, "Deprecated: server is now always restarted if running")
 	_ = linkCmd.Flags().MarkDeprecated("restart", "server is now always restarted if running")
+	linkCmd.ValidArgsFunction = completeProjectThenBranch
+	unlinkCmd.ValidArgsFunction = completeRegistryProjects
 	rootCmd.AddCommand(linkCmd)
 	rootCmd.AddCommand(unlinkCmd)
 }

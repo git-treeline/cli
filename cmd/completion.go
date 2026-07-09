@@ -2,12 +2,100 @@ package cmd
 
 import (
 	"os"
+	"strings"
 
+	"github.com/git-treeline/cli/internal/registry"
 	"github.com/spf13/cobra"
 )
 
 func init() {
 	rootCmd.AddCommand(completionCmd)
+}
+
+// registryProjects returns the distinct project names present in the registry,
+// filtered by the completion prefix. Used to complete <project> arguments.
+func registryProjects(toComplete string) []string {
+	reg := registry.New("")
+	seen := map[string]bool{}
+	var out []string
+	for _, a := range reg.Allocations() {
+		p, _ := a["project"].(string)
+		if p == "" || seen[p] || !strings.HasPrefix(p, toComplete) {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
+}
+
+// registryBranches returns the distinct branch names present in the registry,
+// filtered by the completion prefix. Used to complete <branch> arguments that
+// resolve against allocations rather than the local git branch list.
+func registryBranches(toComplete string) []string {
+	reg := registry.New("")
+	seen := map[string]bool{}
+	var out []string
+	for _, a := range reg.Allocations() {
+		b, _ := a["branch"].(string)
+		if b == "" || seen[b] || !strings.HasPrefix(b, toComplete) {
+			continue
+		}
+		seen[b] = true
+		out = append(out, b)
+	}
+	return out
+}
+
+// registryWorktreePaths returns the worktree paths present in the registry,
+// filtered by the completion prefix. Used to complete <path> arguments that
+// operate on existing allocations (reallocate, registry forget).
+func registryWorktreePaths(toComplete string) []string {
+	reg := registry.New("")
+	var out []string
+	for _, a := range reg.Allocations() {
+		wt, _ := a["worktree"].(string)
+		if wt == "" || !strings.HasPrefix(wt, toComplete) {
+			continue
+		}
+		out = append(out, wt)
+	}
+	return out
+}
+
+// completeRegistryProjects completes a single <project> argument.
+func completeRegistryProjects(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) > 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	return registryProjects(toComplete), cobra.ShellCompDirectiveNoFileComp
+}
+
+// completeProjectThenBranch completes <project> for the first argument and a
+// registry branch for the second. Used by resolve and link.
+func completeProjectThenBranch(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	switch len(args) {
+	case 0:
+		return registryProjects(toComplete), cobra.ShellCompDirectiveNoFileComp
+	case 1:
+		return registryBranches(toComplete), cobra.ShellCompDirectiveNoFileComp
+	default:
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+}
+
+// completeRegistryBranch completes a single <branch> argument from the registry.
+func completeRegistryBranch(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) > 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	return registryBranches(toComplete), cobra.ShellCompDirectiveNoFileComp
+}
+
+// completeRegistryWorktreePaths completes <path> arguments against the worktree
+// paths recorded in the registry. reallocate and registry forget accept these.
+func completeRegistryWorktreePaths(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	return registryWorktreePaths(toComplete), cobra.ShellCompDirectiveNoFileComp
 }
 
 var completionCmd = &cobra.Command{

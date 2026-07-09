@@ -19,6 +19,7 @@ var resolveJSON bool
 
 func init() {
 	resolveCmd.Flags().BoolVar(&resolveJSON, "json", false, "Output as JSON")
+	resolveCmd.ValidArgsFunction = completeProjectThenBranch
 	rootCmd.AddCommand(resolveCmd)
 }
 

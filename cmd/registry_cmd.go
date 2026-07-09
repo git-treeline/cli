@@ -14,6 +14,7 @@ func init() {
 	registryCmd.AddCommand(registryValidateCmd)
 	registryRepairCmd.Flags().BoolVar(&registryRepairForce, "force", false, "Skip confirmation prompts")
 	registryCmd.AddCommand(registryRepairCmd)
+	registryForgetCmd.ValidArgsFunction = completeRegistryWorktreePaths
 	registryCmd.AddCommand(registryForgetCmd)
 	rootCmd.AddCommand(registryCmd)
 }

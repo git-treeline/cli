@@ -29,6 +29,11 @@ func init() {
 	unrelateCmd.Flags().StringVar(&unrelateFrom, "from", "", "Source endpoint (defaults to the worktree in the current directory)")
 	unrelateCmd.Flags().BoolVar(&unrelateJSON, "json", false, "Output as JSON")
 
+	// Best-effort: the <target> also accepts owner/name#branch and paths, but
+	// the bare-branch form is the common case and completes cleanly.
+	relateCmd.ValidArgsFunction = completeBranches
+	unrelateCmd.ValidArgsFunction = completeBranches
+
 	rootCmd.AddCommand(relateCmd)
 	rootCmd.AddCommand(unrelateCmd)
 }
