@@ -165,7 +165,14 @@ After install, access worktrees at https://{project}-{branch}.{domain}`,
 		fmt.Println()
 		fmt.Println(style.Actionf("Router running."))
 		fmt.Printf("  Status: %s\n", style.Cmd("gtl serve status"))
-		fmt.Printf("  URL:    %s\n", style.Link(fmt.Sprintf("https://{project}-{branch}.%s", domain)))
+		// On Linux, only advertise the clean (port-less) URL when :443 is
+		// actually answering — otherwise show the honest port-URL so we never
+		// claim a redirect that isn't live. macOS keeps the clean URL.
+		if runtime.GOOS == "linux" && !port443Reachable() {
+			fmt.Printf("  URL:    %s\n", style.Link(fmt.Sprintf("https://{project}-{branch}.%s:%d", domain, uc.RouterPort())))
+		} else {
+			fmt.Printf("  URL:    %s\n", style.Link(fmt.Sprintf("https://{project}-{branch}.%s", domain)))
+		}
 		return nil
 	},
 }

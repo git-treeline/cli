@@ -2,10 +2,12 @@ package cmd
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/confirm"
@@ -253,6 +255,16 @@ func runServeInstall(uc *config.UserConfig) error {
 		fmt.Fprintln(os.Stderr, style.Warnf("port forwarding skipped: %v", err))
 		fmt.Fprintln(os.Stderr, style.Dimf("  URLs will require a port number: https://{branch}.%s:%d", domain, port))
 		fmt.Println()
+	} else if runtime.GOOS == "linux" && !port443Reachable() {
+		// The iptables rule was applied without error, but :443 isn't actually
+		// redirecting on this distro (e.g. a firewall/policy or an untested
+		// netfilter setup ate it). Degrade honestly to port-URL mode rather
+		// than let the caller advertise clean URLs that won't work — the
+		// facade this whole path exists to prevent.
+		fmt.Fprintln(os.Stderr, style.Warnf("port forwarding installed but :443 is not answering — running in port-URL mode."))
+		fmt.Fprintln(os.Stderr, style.Dimf("  Access worktrees at https://{branch}.%s:%d", domain, port))
+		fmt.Fprintln(os.Stderr, style.Dimf("  Diagnose with 'gtl doctor'; re-apply with 'gtl serve reload-pf'."))
+		fmt.Println()
 	}
 
 	if _, err := service.Install(gtlPath, port); err != nil {
@@ -280,6 +292,19 @@ func runServeInstall(uc *config.UserConfig) error {
 
 func supportsServeInstall() bool {
 	return runtime.GOOS == "darwin" || runtime.GOOS == "linux"
+}
+
+// port443Reachable reports whether something answers on loopback :443 — the
+// authoritative signal that the 443→router redirect is actually live. Used to
+// avoid advertising clean URLs on a platform/distro where the redirect could
+// not be confirmed, so a working-looking install can never be a facade.
+func port443Reachable() bool {
+	conn, err := net.DialTimeout("tcp", "127.0.0.1:443", 750*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func routerInstallIssues() []string {
