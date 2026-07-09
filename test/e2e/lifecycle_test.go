@@ -92,9 +92,6 @@ func waitFor(timeout time.Duration, cond func() bool) bool {
 
 func TestWorktreeLifecycle(t *testing.T) {
 	// --- Preconditions: skip cleanly if the host lacks required tools. ---
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 not available — skipping e2e lifecycle test")
-	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available — skipping e2e lifecycle test")
 	}
@@ -108,6 +105,49 @@ func TestWorktreeLifecycle(t *testing.T) {
 	build.Env = os.Environ()
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("building gtl binary failed: %v\n%s", err, out)
+	}
+
+	// Build a tiny, stdlib-only port binder to use as the worktree's start
+	// command. A compiled helper (instead of `python3 -m http.server`) keeps
+	// the test deterministic across CI runners, where python availability and
+	// startup speed vary — the binder binds 127.0.0.1:<port> instantly and
+	// exits on SIGTERM so `gtl stop`/`release` observe the port freeing.
+	binderDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binderDir, "go.mod"), []byte("module portbinder\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatalf("writing binder go.mod: %v", err)
+	}
+	binderSrc := `package main
+
+import (
+	"net"
+	"os"
+	"os/signal"
+	"syscall"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		os.Exit(2)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:"+os.Args[1])
+	if err != nil {
+		os.Exit(1)
+	}
+	defer func() { _ = ln.Close() }()
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
+	<-sigs
+}
+`
+	if err := os.WriteFile(filepath.Join(binderDir, "main.go"), []byte(binderSrc), 0o644); err != nil {
+		t.Fatalf("writing binder source: %v", err)
+	}
+	binder := filepath.Join(binderDir, "portbinder")
+	binderBuild := exec.CommandContext(buildCtx, "go", "build", "-o", binder, ".")
+	binderBuild.Dir = binderDir
+	binderBuild.Env = os.Environ()
+	if out, err := binderBuild.CombinedOutput(); err != nil {
+		t.Fatalf("building port binder failed: %v\n%s", err, out)
 	}
 
 	// --- Hermetic state: isolated GTL_HOME + HOME. ---
@@ -126,8 +166,7 @@ func TestWorktreeLifecycle(t *testing.T) {
 	gitInit(t, repo, env)
 
 	// --- Minimal .treeline.yml: a single port, an env file, and a start
-	// command that binds the allocated port. python3's http.server is present
-	// on macOS and ubuntu CI images. ---
+	// command that binds the allocated port via the compiled port binder. ---
 	treeline := "" +
 		"project: e2elifecycle\n" +
 		"port_count: 1\n" +
@@ -136,7 +175,7 @@ func TestWorktreeLifecycle(t *testing.T) {
 		"  PORT: \"{port}\"\n" +
 		"  APP_URL: \"http://localhost:{port}\"\n" +
 		"commands:\n" +
-		"  start: python3 -m http.server {port}\n"
+		"  start: " + binder + " {port}\n"
 	if err := os.WriteFile(filepath.Join(repo, ".treeline.yml"), []byte(treeline), 0o644); err != nil {
 		t.Fatalf("writing .treeline.yml: %v", err)
 	}
