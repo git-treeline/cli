@@ -208,13 +208,24 @@ func runServeInstall(uc *config.UserConfig) error {
 	}
 
 	port := uc.RouterPort()
+	domain := uc.RouterDomain()
 
-	caCertFile, err := proxy.EnsureCA()
+	// If the on-disk CA predates name constraints (or its constraints don't
+	// cover the current domain), EnsureCA regenerates it below. Remove the old
+	// trusted root first: the untrust helpers match the trust store by the
+	// cert file's current content, so this must run before EnsureCA overwrites
+	// ca.pem — otherwise the stale, unconstrained root lingers in the trust
+	// store and stays a valid MITM signer.
+	if proxy.CANeedsRegen(domain) && proxy.IsCAInstalled() {
+		if err := proxy.UntrustCA(); err != nil {
+			fmt.Fprintln(os.Stderr, style.Warnf("could not remove old CA from trust store: %v", err))
+		}
+	}
+
+	caCertFile, err := proxy.EnsureCA(domain)
 	if err != nil {
 		return fmt.Errorf("CA generation failed: %w", err)
 	}
-
-	domain := uc.RouterDomain()
 
 	if !uc.HasExplicitRouterDomain() {
 		uc.Set("router.domain", domain)

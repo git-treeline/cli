@@ -99,7 +99,7 @@ func (r *Router) Run() error {
 
 	scheme := "http"
 	if r.useTLS {
-		cm, certErr := NewCertManager()
+		cm, certErr := NewCertManager(r.baseDomain)
 		if certErr != nil {
 			_ = ln.Close()
 			return fmt.Errorf("TLS setup failed: %w", certErr)

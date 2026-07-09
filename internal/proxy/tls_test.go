@@ -78,7 +78,7 @@ func withTempCertsDir(t *testing.T) string {
 func TestEnsureCA_GeneratesFiles(t *testing.T) {
 	dir := withTempCertsDir(t)
 
-	caPath, err := EnsureCA()
+	caPath, err := EnsureCA("localhost")
 	if err != nil {
 		t.Fatalf("EnsureCA failed: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestEnsureCA_GeneratesFiles(t *testing.T) {
 func TestEnsureCA_Idempotent(t *testing.T) {
 	withTempCertsDir(t)
 
-	_, err := EnsureCA()
+	_, err := EnsureCA("localhost")
 	if err != nil {
 		t.Fatalf("first EnsureCA failed: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestEnsureCA_Idempotent(t *testing.T) {
 	info, _ := os.Stat(caCertPath())
 	firstMod := info.ModTime()
 
-	_, err = EnsureCA()
+	_, err = EnsureCA("localhost")
 	if err != nil {
 		t.Fatalf("second EnsureCA failed: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestEnsureCA_Idempotent(t *testing.T) {
 func TestNewCertManager_WithoutCA_Fails(t *testing.T) {
 	withTempCertsDir(t)
 
-	_, err := NewCertManager()
+	_, err := NewCertManager("localhost")
 	if err == nil {
 		t.Error("expected error when CA doesn't exist")
 	}
@@ -128,11 +128,11 @@ func TestNewCertManager_WithoutCA_Fails(t *testing.T) {
 
 func TestCertManager_GetCertificate(t *testing.T) {
 	withTempCertsDir(t)
-	if _, err := EnsureCA(); err != nil {
+	if _, err := EnsureCA("localhost"); err != nil {
 		t.Fatalf("EnsureCA: %v", err)
 	}
 
-	cm, err := NewCertManager()
+	cm, err := NewCertManager("localhost")
 	if err != nil {
 		t.Fatalf("NewCertManager: %v", err)
 	}
@@ -165,11 +165,11 @@ func TestCertManager_GetCertificate(t *testing.T) {
 
 func TestCertManager_CachesPerHostname(t *testing.T) {
 	withTempCertsDir(t)
-	if _, err := EnsureCA(); err != nil {
+	if _, err := EnsureCA("localhost"); err != nil {
 		t.Fatal(err)
 	}
 
-	cm, err := NewCertManager()
+	cm, err := NewCertManager("localhost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,11 +185,11 @@ func TestCertManager_CachesPerHostname(t *testing.T) {
 
 func TestCertManager_DifferentHostnames(t *testing.T) {
 	withTempCertsDir(t)
-	if _, err := EnsureCA(); err != nil {
+	if _, err := EnsureCA("localhost"); err != nil {
 		t.Fatal(err)
 	}
 
-	cm, err := NewCertManager()
+	cm, err := NewCertManager("localhost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,11 +207,11 @@ func TestCertManager_DifferentHostnames(t *testing.T) {
 
 func TestCertManager_EmptyServerName(t *testing.T) {
 	withTempCertsDir(t)
-	if _, err := EnsureCA(); err != nil {
+	if _, err := EnsureCA("localhost"); err != nil {
 		t.Fatal(err)
 	}
 
-	cm, err := NewCertManager()
+	cm, err := NewCertManager("localhost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,11 +229,11 @@ func TestCertManager_EmptyServerName(t *testing.T) {
 
 func TestCertManager_ConcurrentAccess(t *testing.T) {
 	withTempCertsDir(t)
-	if _, err := EnsureCA(); err != nil {
+	if _, err := EnsureCA("localhost"); err != nil {
 		t.Fatal(err)
 	}
 
-	cm, err := NewCertManager()
+	cm, err := NewCertManager("localhost")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,6 +250,90 @@ func TestCertManager_ConcurrentAccess(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestEnsureCA_CarriesNameConstraints(t *testing.T) {
+	withTempCertsDir(t)
+	if _, err := EnsureCA("prt.dev"); err != nil {
+		t.Fatalf("EnsureCA: %v", err)
+	}
+
+	data, _ := os.ReadFile(caCertPath())
+	block, _ := pem.Decode(data)
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse CA: %v", err)
+	}
+
+	got := map[string]bool{}
+	for _, d := range cert.PermittedDNSDomains {
+		got[d] = true
+	}
+	for _, want := range []string{"localhost", "prt.dev"} {
+		if !got[want] {
+			t.Errorf("CA missing permitted DNS domain %q, got %v", want, cert.PermittedDNSDomains)
+		}
+	}
+	if len(cert.PermittedIPRanges) == 0 {
+		t.Error("CA missing permitted IP ranges")
+	}
+}
+
+func TestEnsureCA_RegeneratesUnconstrainedCA(t *testing.T) {
+	withTempCertsDir(t)
+
+	// A CA scoped to localhost must be replaced when the install moves to a
+	// custom domain, and a pre-constraints CA (none) must always be replaced.
+	if _, err := EnsureCA("localhost"); err != nil {
+		t.Fatal(err)
+	}
+	if !caNeedsRegen("prt.dev") {
+		t.Error("CA scoped to localhost should need regen for a prt.dev install")
+	}
+	if _, err := EnsureCA("prt.dev"); err != nil {
+		t.Fatal(err)
+	}
+	if caNeedsRegen("prt.dev") {
+		t.Error("freshly generated prt.dev CA should not need regen")
+	}
+}
+
+func TestCertManager_InDomainHostIssues(t *testing.T) {
+	withTempCertsDir(t)
+	if _, err := EnsureCA("prt.dev"); err != nil {
+		t.Fatal(err)
+	}
+	cm, err := NewCertManager("prt.dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, host := range []string{"app-main.prt.dev", "app-main.localhost", "localhost"} {
+		cert, err := cm.GetCertificate(&tls.ClientHelloInfo{ServerName: host})
+		if err != nil {
+			t.Fatalf("GetCertificate(%q): %v", host, err)
+		}
+		if len(cert.Certificate) != 2 {
+			t.Errorf("%q: expected leaf+CA chain, got %d", host, len(cert.Certificate))
+		}
+	}
+}
+
+func TestCertManager_OffDomainSNIRefused(t *testing.T) {
+	withTempCertsDir(t)
+	if _, err := EnsureCA("prt.dev"); err != nil {
+		t.Fatal(err)
+	}
+	cm, err := NewCertManager("prt.dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, host := range []string{"evil.com", "prt.dev.evil.com", "example.org"} {
+		if _, err := cm.GetCertificate(&tls.ClientHelloInfo{ServerName: host}); err == nil {
+			t.Errorf("expected off-domain SNI %q to be refused", host)
+		}
+	}
 }
 
 func TestCertNeedsRegeneration_MissingFile(t *testing.T) {
@@ -304,11 +388,11 @@ func writeTestCert(t *testing.T, path string, notAfter time.Time) {
 
 func TestCertManager_VerifiesAgainstCA(t *testing.T) {
 	withTempCertsDir(t)
-	if _, err := EnsureCA(); err != nil {
+	if _, err := EnsureCA("localhost"); err != nil {
 		t.Fatal(err)
 	}
 
-	cm, err := NewCertManager()
+	cm, err := NewCertManager("localhost")
 	if err != nil {
 		t.Fatal(err)
 	}

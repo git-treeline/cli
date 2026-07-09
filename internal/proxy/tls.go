@@ -146,17 +146,19 @@ func certNeedsRegeneration(certFile string) bool {
 	return time.Until(cert.NotAfter) < certRenewalBuffer
 }
 
-// EnsureCA generates a local CA if one doesn't exist or is expiring within 7
-// days. Returns the path to the CA certificate (for trusting).
-func EnsureCA() (string, error) {
+// EnsureCA generates a local CA if one doesn't exist, is expiring within 7
+// days, or lacks X.509 name constraints covering domain. Returns the path to
+// the CA certificate (for trusting). The name constraints scope the CA to
+// localhost plus the router's configured domain and the loopback IP ranges,
+// so a stolen ca-key.pem can only MITM those names — not arbitrary public
+// hosts.
+func EnsureCA(domain string) (string, error) {
 	if err := os.MkdirAll(certsDir(), 0o700); err != nil {
 		return "", err
 	}
 
-	if !certNeedsRegeneration(caCertPath()) {
-		if _, err := os.Stat(caKeyPath()); err == nil {
-			return caCertPath(), nil
-		}
+	if !caNeedsRegen(domain) {
+		return caCertPath(), nil
 	}
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -166,14 +168,17 @@ func EnsureCA() (string, error) {
 
 	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	tmpl := &x509.Certificate{
-		SerialNumber:          serial,
-		Subject:               pkix.Name{Organization: []string{"git-treeline"}, CommonName: "git-treeline Local CA"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-		MaxPathLen:            0,
+		SerialNumber:                serial,
+		Subject:                     pkix.Name{Organization: []string{"git-treeline"}, CommonName: "git-treeline Local CA"},
+		NotBefore:                   time.Now().Add(-time.Hour),
+		NotAfter:                    time.Now().Add(10 * 365 * 24 * time.Hour),
+		KeyUsage:                    x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid:       true,
+		IsCA:                        true,
+		MaxPathLen:                  0,
+		PermittedDNSDomainsCritical: true,
+		PermittedDNSDomains:         permittedDNSDomains(domain),
+		PermittedIPRanges:           loopbackIPRanges(),
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
@@ -198,20 +203,107 @@ func EnsureCA() (string, error) {
 	return caCertPath(), nil
 }
 
+// permittedDNSDomains returns the dNSName constraints for the local CA:
+// always "localhost" (covers *.localhost) plus the configured router domain
+// (covers *.domain) when it's a distinct custom TLD.
+func permittedDNSDomains(domain string) []string {
+	domains := []string{"localhost"}
+	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
+	if domain != "" && domain != "localhost" {
+		domains = append(domains, domain)
+	}
+	return domains
+}
+
+// loopbackIPRanges returns the iPAddress constraints for the local CA,
+// covering only the IPv4/IPv6 loopback ranges the leaf certs carry.
+func loopbackIPRanges() []*net.IPNet {
+	_, v4, _ := net.ParseCIDR("127.0.0.0/8")
+	_, v6, _ := net.ParseCIDR("::1/128")
+	return []*net.IPNet{v4, v6}
+}
+
+// caNeedsRegen reports whether the on-disk CA must be (re)generated: it is
+// missing, its key is missing, it is expiring within the renewal buffer, or
+// its name constraints don't cover the current domain (e.g. an older,
+// unconstrained CA from before name constraints were introduced).
+func caNeedsRegen(domain string) bool {
+	if certNeedsRegeneration(caCertPath()) {
+		return true
+	}
+	if _, err := os.Stat(caKeyPath()); err != nil {
+		return true
+	}
+	return !caCoversDomain(caCertPath(), domain)
+}
+
+// CANeedsRegen reports whether EnsureCA(domain) would replace the on-disk CA.
+// Callers use this to remove the stale trusted root before EnsureCA overwrites
+// ca.pem (the untrust helpers match by the file's current content).
+func CANeedsRegen(domain string) bool { return caNeedsRegen(domain) }
+
+// caCoversDomain reports whether the CA at certFile carries name constraints
+// that include "localhost" and domain. An unconstrained CA returns false so it
+// is regenerated.
+func caCoversDomain(certFile, domain string) bool {
+	data, err := os.ReadFile(certFile)
+	if err != nil {
+		return false
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return false
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return false
+	}
+	if len(cert.PermittedDNSDomains) == 0 {
+		return false
+	}
+	have := make(map[string]bool, len(cert.PermittedDNSDomains))
+	for _, d := range cert.PermittedDNSDomains {
+		have[strings.ToLower(d)] = true
+	}
+	for _, want := range permittedDNSDomains(domain) {
+		if !have[want] {
+			return false
+		}
+	}
+	return true
+}
+
+// hostAllowedFor reports whether an SNI hostname is within the CA's name
+// constraints: localhost (and *.localhost) always, plus the configured domain
+// (and *.domain) when set. Off-domain names are rejected before any keygen.
+func hostAllowedFor(hostname, domain string) bool {
+	hostname = strings.ToLower(strings.TrimSuffix(hostname, "."))
+	if hostname == "localhost" || strings.HasSuffix(hostname, ".localhost") {
+		return true
+	}
+	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
+	if domain == "" || domain == "localhost" {
+		return false
+	}
+	return hostname == domain || strings.HasSuffix(hostname, "."+domain)
+}
+
 // CertManager generates per-hostname TLS certificates on demand, signed by
 // the local CA. This avoids wildcard certs (*.localhost) which Safari and
 // Chromium reject for the .localhost TLD.
 type CertManager struct {
 	caKey  *ecdsa.PrivateKey
 	caCert *x509.Certificate
+	domain string
 	mu     sync.RWMutex
 	cache  map[string]*tls.Certificate
 }
 
 // NewCertManager loads the local CA and returns a manager that generates
-// per-hostname certs via GetCertificate. Returns an error if the CA hasn't
-// been created yet (user needs to run 'gtl serve install').
-func NewCertManager() (*CertManager, error) {
+// per-hostname certs via GetCertificate for SNIs within domain. Returns an
+// error if the CA hasn't been created yet (user needs to run
+// 'gtl serve install').
+func NewCertManager(domain string) (*CertManager, error) {
 	caKeyPEM, err := os.ReadFile(caKeyPath())
 	if err != nil {
 		return nil, fmt.Errorf("CA key not found — run 'gtl serve install': %w", err)
@@ -242,6 +334,7 @@ func NewCertManager() (*CertManager, error) {
 	return &CertManager{
 		caKey:  caKey,
 		caCert: caCert,
+		domain: domain,
 		cache:  make(map[string]*tls.Certificate),
 	}, nil
 }
@@ -255,6 +348,9 @@ func (cm *CertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certific
 	hostname := hello.ServerName
 	if hostname == "" {
 		hostname = "localhost"
+	}
+	if !hostAllowedFor(hostname, cm.domain) {
+		return nil, fmt.Errorf("SNI %q is outside the CA name constraints", hostname)
 	}
 
 	cm.mu.RLock()
@@ -281,6 +377,10 @@ func (cm *CertManager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certific
 }
 
 func (cm *CertManager) issueCert(hostname string) (*tls.Certificate, error) {
+	if !hostAllowedFor(hostname, cm.domain) {
+		return nil, fmt.Errorf("SNI %q is outside the CA name constraints", hostname)
+	}
+
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
