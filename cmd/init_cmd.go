@@ -183,7 +183,16 @@ func openInEditor(path string) {
 	if editor == "" {
 		return
 	}
-	_ = exec.Command(editor, path).Run()
+	cmd := exec.Command(editor, path)
+	// Terminal editors (vim, nano) need the real terminal; without wired stdio
+	// they get /dev/null and hang or fail immediately. Surface any error so a
+	// misconfigured $EDITOR isn't swallowed silently.
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, style.Warnf("could not open %s in editor (%s): %s", path, editor, err))
+	}
 }
 
 // runInitForNew is called from gtl new when no .treeline.yml exists.
