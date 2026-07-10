@@ -1,3 +1,7 @@
+## [0.49.0]
+
+- **`pre_release`/`post_release` hooks now fire on every release path.** Previously only `gtl release <path>` ran them; `gtl release --project`, `gtl release --all`, and `gtl prune --merged` skipped hooks entirely, so teardown tasks declared in `.treeline.yml` silently didn't run. Batch paths now run both hooks per worktree, before any destructive step and after teardown respectively. A failing `pre_release` hook skips only that worktree's release (with a warning) instead of blocking the rest of the batch; `post_release` failures warn, matching single-release semantics. Under `--force`, a `pre_release` failure warns and the release proceeds anyway (on all paths, single included) — hooks stay best-effort on the aggressive/non-interactive paths so a broken script can't hold resources hostage.
+
 ## [0.48.0]
 
 Follow-up hardening from the post-remediation deep audit:

@@ -688,8 +688,8 @@ See [Framework examples](#framework-examples) for complete examples. Available f
 | `editor.theme` | Full IDE theme override (e.g. `"Monokai"`, `"GitHub Dark"`) |
 | `hooks.pre_setup` | Commands run before `commands.setup` — abort setup on failure |
 | `hooks.post_setup` | Commands run after all setup — warn on failure |
-| `hooks.pre_release` | Commands run before resource release — abort release on failure |
-| `hooks.post_release` | Commands run after resource release — warn on failure |
+| `hooks.pre_release` | Commands run before resource release, on every release path (`release`, `release --project/--all`, `prune --merged`) — a failure aborts that worktree's release, unless `--force` (warn and release anyway) |
+| `hooks.post_release` | Commands run after resource release, on every release path — warn on failure |
 | `hooks.<name>.auto` | `true` to run this hook on every fresh `gtl start` (default: `false`, requires `--with`) |
 | `hooks.<name>.pre_start` | Shell command(s) run before the supervisor launches — string or array of strings |
 | `hooks.<name>.post_stop` | Shell command(s) run in reverse order when the supervisor exits (Ctrl+C) — string or array |
