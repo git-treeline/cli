@@ -139,14 +139,12 @@ func runReleaseSingle(args []string) error {
 		return nil
 	}
 
-	pc := config.LoadProjectConfig(absPath)
-	hooks := pc.Hooks()
-	if cmds, ok := hooks["pre_release"]; ok && len(cmds) > 0 {
-		if err := setup.RunHookCommands("pre_release", cmds, absPath, func(f string, a ...any) {
-			fmt.Printf("==> "+f+"\n", a...)
-		}); err != nil {
+	hooks := config.LoadProjectConfig(absPath).Hooks()
+	if err := runReleaseHook("pre_release", hooks["pre_release"], absPath); err != nil {
+		if !releaseForce {
 			return fmt.Errorf("%w — release aborted", err)
 		}
+		fmt.Fprintf(os.Stderr, "Warning: %s — continuing (--force)\n", err)
 	}
 
 	if releaseDropDB {
@@ -178,12 +176,8 @@ func runReleaseSingle(args []string) error {
 		removeWorktreeDir(absPath, releaseForce)
 	}
 
-	if cmds, ok := hooks["post_release"]; ok && len(cmds) > 0 {
-		if err := setup.RunHookCommands("post_release", cmds, absPath, func(f string, a ...any) {
-			fmt.Printf("==> "+f+"\n", a...)
-		}); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: %s\n", err)
-		}
+	if err := runReleaseHook("post_release", hooks["post_release"], absPath); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", err)
 	}
 
 	return nil
@@ -273,13 +267,18 @@ func runReleaseBatch(project string, all bool) error {
 }
 
 // releaseAndTeardown is the shared destructive tail of every batch release
-// path (release --project/--all, prune --merged): optional DB drop, registry
-// removal, runtime teardown (supervisor + hosts), and optional worktree dir
-// removal. Kept in one place so the two commands cannot drift on ordering —
-// DBs drop while the registry entries still exist (their metadata identifies
-// the DBs), and teardown runs after removal so the hosts re-sync reflects the
-// new route set.
+// path (release --project/--all, prune --merged): pre_release hooks, optional
+// DB drop, registry removal, runtime teardown (supervisor + hosts), optional
+// worktree dir removal, then post_release hooks. Kept in one place so the two
+// commands cannot drift on ordering — DBs drop while the registry entries
+// still exist (their metadata identifies the DBs), and teardown runs after
+// removal so the hosts re-sync reflects the new route set.
 func releaseAndTeardown(reg *registry.Registry, allocs []registry.Allocation, dropDB, removeWT, force bool) (int, error) {
+	allocs, postHooks := runPreReleaseHooks(allocs, force, runReleaseHook)
+	if len(allocs) == 0 {
+		return 0, nil
+	}
+
 	if dropDB {
 		formatAllocs := make([]format.Allocation, len(allocs))
 		for i, a := range allocs {
@@ -309,7 +308,65 @@ func releaseAndTeardown(reg *registry.Registry, allocs []registry.Allocation, dr
 			removeWorktreeDir(p, force)
 		}
 	}
+
+	for _, h := range postHooks {
+		if err := runReleaseHook("post_release", h.cmds, h.worktree); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %s\n", err)
+		}
+	}
 	return count, nil
+}
+
+// releaseHookEntry pairs a worktree with its post_release commands, captured
+// before the release runs — the worktree dir (and the .treeline.yml declaring
+// the hook) may be gone by the time post_release fires.
+type releaseHookEntry struct {
+	worktree string
+	cmds     []string
+}
+
+// runPreReleaseHooks runs each allocation's pre_release hook before the batch
+// tail does anything destructive, matching single-release semantics where the
+// hook gates the release. A failing hook drops only that allocation from the
+// batch (its resources stay allocated) so one bad hook can't block the other
+// teardowns — unless force is set, in which case a hook failure warns and the
+// release proceeds anyway (a broken hook must not hold resources hostage on
+// the aggressive paths). The hook runner is injected so tests can observe
+// calls without spawning shells.
+func runPreReleaseHooks(allocs []registry.Allocation, force bool, runHook func(name string, cmds []string, dir string) error) ([]registry.Allocation, []releaseHookEntry) {
+	kept := make([]registry.Allocation, 0, len(allocs))
+	var post []releaseHookEntry
+	for _, a := range allocs {
+		wt := format.GetStr(format.Allocation(a), "worktree")
+		if wt == "" {
+			kept = append(kept, a)
+			continue
+		}
+		hooks := config.LoadProjectConfig(wt).Hooks()
+		if err := runHook("pre_release", hooks["pre_release"], wt); err != nil {
+			if !force {
+				fmt.Fprintf(os.Stderr, "Warning: %s — skipping release of %s\n", err, filepath.Base(wt))
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "Warning: %s — continuing (--force)\n", err)
+		}
+		if cmds := hooks["post_release"]; len(cmds) > 0 {
+			post = append(post, releaseHookEntry{worktree: wt, cmds: cmds})
+		}
+		kept = append(kept, a)
+	}
+	return kept, post
+}
+
+// runReleaseHook runs one release lifecycle hook's commands in dir. An empty
+// command list is a no-op.
+func runReleaseHook(name string, cmds []string, dir string) error {
+	if len(cmds) == 0 {
+		return nil
+	}
+	return setup.RunHookCommands(name, cmds, dir, func(f string, a ...any) {
+		fmt.Printf("==> "+f+"\n", a...)
+	})
 }
 
 // teardownRuntimeState cleans up the non-registry runtime state left behind

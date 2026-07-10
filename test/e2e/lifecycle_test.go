@@ -167,7 +167,10 @@ func main() {
 	gitInit(t, repo, env)
 
 	// --- Minimal .treeline.yml: a single port, an env file, and a start
-	// command that binds the allocated port via the compiled port binder. ---
+	// command that binds the allocated port via the compiled port binder.
+	// The release hooks leave marker files so STEP 6 can assert they fired;
+	// pre_release deliberately fails after its marker so the same step also
+	// proves --force releases anyway instead of aborting on a broken hook. ---
 	treeline := "" +
 		"project: e2elifecycle\n" +
 		"port_count: 1\n" +
@@ -176,7 +179,13 @@ func main() {
 		"  PORT: \"{port}\"\n" +
 		"  APP_URL: \"http://localhost:{port}\"\n" +
 		"commands:\n" +
-		"  start: " + binder + " {port}\n"
+		"  start: " + binder + " {port}\n" +
+		"hooks:\n" +
+		"  pre_release:\n" +
+		"    - touch pre_release.ran\n" +
+		"    - exit 7\n" +
+		"  post_release:\n" +
+		"    - touch post_release.ran\n"
 	if err := os.WriteFile(filepath.Join(repo, ".treeline.yml"), []byte(treeline), 0o644); err != nil {
 		t.Fatalf("writing .treeline.yml: %v", err)
 	}
@@ -403,7 +412,15 @@ func main() {
 	case <-time.After(15 * time.Second):
 		t.Fatalf("backgrounded gtl start did not exit after release --force shut its supervisor down")
 	}
-	t.Logf("STEP 6 ok: release --force removed allocation and stopped the supervisor")
+	// Release hooks: pre_release ran (marker exists) and its deliberate
+	// failure did not block the forced release; post_release ran after.
+	if _, statErr := os.Stat(filepath.Join(repo, "pre_release.ran")); statErr != nil {
+		t.Fatalf("pre_release hook did not run during release --force: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(repo, "post_release.ran")); statErr != nil {
+		t.Fatalf("post_release hook did not run during release --force: %v", statErr)
+	}
+	t.Logf("STEP 6 ok: release --force removed allocation, stopped the supervisor, and ran release hooks despite pre_release failure")
 }
 
 // --- helpers ---
