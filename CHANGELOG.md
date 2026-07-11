@@ -1,3 +1,7 @@
+## [0.50.0]
+
+- **`worktree_base` config field sets the default base branch for `gtl new`.** Repos whose start-from branch differs from their merge-into branch (e.g. `develop` vs `main`) can now declare `worktree_base: develop` in `.treeline.yml` and skip `--base` on every `gtl new`. Resolution order: `--base` flag → `worktree_base` config → current branch → `main`. Distinct from `merge_target`, which controls what `gtl prune --merged` checks against.
+
 ## [0.49.0]
 
 - **`pre_release`/`post_release` hooks now fire on every release path.** Previously only `gtl release <path>` ran them; `gtl release --project`, `gtl release --all`, and `gtl prune --merged` skipped hooks entirely, so teardown tasks declared in `.treeline.yml` silently didn't run. Batch paths now run both hooks per worktree, before any destructive step and after teardown respectively. A failing `pre_release` hook skips only that worktree's release (with a warning) instead of blocking the rest of the batch; `post_release` failures warn, matching single-release semantics. Under `--force`, a `pre_release` failure warns and the release proceeds anyway (on all paths, single included) — hooks stay best-effort on the aggressive/non-interactive paths so a broken script can't hold resources hostage.
