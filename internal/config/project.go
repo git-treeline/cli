@@ -67,8 +67,9 @@ var ProjectDefaults = map[string]any{
 	"env":          map[string]any{},
 	"hooks":        map[string]any{},
 	"commands":     map[string]any{},
-	"editor":       map[string]any{},
-	"merge_target": "",
+	"editor":        map[string]any{},
+	"merge_target":  "",
+	"worktree_base": "",
 }
 
 type ProjectConfig struct {
@@ -626,6 +627,17 @@ func (pc *ProjectConfig) MergeTarget() string {
 	return ""
 }
 
+// WorktreeBase returns the default base branch new worktrees are created from
+// when `gtl new` is invoked without an explicit --base. Empty means fall back
+// to the current branch. This is the branch you start work from, distinct from
+// merge_target (the branch you merge back into / prune against).
+func (pc *ProjectConfig) WorktreeBase() string {
+	if v, ok := pc.Data["worktree_base"].(string); ok {
+		return v
+	}
+	return ""
+}
+
 func (pc *ProjectConfig) Exists() bool {
 	_, err := os.Stat(pc.configPath())
 	return err == nil
@@ -911,7 +923,8 @@ func (pc *ProjectConfig) configPath() string {
 var projectKnownKeys = map[string]bool{
 	"project": true, "port_count": true, "env_file": true, "database": true,
 	"copy_files": true, "env": true, "hooks": true, "commands": true,
-	"editor": true, "merge_target": true, "aliases": true, "related_repos": true,
+	"editor": true, "merge_target": true, "worktree_base": true,
+	"aliases": true, "related_repos": true,
 	"provision": true,
 	// Legacy keys accepted during migration
 	"default_branch": true, "setup_commands": true, "start_command": true,

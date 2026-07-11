@@ -145,6 +145,7 @@ func rails(project, templateDB string, det *detect.Result) string {
 
 	if det.MergeTarget == "" {
 		b.WriteString("\n# merge_target: develop            # branch that prune --merged checks against\n")
+		b.WriteString("# worktree_base: develop          # branch new worktrees start from (default: current branch)\n")
 	}
 
 	writeHooksComment(&b)
@@ -372,6 +373,7 @@ func writeMergeTarget(b *strings.Builder, det *detect.Result) {
 	if det.MergeTarget != "" && det.MergeTarget != "main" {
 		fmt.Fprintf(b, "merge_target: %s\n", det.MergeTarget)
 	}
+	b.WriteString("# worktree_base: develop          # branch new worktrees start from (default: current branch)\n")
 }
 
 // PortHint returns framework-specific guidance on wiring the allocated PORT
