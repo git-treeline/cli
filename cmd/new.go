@@ -133,11 +133,7 @@ Otherwise a new branch is created from --base (or the current branch).`,
 			if existing {
 				fmt.Printf("[dry-run] Would check out existing branch '%s'\n", branch)
 			} else {
-				base := newBase
-				if base == "" {
-					base = "(current branch)"
-				}
-				fmt.Printf("[dry-run] Would create new branch '%s' from %s\n", branch, base)
+				fmt.Printf("[dry-run] Would create new branch '%s' from %s\n", branch, resolveBase(pc))
 			}
 			fmt.Printf("[dry-run] Worktree path: %s\n", wtPath)
 			fmt.Println("[dry-run] Would run: gtl setup")
@@ -154,13 +150,7 @@ Otherwise a new branch is created from --base (or the current branch).`,
 				return err
 			}
 		} else {
-			base := newBase
-			if base == "" {
-				base = worktree.CurrentBranch(".")
-				if base == "" {
-					base = "main"
-				}
-			}
+			base := resolveBase(pc)
 			fmt.Println(style.Actionf("Creating branch '%s' from '%s'", branch, base))
 			if err := worktree.Create(wtPath, branch, true, base); err != nil {
 				return err
@@ -194,6 +184,22 @@ Otherwise a new branch is created from --base (or the current branch).`,
 
 		return nil
 	},
+}
+
+// resolveBase picks the base branch for a new worktree: an explicit --base
+// wins, then the repo's worktree_base config, then the current branch, then
+// "main" as a last resort.
+func resolveBase(pc *config.ProjectConfig) string {
+	if newBase != "" {
+		return newBase
+	}
+	if wb := pc.WorktreeBase(); wb != "" {
+		return wb
+	}
+	if cb := worktree.CurrentBranch("."); cb != "" {
+		return cb
+	}
+	return "main"
 }
 
 func execInWorktree(dir, command string) error {
@@ -234,11 +240,7 @@ func createWorktreeOnly(mainRepo, branch string, uc *config.UserConfig, pc *conf
 		if existing {
 			fmt.Printf("[dry-run] Would check out existing branch '%s'\n", branch)
 		} else {
-			base := newBase
-			if base == "" {
-				base = "(current branch)"
-			}
-			fmt.Printf("[dry-run] Would create new branch '%s' from %s\n", branch, base)
+			fmt.Printf("[dry-run] Would create new branch '%s' from %s\n", branch, resolveBase(pc))
 		}
 		fmt.Printf("[dry-run] Worktree path: %s\n", wtPath)
 		fmt.Println("[dry-run] No allocation (non-server project)")
@@ -252,13 +254,7 @@ func createWorktreeOnly(mainRepo, branch string, uc *config.UserConfig, pc *conf
 			return err
 		}
 	} else {
-		base := newBase
-		if base == "" {
-			base = worktree.CurrentBranch(".")
-			if base == "" {
-				base = "main"
-			}
-		}
+		base := resolveBase(pc)
 		fmt.Println(style.Actionf("Creating branch '%s' from '%s'", branch, base))
 		if err := worktree.Create(wtPath, branch, true, base); err != nil {
 			return err

@@ -212,6 +212,28 @@ func TestProjectConfig_MergeTarget_Empty(t *testing.T) {
 	}
 }
 
+func TestProjectConfig_WorktreeBase(t *testing.T) {
+	dir := t.TempDir()
+	yml := `project: myapp
+worktree_base: develop
+`
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+	pc := LoadProjectConfig(dir)
+
+	if pc.WorktreeBase() != "develop" {
+		t.Errorf("expected develop, got %s", pc.WorktreeBase())
+	}
+}
+
+func TestProjectConfig_WorktreeBase_Empty(t *testing.T) {
+	dir := t.TempDir()
+	pc := LoadProjectConfig(dir)
+
+	if pc.WorktreeBase() != "" {
+		t.Errorf("expected empty string, got %s", pc.WorktreeBase())
+	}
+}
+
 // --- env_file format tests ---
 
 func TestEnvFile_StringShorthand(t *testing.T) {
