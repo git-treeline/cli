@@ -74,6 +74,13 @@ func errBranchNotFound(branch string) error {
 	}
 }
 
+func errClaimBranchNotFound(branch string) error {
+	return &CliError{
+		Message: fmt.Sprintf("Branch '%s' not found locally or on origin.", branch),
+		Hint:    "Confirm the branch name, and that it's been pushed if it only exists remotely.",
+	}
+}
+
 func errNotInWorktree() error {
 	return &CliError{
 		Message: "You're in the main repo, not a worktree.",

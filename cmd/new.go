@@ -10,7 +10,6 @@ import (
 	"github.com/git-treeline/cli/internal/confirm"
 	"github.com/git-treeline/cli/internal/detect"
 	"github.com/git-treeline/cli/internal/format"
-	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/style"
 	"github.com/git-treeline/cli/internal/worktree"
 	"github.com/spf13/cobra"
@@ -104,7 +103,7 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		// and treat the command as resumable.
 		if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
 			fmt.Println(style.Actionf("Branch '%s' already checked out at %s", branch, existingWT))
-			alloc, err := ensureWorktreeAllocation(existingWT, mainRepo, uc)
+			alloc, err := ensureWorktreeAllocation(existingWT, mainRepo, uc, os.Stdout)
 			if err != nil {
 				return cliErr(cmd, err)
 			}
@@ -157,23 +156,9 @@ Otherwise a new branch is created from --base (or the current branch).`,
 			}
 		}
 
-		fmt.Println(style.Actionf("Worktree created at %s", wtPath))
-		fmt.Println(style.Actionf("Running setup..."))
-
-		s := setup.New(wtPath, mainRepo, uc)
-		s.Options.DryRun = false
-		alloc, err := s.Run()
+		alloc, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stdout)
 		if err != nil {
-			// setup rolls back its own allocation, but the worktree this command
-			// just created would otherwise be left orphaned (no registry entry,
-			// invisible to prune). Remove it so a failed 'new' leaves no trace.
-			if rmErr := worktree.Remove(wtPath, true); rmErr != nil {
-				fmt.Fprintln(os.Stderr, style.Warnf("Could not remove worktree after failed setup: %s", rmErr))
-				fmt.Fprintln(os.Stderr, style.Dimf("  Remove it manually: git worktree remove --force %s", wtPath))
-			} else {
-				fmt.Println(style.Dimf("Rolled back worktree %s after setup failure.", wtPath))
-			}
-			return cliErr(cmd, errSetupFailed(err))
+			return err
 		}
 
 		maybeOpenInBrowser(newOpen, uc, alloc.Port, projectName, alloc.Branch)
