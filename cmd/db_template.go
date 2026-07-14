@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/worktree"
@@ -49,7 +50,7 @@ updated template.`,
 
 		mergeTarget := pc.MergeTarget()
 		if mergeTarget == "" {
-			mergeTarget = "main"
+			mergeTarget = resolveRemoteDefaultBranch(mainRepo)
 		}
 
 		if err := checkCleanWorktree(mainRepo); err != nil {
@@ -80,6 +81,25 @@ updated template.`,
 		fmt.Println("==> Template database updated. Run 'gtl db reset' in any worktree to re-clone.")
 		return nil
 	},
+}
+
+// resolveRemoteDefaultBranch reads origin/HEAD to find the remote's default
+// branch name. Falls back to "main" if the symbolic ref is absent or unset
+// (e.g. remote added manually, shallow clone, or stale after a branch rename).
+func resolveRemoteDefaultBranch(dir string) string {
+	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "main"
+	}
+	// output is "refs/remotes/origin/<branch>\n"
+	ref := strings.TrimSpace(string(out))
+	const prefix = "refs/remotes/origin/"
+	if strings.HasPrefix(ref, prefix) {
+		return ref[len(prefix):]
+	}
+	return "main"
 }
 
 // checkCleanWorktree returns an error if the git working tree at dir has
