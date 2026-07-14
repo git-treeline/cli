@@ -749,3 +749,90 @@ func TestRepoNameFromRemote_NoOrigin(t *testing.T) {
 		t.Errorf("RepoNameFromRemote without origin = %q, want empty", got)
 	}
 }
+
+func TestPull_FastForward(t *testing.T) {
+	repo := initTestRepo(t)
+
+	remoteDir := t.TempDir()
+	remoteDir, _ = filepath.EvalSymlinks(remoteDir)
+	run(t, remoteDir, "git", "init", "--bare")
+	run(t, repo, "git", "remote", "add", "origin", remoteDir)
+	run(t, repo, "git", "push", "origin", "main")
+
+	// Advance the remote independently of repo's local checkout.
+	otherClone := t.TempDir()
+	otherClone, _ = filepath.EvalSymlinks(otherClone)
+	run(t, "", "git", "clone", remoteDir, otherClone)
+	run(t, otherClone, "git", "commit", "--allow-empty", "-m", "remote-only commit")
+	run(t, otherClone, "git", "push", "origin", "main")
+
+	if err := Pull(repo, "origin", "main"); err != nil {
+		t.Fatalf("Pull failed: %v", err)
+	}
+
+	localHead := gitOutput(repo, "rev-parse", "HEAD")
+	remoteHead := gitOutput(otherClone, "rev-parse", "HEAD")
+	if localHead != remoteHead {
+		t.Errorf("Pull did not fast-forward: local HEAD %s, remote HEAD %s", localHead, remoteHead)
+	}
+}
+
+func TestPull_AlreadyUpToDate(t *testing.T) {
+	repo := initTestRepo(t)
+
+	remoteDir := t.TempDir()
+	remoteDir, _ = filepath.EvalSymlinks(remoteDir)
+	run(t, remoteDir, "git", "init", "--bare")
+	run(t, repo, "git", "remote", "add", "origin", remoteDir)
+	run(t, repo, "git", "push", "origin", "main")
+
+	if err := Pull(repo, "origin", "main"); err != nil {
+		t.Fatalf("Pull failed: %v", err)
+	}
+}
+
+func TestPull_Diverged(t *testing.T) {
+	repo := initTestRepo(t)
+
+	remoteDir := t.TempDir()
+	remoteDir, _ = filepath.EvalSymlinks(remoteDir)
+	run(t, remoteDir, "git", "init", "--bare")
+	run(t, repo, "git", "remote", "add", "origin", remoteDir)
+	run(t, repo, "git", "push", "origin", "main")
+
+	// Remote gets a commit repo doesn't have...
+	otherClone := t.TempDir()
+	otherClone, _ = filepath.EvalSymlinks(otherClone)
+	run(t, "", "git", "clone", remoteDir, otherClone)
+	run(t, otherClone, "git", "commit", "--allow-empty", "-m", "remote commit")
+	run(t, otherClone, "git", "push", "origin", "main")
+
+	// ...while repo also gets a commit the remote doesn't have.
+	run(t, repo, "git", "commit", "--allow-empty", "-m", "local commit")
+
+	err := Pull(repo, "origin", "main")
+	if err == nil {
+		t.Fatal("expected Pull to fail on diverged history")
+	}
+	if !IsDivergedPull(err) {
+		t.Errorf("IsDivergedPull(%v) = false, want true", err)
+	}
+}
+
+func TestPull_NonexistentRemote(t *testing.T) {
+	repo := initTestRepo(t)
+
+	err := Pull(repo, "nonexistent-remote", "main")
+	if err == nil {
+		t.Fatal("expected error for non-existent remote")
+	}
+	if IsDivergedPull(err) {
+		t.Errorf("IsDivergedPull(%v) = true, want false (not a divergence)", err)
+	}
+}
+
+func TestIsDivergedPull_Nil(t *testing.T) {
+	if IsDivergedPull(nil) {
+		t.Error("IsDivergedPull(nil) = true, want false")
+	}
+}

@@ -158,6 +158,26 @@ func Fetch(remote, branch string) error {
 	return err
 }
 
+// Pull runs `git pull --ff-only <remote> <branch>` in dir, fast-forwarding
+// the checked-out branch to match the remote without creating a merge
+// commit. Use IsDivergedPull to distinguish a genuine divergence (caller
+// should warn and let the user resolve manually) from other failures (no
+// remote, network, etc.).
+func Pull(dir, remote, branch string) error {
+	_, err := gitRun(dir, "pull", "--ff-only", remote, branch)
+	return err
+}
+
+// IsDivergedPull reports whether a Pull error is because the local and
+// remote branches have diverged (fast-forward not possible), as opposed to
+// some other failure.
+func IsDivergedPull(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "Not possible to fast-forward")
+}
+
 // FindWorktreeForBranch returns the path of an existing worktree that has
 // the given branch checked out, or empty string if none.
 func FindWorktreeForBranch(branch string) string {
