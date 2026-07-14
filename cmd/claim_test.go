@@ -180,6 +180,41 @@ func TestClaim_FreshRemoteOnlyBranch(t *testing.T) {
 	}
 }
 
+// TestClaim_SlashedBranchName guards the exact pattern behind the 'gtl
+// where' project/branch misparse (impl/717f7b0e, feature/foo, spec/foo):
+// claim resolves the branch at the git level (worktree.FindWorktreeForBranch,
+// worktree.BranchExists), never through the registry's project/branch split
+// that command used, so it was never subject to that bug — this test locks
+// that in as a regression guard now that the two are documented together.
+func TestClaim_SlashedBranchName(t *testing.T) {
+	mainRepo, seed := claimFixture(t)
+
+	runGit(t, seed, "checkout", "-b", "impl/717f7b0e")
+	runGit(t, seed, "commit", "--allow-empty", "-m", "agent commit")
+	runGit(t, seed, "push", "origin", "impl/717f7b0e")
+	remoteHead := runGit(t, seed, "rev-parse", "impl/717f7b0e")
+
+	chdir(t, mainRepo)
+
+	stdout, stderr, err := captureStdIO(t, func() error {
+		return claimCmd.RunE(claimCmd, []string{"impl/717f7b0e"})
+	})
+	if err != nil {
+		t.Fatalf("claim failed: %v\nstderr:\n%s", err, stderr)
+	}
+
+	wantPath := filepath.Join(filepath.Dir(mainRepo), "myapp-impl/717f7b0e")
+	if stdout != wantPath+"\n" {
+		t.Errorf("stdout = %q, want exactly %q", stdout, wantPath+"\n")
+	}
+	if localHead := runGit(t, wantPath, "rev-parse", "HEAD"); localHead != remoteHead {
+		t.Errorf("claimed worktree HEAD = %s, want origin's %s", localHead, remoteHead)
+	}
+	if branch := runGit(t, wantPath, "rev-parse", "--abbrev-ref", "HEAD"); branch != "impl/717f7b0e" {
+		t.Errorf("checked out branch = %q, want %q", branch, "impl/717f7b0e")
+	}
+}
+
 func TestClaim_IdempotentReClaim(t *testing.T) {
 	mainRepo, seed := claimFixture(t)
 
