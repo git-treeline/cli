@@ -1,4 +1,4 @@
-## [0.51.0]
+## [0.52.0]
 
 - **`gtl claim <branch>` makes "check out a branch at its freshest remote state" a single, idempotent command.** Fetches the branch from origin, then either fast-forwards an existing worktree for it or adopts it into a new one (same DWIM-tracking + setup path `gtl new` uses for an existing branch) and fast-forwards that. Re-running against an already-claimed branch just pulls the latest — safe to call repeatedly, e.g. from an orchestrator handing off a branch to a human. If the branch has diverged from origin, `claim` warns and leaves the worktree untouched rather than failing or resetting; the worktree existing is the claim, resolving the divergence is on you. Unlike `gtl new`, `claim` never creates a new branch (`--base` doesn't apply) and only supports `--path`. Its stdout carries only the worktree path (script-friendly: `wt=$(gtl claim my-branch)`); all progress goes to stderr — new shared plumbing (`runSetupWithRollback`, and an `io.Writer`-aware `ensureWorktreeAllocation`) now routes `gtl new`/`gtl review`'s setup output the same way they always printed (stdout), so this is additive, not a behavior change for them.
 
