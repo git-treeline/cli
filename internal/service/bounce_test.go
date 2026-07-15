@@ -36,9 +36,25 @@ func withFakeRunCmd(t *testing.T, runErr map[string]error) *[]string {
 		return nil
 	}
 	runCmdOutput = func(name string, args ...string) ([]byte, error) {
+		joined := name + " " + strings.Join(args, " ")
+		calls = append(calls, joined)
+		for prefix, err := range runErr {
+			if strings.HasPrefix(joined, prefix) {
+				return nil, err
+			}
+		}
 		return nil, nil
 	}
 	return &calls
+}
+
+// withFakeHealth stubs the health-poll seam so lifecycle tests don't need a
+// live HTTP listener answering /_treeline/health.
+func withFakeHealth(t *testing.T) {
+	t.Helper()
+	orig := waitRouterRespondingFn
+	t.Cleanup(func() { waitRouterRespondingFn = orig })
+	waitRouterRespondingFn = func(int, time.Duration) error { return nil }
 }
 
 // withFakeClock replaces nowFn / sleepFn so wait loops complete without real
@@ -80,6 +96,7 @@ func TestBounce_LaunchAgent_Kickstart_Success(t *testing.T) {
 	}
 	versionPath := withTempVersionFile(t)
 	withFakeClock(t)
+	withFakeHealth(t)
 
 	// Pre-populate version file with a known mtime, set to "before" the
 	// fake clock so any later write counts as fresh.
@@ -104,7 +121,7 @@ func TestBounce_LaunchAgent_Kickstart_Success(t *testing.T) {
 		return err
 	}
 
-	if err := Bounce(2 * time.Second); err != nil {
+	if err := Bounce(3001, 2*time.Second); err != nil {
 		t.Fatalf("Bounce: %v", err)
 	}
 
@@ -143,30 +160,32 @@ func TestBounce_LaunchAgent_FallsBackToBootstrap_WhenNotLoaded(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	withFakeHealth(t)
 	// `launchctl print` returns error → not loaded; bootstrap path runs.
+	// `launchctl list` returns error → label already deregistered, so the
+	// bootout poll exits immediately.
 	calls := withFakeRunCmd(t, map[string]error{
 		"launchctl print": errors.New("service not loaded"),
+		"launchctl list":  errors.New("could not find service"),
 	})
 
 	// Have bootstrap "succeed" and write the version file.
-	origRun := runCmd
-	runCmd = func(name string, args ...string) error {
-		if err := origRun(name, args...); err != nil {
-			return err
-		}
-		if len(args) > 0 && args[0] == "bootstrap" {
+	origOut := runCmdOutput
+	runCmdOutput = func(name string, args ...string) ([]byte, error) {
+		out, err := origOut(name, args...)
+		if err == nil && len(args) > 0 && args[0] == "bootstrap" {
 			t := nowFn().Add(50 * time.Millisecond)
 			_ = os.WriteFile(versionPath, []byte("9.9.9"), 0o644)
 			_ = os.Chtimes(versionPath, t, t)
 		}
-		return nil
+		return out, err
 	}
 
-	if err := Bounce(2 * time.Second); err != nil {
+	if err := Bounce(3001, 2*time.Second); err != nil {
 		t.Fatalf("Bounce: %v", err)
 	}
 
-	wantSeq := []string{"launchctl print", "launchctl bootout", "launchctl bootstrap"}
+	wantSeq := []string{"launchctl print", "launchctl bootout", "launchctl list", "launchctl bootstrap"}
 	for i, want := range wantSeq {
 		if i >= len(*calls) || !strings.Contains((*calls)[i], want) {
 			t.Fatalf("call %d: want prefix %q, got %v", i, want, *calls)
@@ -188,7 +207,7 @@ func TestBounce_LaunchAgent_Times_Out_When_Version_Not_Updated(t *testing.T) {
 	withFakeClock(t)
 	withFakeRunCmd(t, nil) // print + kickstart both succeed; nothing writes version file
 
-	err := Bounce(500 * time.Millisecond)
+	err := Bounce(3001, 500*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
@@ -207,7 +226,7 @@ func TestBounce_LaunchAgent_Surfaces_Kickstart_Failure(t *testing.T) {
 		"launchctl kickstart": errors.New("Could not find service"),
 	})
 
-	err := Bounce(2 * time.Second)
+	err := Bounce(3001, 2*time.Second)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -222,6 +241,7 @@ func TestBounce_Systemd_RestartUnit(t *testing.T) {
 	}
 	versionPath := withTempVersionFile(t)
 	withFakeClock(t)
+	withFakeHealth(t)
 
 	calls := withFakeRunCmd(t, nil)
 	origRun := runCmd
@@ -235,7 +255,7 @@ func TestBounce_Systemd_RestartUnit(t *testing.T) {
 		return err
 	}
 
-	if err := Bounce(2 * time.Second); err != nil {
+	if err := Bounce(3001, 2*time.Second); err != nil {
 		t.Fatalf("Bounce: %v", err)
 	}
 	if len(*calls) == 0 || !strings.Contains((*calls)[0], "systemctl --user restart") {
@@ -258,29 +278,31 @@ func TestReload_LaunchAgent_BootoutThenBootstrap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	calls := withFakeRunCmd(t, nil)
-	origRun := runCmd
-	runCmd = func(name string, args ...string) error {
-		err := origRun(name, args...)
+	withFakeHealth(t)
+	// Label deregisters immediately, so the bootout poll exits on its first
+	// probe.
+	calls := withFakeRunCmd(t, map[string]error{
+		"launchctl list": errors.New("could not find service"),
+	})
+	origOut := runCmdOutput
+	runCmdOutput = func(name string, args ...string) ([]byte, error) {
+		out, err := origOut(name, args...)
 		if err == nil && len(args) > 0 && args[0] == "bootstrap" {
 			t := nowFn().Add(50 * time.Millisecond)
 			_ = os.WriteFile(versionPath, []byte("9.9.9"), 0o644)
 			_ = os.Chtimes(versionPath, t, t)
 		}
-		return err
+		return out, err
 	}
 
-	if err := Reload(2 * time.Second); err != nil {
+	if err := Reload(3001, 2*time.Second); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
-	if len(*calls) < 2 {
-		t.Fatalf("expected at least 2 calls (bootout, bootstrap), got %d", len(*calls))
-	}
-	if !strings.Contains((*calls)[0], "bootout") {
-		t.Errorf("first call should be bootout, got %q", (*calls)[0])
-	}
-	if !strings.Contains((*calls)[1], "bootstrap") {
-		t.Errorf("second call should be bootstrap, got %q", (*calls)[1])
+	wantSeq := []string{"launchctl bootout", "launchctl list", "launchctl bootstrap"}
+	for i, want := range wantSeq {
+		if i >= len(*calls) || !strings.Contains((*calls)[i], want) {
+			t.Fatalf("call %d: want prefix %q, got %v", i, want, *calls)
+		}
 	}
 }
 
@@ -293,7 +315,7 @@ func TestReload_LaunchAgent_FailsWhenPlistMissing(t *testing.T) {
 	// Do NOT create the plist.
 	withFakeRunCmd(t, nil)
 
-	err := Reload(time.Second)
+	err := Reload(3001, time.Second)
 	if err == nil {
 		t.Fatal("expected error when plist is missing")
 	}
@@ -354,5 +376,39 @@ func TestRunningPIDDarwin_ZeroOnError(t *testing.T) {
 	}
 	if got := RunningPID(); got != 0 {
 		t.Errorf("RunningPID() = %d, want 0", got)
+	}
+}
+
+func TestBounceLaunchAgent_FailsWhenHealthCheckFails(t *testing.T) {
+	versionPath := withTempVersionFile(t)
+	withFakeClock(t)
+
+	// Kickstart succeeds and a new process writes the version file, but the
+	// router never answers health checks — a fresh version file alone must
+	// not count as ready.
+	orig := waitRouterRespondingFn
+	t.Cleanup(func() { waitRouterRespondingFn = orig })
+	waitRouterRespondingFn = func(int, time.Duration) error {
+		return errors.New("liveness probe failed: connection refused")
+	}
+
+	withFakeRunCmd(t, nil)
+	origRun := runCmd
+	runCmd = func(name string, args ...string) error {
+		err := origRun(name, args...)
+		if err == nil && len(args) > 0 && args[0] == "kickstart" {
+			ts := nowFn().Add(50 * time.Millisecond)
+			_ = os.WriteFile(versionPath, []byte("9.9.9"), 0o644)
+			_ = os.Chtimes(versionPath, ts, ts)
+		}
+		return err
+	}
+
+	err := bounceLaunchAgent(3001, 2*time.Second)
+	if err == nil {
+		t.Fatal("expected error when health check never passes")
+	}
+	if !strings.Contains(err.Error(), "health checks") {
+		t.Errorf("expected health-check error, got: %v", err)
 	}
 }

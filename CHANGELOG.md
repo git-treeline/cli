@@ -1,3 +1,7 @@
+## [0.51.0]
+
+- **`gtl serve install` and `gtl serve restart` no longer report failure on healthy routers.** Two structural fixes to the service lifecycle (macOS + Linux). Install now compares the rendered service definition against what's on disk: when unchanged (the Homebrew-upgrade case) it restarts via `kickstart`/`systemctl restart` instead of `bootout`+`bootstrap`, sidestepping launchd's asynchronous deregistration race that produced false `exit status 5` failures. When the definition did change, the reload waits for launchd to actually drop the old registration (polling, not fixed sleeps) before bootstrapping, and bootstrap failures now carry launchd's reason string instead of a bare exit code. Success everywhere — install, restart, and doctor's auto-fix — is now gated on the router answering health checks, not merely its process starting, with the deadline sized to real TLS/route-hydration startup (30s interactive, 10s under `--if-installed` so the Homebrew hook still fails fast).
+
 ## [0.50.0]
 
 - **`worktree_base` config field sets the default base branch for `gtl new`.** Repos whose start-from branch differs from their merge-into branch (e.g. `develop` vs `main`) can now declare `worktree_base: develop` in `.treeline.yml` and skip `--base` on every `gtl new`. Resolution order: `--base` flag → `worktree_base` config → current branch → `main`. Distinct from `merge_target`, which controls what `gtl prune --merged` checks against.

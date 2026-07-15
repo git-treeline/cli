@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/confirm"
@@ -89,17 +88,17 @@ should not be an error).`,
 			return nil
 		}
 		fmt.Println(style.Actionf("Restarting router service..."))
-		if err := service.Bounce(service.DefaultBounceTimeout); err != nil {
+		routerPort := config.LoadUserConfig("").RouterPort()
+		// Tooling callers (Homebrew post_install) should fail fast rather
+		// than block the package manager on a genuinely broken start.
+		wait := service.DefaultReadyTimeout
+		if serveRestartIfInstalled {
+			wait = service.HookReadyTimeout
+		}
+		if err := service.Bounce(routerPort, wait); err != nil {
 			return cliErr(cmd, &CliError{
 				Message: fmt.Sprintf("Could not restart router: %v", err),
 				Hint:    "If this persists, run 'gtl serve install' for a full reset.",
-			})
-		}
-		routerPort := config.LoadUserConfig("").RouterPort()
-		if err := service.WaitRouterResponding(routerPort, 5*time.Second); err != nil {
-			return cliErr(cmd, &CliError{
-				Message: fmt.Sprintf("Router restarted but is not answering health checks: %v", err),
-				Hint:    "Check the router logs, or run 'gtl serve install' for a full reset.",
 			})
 		}
 		fmt.Println(style.Dimf("Router restarted and responding (running %s).", Version))

@@ -467,7 +467,7 @@ func runAutoFix(a doctor.FixAction) error { return runAutoFixFn(a) }
 func runAutoFixDefault(a doctor.FixAction) error {
 	switch a {
 	case doctor.FixServeRestart:
-		return service.Bounce(service.DefaultBounceTimeout)
+		return service.Bounce(config.LoadUserConfig("").RouterPort(), service.DefaultReadyTimeout)
 	case doctor.FixReloadPF:
 		return service.ReloadPortForward()
 	case doctor.FixPrune:
