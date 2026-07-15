@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -319,6 +320,9 @@ func TestReloadLaunchAgent_DeregistrationTimeout_StillAttemptsBootstrap(t *testi
 }
 
 func TestInstallLaunchAgent_UnchangedPlist_UsesKickstart(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("darwin-only: installLaunchAgent restarts via the Bounce/Reload dispatchers")
+	}
 	versionFile := withTempVersionFile(t)
 	withFakeHealth(t)
 
@@ -362,6 +366,9 @@ func TestInstallLaunchAgent_UnchangedPlist_UsesKickstart(t *testing.T) {
 }
 
 func TestInstallLaunchAgent_ChangedPlist_WritesAndReloads(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("darwin-only: installLaunchAgent restarts via the Bounce/Reload dispatchers")
+	}
 	versionFile := withTempVersionFile(t)
 	withFakeHealth(t)
 
@@ -405,5 +412,101 @@ func TestInstallLaunchAgent_ChangedPlist_WritesAndReloads(t *testing.T) {
 	}
 	if !sawBootstrap {
 		t.Errorf("expected bootstrap for changed plist, got: %v", *calls)
+	}
+}
+
+func TestInstallSystemd_UnchangedUnit_UsesRestart(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux-only: installSystemd restarts via the Bounce/Reload dispatchers")
+	}
+	if !systemdAvailable() {
+		t.Skip("systemd not available")
+	}
+	versionFile := withTempVersionFile(t)
+	withFakeHealth(t)
+
+	gtlPath := "/usr/local/bin/gtl"
+	content, err := GenerateUnit(gtlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(UnitPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(UnitPath(), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := withFakeRunCmd(t, nil)
+	origRun := runCmd
+	runCmd = func(name string, args ...string) error {
+		err := origRun(name, args...)
+		if err == nil && len(args) > 1 && args[1] == "restart" {
+			_ = os.WriteFile(versionFile, []byte("v1"), 0o644)
+		}
+		return err
+	}
+
+	if _, err := installSystemd(gtlPath, 3001); err != nil {
+		t.Fatalf("installSystemd: %v", err)
+	}
+	var sawRestart bool
+	for _, c := range *calls {
+		if strings.Contains(c, "restart") {
+			sawRestart = true
+		}
+		if strings.Contains(c, "daemon-reload") {
+			t.Errorf("unchanged unit must not daemon-reload, got: %v", *calls)
+		}
+	}
+	if !sawRestart {
+		t.Errorf("expected restart for unchanged unit, got: %v", *calls)
+	}
+}
+
+func TestInstallSystemd_ChangedUnit_WritesAndReloads(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("linux-only: installSystemd restarts via the Bounce/Reload dispatchers")
+	}
+	if !systemdAvailable() {
+		t.Skip("systemd not available")
+	}
+	versionFile := withTempVersionFile(t)
+	withFakeHealth(t)
+
+	gtlPath := "/usr/local/bin/gtl"
+	if err := os.MkdirAll(filepath.Dir(UnitPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(UnitPath(), []byte("[Service]\nExecStart=/stale/gtl serve run\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := withFakeRunCmd(t, nil)
+	origRun := runCmd
+	runCmd = func(name string, args ...string) error {
+		err := origRun(name, args...)
+		if err == nil && len(args) > 1 && args[1] == "restart" {
+			_ = os.WriteFile(versionFile, []byte("v1"), 0o644)
+		}
+		return err
+	}
+
+	if _, err := installSystemd(gtlPath, 3001); err != nil {
+		t.Fatalf("installSystemd: %v", err)
+	}
+	want, _ := GenerateUnit(gtlPath)
+	got, err := os.ReadFile(UnitPath())
+	if err != nil || string(got) != want {
+		t.Errorf("unit not rewritten with new content (err=%v)", err)
+	}
+	var sawReload bool
+	for _, c := range *calls {
+		if strings.Contains(c, "daemon-reload") {
+			sawReload = true
+		}
+	}
+	if !sawReload {
+		t.Errorf("expected daemon-reload for changed unit, got: %v", *calls)
 	}
 }
