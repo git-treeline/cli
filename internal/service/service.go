@@ -48,9 +48,26 @@ var (
 	sleepFn = time.Sleep
 )
 
-// DefaultBounceTimeout is the default deadline for verifying that a bounced
-// router has come back up (i.e. written its version file).
-const DefaultBounceTimeout = 5 * time.Second
+// DefaultReadyTimeout is the default deadline for verifying that a restarted
+// router is ready: a fresh version file (a new process started) AND the
+// health endpoint answering (it is actually serving). Generous because TLS
+// setup and route hydration can take several seconds on large registries —
+// it's a deadline, not a sleep, so the happy path returns as soon as the
+// router answers.
+const DefaultReadyTimeout = 30 * time.Second
+
+// HookReadyTimeout is the readiness deadline for non-interactive tooling
+// paths (e.g. the Homebrew post_install hook running
+// `gtl serve restart --if-installed`), where blocking a package manager for
+// 30 seconds on a genuinely broken start is worse than failing fast.
+const HookReadyTimeout = 10 * time.Second
+
+// deregisterTimeout bounds the wait for launchd to drop a booted-out
+// service registration. bootout of a running KeepAlive service is
+// asynchronous — the label stays registered until the old process exits,
+// which can take many seconds while it drains live connections (SIGTERM,
+// then SIGKILL only after launchd's grace window).
+const deregisterTimeout = 20 * time.Second
 
 // StableExecutablePath returns a path suitable for embedding in a service
 // definition (launchd plist, systemd unit). On Homebrew installs,
@@ -233,16 +250,16 @@ func launchDomain() string {
 // `systemctl --user restart`.
 //
 // Bounce verifies the restart by waiting for the router to write a fresh
-// `router.version` file. Returns an error if no new write is observed
+// `router.version` file and then answer health checks on `routerPort`,
 // within `wait`.
 //
 // Use Reload (not Bounce) when the service definition itself changed.
-func Bounce(wait time.Duration) error {
+func Bounce(routerPort int, wait time.Duration) error {
 	switch runtime.GOOS {
 	case "darwin":
-		return bounceLaunchAgent(wait)
+		return bounceLaunchAgent(routerPort, wait)
 	case "linux":
-		return bounceSystemd(wait)
+		return bounceSystemd(routerPort, wait)
 	default:
 		return fmt.Errorf("bounce not supported on %s", runtime.GOOS)
 	}
@@ -254,12 +271,12 @@ func Bounce(wait time.Duration) error {
 //
 // On macOS that's `launchctl bootout` followed by `launchctl bootstrap`.
 // On Linux that's `systemctl --user daemon-reload` followed by `restart`.
-func Reload(wait time.Duration) error {
+func Reload(routerPort int, wait time.Duration) error {
 	switch runtime.GOOS {
 	case "darwin":
-		return reloadLaunchAgent(wait)
+		return reloadLaunchAgent(routerPort, wait)
 	case "linux":
-		return reloadSystemd(wait)
+		return reloadSystemd(routerPort, wait)
 	default:
 		return fmt.Errorf("reload not supported on %s", runtime.GOOS)
 	}
@@ -289,6 +306,27 @@ func waitForFreshVersion(before time.Time, wait time.Duration) error {
 		sleepFn(100 * time.Millisecond)
 	}
 	return fmt.Errorf("router did not record a new version within %s — check logs: %s", wait, logHint())
+}
+
+// waitRouterRespondingFn is the health-poll seam, overridable in tests so
+// lifecycle tests don't need a live HTTP listener.
+var waitRouterRespondingFn = WaitRouterResponding
+
+// waitRouterReady gates a lifecycle operation on the router actually coming
+// back, in two stages: a fresh router.version write proves a new process
+// started (the mtime comparison distinguishes a new process even across
+// same-version restarts), then the health endpoint answering proves it is
+// serving — the version file is written at process start, before TLS setup
+// and port binding, so it alone is not a readiness signal.
+func waitRouterReady(routerPort int, before time.Time, wait time.Duration) error {
+	deadline := nowFn().Add(wait)
+	if err := waitForFreshVersion(before, wait); err != nil {
+		return err
+	}
+	if err := waitRouterRespondingFn(routerPort, deadline.Sub(nowFn())); err != nil {
+		return fmt.Errorf("router process started but did not answer health checks: %w — check logs: %s", err, logHint())
+	}
+	return nil
 }
 
 // logHint returns the platform-appropriate way to view router logs. On Linux
@@ -336,24 +374,24 @@ func nonSystemdInstallMessage(wsl bool) string {
 		"or run the router in the foreground with 'gtl serve run'."
 }
 
-func bounceLaunchAgent(wait time.Duration) error {
+func bounceLaunchAgent(routerPort int, wait time.Duration) error {
 	target := launchTarget()
 	before := versionFileMtime()
 	// If the agent isn't loaded yet (e.g. fresh install), kickstart will
 	// fail. Fall back to bootstrap so first-time callers don't hit a wall.
 	if err := runCmd("launchctl", "print", target); err != nil {
-		return reloadLaunchAgent(wait)
+		return reloadLaunchAgent(routerPort, wait)
 	}
 	if err := runCmd("launchctl", "kickstart", "-k", target); err != nil {
 		return fmt.Errorf("launchctl kickstart: %w", err)
 	}
-	return waitForFreshVersion(before, wait)
+	return waitRouterReady(routerPort, before, wait)
 }
 
 // plistPathFn returns the plist path. Overridable in tests.
 var plistPathFn = PlistPath
 
-func reloadLaunchAgent(wait time.Duration) error {
+func reloadLaunchAgent(routerPort int, wait time.Duration) error {
 	plist := plistPathFn()
 	if _, err := os.Stat(plist); err != nil {
 		return fmt.Errorf("plist not found at %s — run 'gtl serve install' first", plist)
@@ -365,9 +403,19 @@ func reloadLaunchAgent(wait time.Duration) error {
 	// loaded — that's fine, we're about to bootstrap.
 	_ = runCmd("launchctl", "bootout", target)
 
-	// On some macOS versions launchd needs a moment to settle after bootout
-	// before it will accept a bootstrap for the same label. Retry a few times
-	// on exit 5 ("already loaded / I/O error"), re-running bootout each time.
+	// bootout of a running KeepAlive service is asynchronous: launchd keeps
+	// the label registered until the old process exits, and bootstrapping
+	// while it's still live fails with exit 5. `launchctl list <label>` keys
+	// on registration and exits non-zero once the label is gone, so poll for
+	// that instead of guessing with fixed sleeps.
+	deregisterDeadline := nowFn().Add(deregisterTimeout)
+	for runCmd("launchctl", "list", LaunchLabel()) == nil && nowFn().Before(deregisterDeadline) {
+		sleepFn(200 * time.Millisecond)
+	}
+
+	// Backstop for launchd still settling after the label disappears. Retry
+	// a few times on exit 5 ("already loaded / I/O error"), re-running
+	// bootout each time.
 	const maxRetries = 3
 	var bootstrapErr error
 	for i := 0; i < maxRetries; i++ {
@@ -375,7 +423,14 @@ func reloadLaunchAgent(wait time.Duration) error {
 			sleepFn(500 * time.Millisecond)
 			_ = runCmd("launchctl", "bootout", target)
 		}
-		bootstrapErr = runCmd("launchctl", "bootstrap", launchDomain(), plist)
+		// CombinedOutput, not Run: exit codes alone are ambiguous (exit 5
+		// covers both "already loaded" and I/O errors) — launchd's reason
+		// string on stderr is the real diagnostic.
+		out, err := runCmdOutput("launchctl", "bootstrap", launchDomain(), plist)
+		if msg := strings.TrimSpace(string(out)); err != nil && msg != "" {
+			err = fmt.Errorf("%w: %s", err, msg)
+		}
+		bootstrapErr = err
 		if bootstrapErr == nil || launchctlExitCode(bootstrapErr) != 5 {
 			break
 		}
@@ -383,18 +438,18 @@ func reloadLaunchAgent(wait time.Duration) error {
 	if bootstrapErr != nil {
 		return fmt.Errorf("launchctl bootstrap %s: %w", plist, bootstrapErr)
 	}
-	return waitForFreshVersion(before, wait)
+	return waitRouterReady(routerPort, before, wait)
 }
 
-func bounceSystemd(wait time.Duration) error {
+func bounceSystemd(routerPort int, wait time.Duration) error {
 	before := versionFileMtime()
 	if err := runCmd("systemctl", "--user", "restart", SystemdUnit()); err != nil {
 		return fmt.Errorf("systemctl restart: %w", err)
 	}
-	return waitForFreshVersion(before, wait)
+	return waitRouterReady(routerPort, before, wait)
 }
 
-func reloadSystemd(wait time.Duration) error {
+func reloadSystemd(routerPort int, wait time.Duration) error {
 	before := versionFileMtime()
 	if err := runCmd("systemctl", "--user", "daemon-reload"); err != nil {
 		return fmt.Errorf("systemctl daemon-reload: %w", err)
@@ -402,7 +457,7 @@ func reloadSystemd(wait time.Duration) error {
 	if err := runCmd("systemctl", "--user", "restart", SystemdUnit()); err != nil {
 		return fmt.Errorf("systemctl restart: %w", err)
 	}
-	return waitForFreshVersion(before, wait)
+	return waitRouterReady(routerPort, before, wait)
 }
 
 // RouterVersionFile returns the path to the file where the running router
@@ -473,37 +528,36 @@ func RouterLogFiles() (stdout, stderr string) {
 	return filepath.Join(dir, "router.log"), filepath.Join(dir, "router.err")
 }
 
-func installLaunchAgent(gtlPath string, _ int) (string, error) {
+func installLaunchAgent(gtlPath string, routerPort int) (string, error) {
 	path := PlistPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	content, err := GeneratePlist(gtlPath)
+	if err != nil {
 		return "", err
 	}
 	if err := os.MkdirAll(logDir(), 0o755); err != nil {
 		return "", err
 	}
 
-	f, err := os.Create(path)
-	if err != nil {
+	// When the service definition is unchanged (e.g. Homebrew swapped the
+	// binary behind the stable symlink path), kickstart is sufficient — it
+	// re-execs from the loaded definition. Reload would bootout+bootstrap,
+	// which races against launchd's asynchronous deregistration of the still
+	// running old process. Only pay that cost when the plist really changed.
+	if existing, readErr := os.ReadFile(path); readErr == nil && string(existing) == content {
+		if err := Bounce(routerPort, DefaultReadyTimeout); err != nil {
+			return path, fmt.Errorf("service definition unchanged but restart failed: %w", err)
+		}
+		return path, nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return "", err
 	}
 
-	err = plistTemplate.Execute(f, struct {
-		Label   string
-		GtlPath string
-		LogDir  string
-	}{
-		Label:   LaunchLabel(),
-		GtlPath: gtlPath,
-		LogDir:  logDir(),
-	})
-	if closeErr := f.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return "", err
-	}
-
-	if err := Reload(DefaultBounceTimeout); err != nil {
+	if err := Reload(routerPort, DefaultReadyTimeout); err != nil {
 		return path, fmt.Errorf("wrote plist but service did not come up: %w", err)
 	}
 	return path, nil
@@ -598,7 +652,7 @@ func UnitPath() string {
 	return filepath.Join(configDir, "systemd", "user", SystemdUnit())
 }
 
-func installSystemd(gtlPath string, _ int) (string, error) {
+func installSystemd(gtlPath string, routerPort int) (string, error) {
 	// Fail with actionable guidance before touching disk when systemd isn't
 	// running (non-systemd distro, or WSL2 without systemd) — otherwise the
 	// user just sees a raw `systemctl` connection error.
@@ -606,20 +660,24 @@ func installSystemd(gtlPath string, _ int) (string, error) {
 		return "", fmt.Errorf("%s", nonSystemdInstallMessage(isWSL()))
 	}
 	path := UnitPath()
+	content, err := GenerateUnit(gtlPath)
+	if err != nil {
+		return "", err
+	}
+
+	// Unit unchanged (e.g. binary swapped behind the same ExecStart path) —
+	// a plain restart picks up the new binary; no daemon-reload needed.
+	if existing, readErr := os.ReadFile(path); readErr == nil && string(existing) == content {
+		if err := Bounce(routerPort, DefaultReadyTimeout); err != nil {
+			return path, fmt.Errorf("service definition unchanged but restart failed: %w", err)
+		}
+		return path, nil
+	}
+
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
-
-	f, err := os.Create(path)
-	if err != nil {
-		return "", err
-	}
-
-	err = unitTemplate.Execute(f, struct{ GtlPath string }{GtlPath: gtlPath})
-	if closeErr := f.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return "", err
 	}
 
@@ -629,7 +687,7 @@ func installSystemd(gtlPath string, _ int) (string, error) {
 	if err := runCmd("systemctl", "--user", "enable", "--now", SystemdUnit()); err != nil {
 		return path, fmt.Errorf("wrote unit but failed to enable: %w", err)
 	}
-	if err := Reload(DefaultBounceTimeout); err != nil {
+	if err := Reload(routerPort, DefaultReadyTimeout); err != nil {
 		return path, fmt.Errorf("wrote unit but service did not come up: %w", err)
 	}
 	return path, nil
@@ -645,7 +703,7 @@ func uninstallSystemd() error {
 	return nil
 }
 
-// GeneratePlist returns the plist XML content as a string (for testing).
+// GeneratePlist returns the plist XML content as a string.
 func GeneratePlist(gtlPath string) (string, error) {
 	var b strings.Builder
 	err := plistTemplate.Execute(&b, struct {
@@ -660,7 +718,7 @@ func GeneratePlist(gtlPath string) (string, error) {
 	return b.String(), err
 }
 
-// GenerateUnit returns the systemd unit content as a string (for testing).
+// GenerateUnit returns the systemd unit content as a string.
 func GenerateUnit(gtlPath string) (string, error) {
 	var b strings.Builder
 	err := unitTemplate.Execute(&b, struct{ GtlPath string }{GtlPath: gtlPath})
