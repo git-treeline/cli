@@ -163,11 +163,11 @@ func (s *Supervisor) startChildLocked() error {
 
 	go func() {
 		_ = cmd.Wait()
-		_ = os.Remove(ChildPidPath(s.SocketPath))
 		close(done)
 		s.mu.Lock()
 		if s.child == cmd {
 			s.child = nil
+			_ = os.Remove(ChildPidPath(s.SocketPath))
 		}
 		s.mu.Unlock()
 	}()
@@ -202,7 +202,11 @@ func (s *Supervisor) stopChildLocked() {
 	case <-time.After(10 * time.Second):
 		s.Log("==> Process didn't exit in 10s, sending SIGKILL")
 		_ = syscall.Kill(-child.Process.Pid, syscall.SIGKILL)
-		<-waitCh
+		select {
+		case <-waitCh:
+		case <-time.After(5 * time.Second):
+			s.Log("==> Process did not exit after SIGKILL — proceeding")
+		}
 	}
 
 	s.mu.Lock()

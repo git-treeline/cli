@@ -108,10 +108,17 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 					}
 					return cliErr(cmd, restartViaSupervisor(sockPath))
 				case runningActionMove:
+					fmt.Println(style.Dimf("Stopping server in the other terminal..."))
 					if err := stopOtherSupervisor(sockPath, 15*time.Second); err != nil {
-						return cliErr(cmd, err)
+						// Graceful shutdown timed out — force-kill the supervisor and its child.
+						killed, ferr := forceKillSupervisor(sockPath)
+						if ferr != nil || !killed {
+							return cliErr(cmd, err)
+						}
+						fmt.Println(style.Dimf("Force-stopped unresponsive server — starting fresh here."))
+					} else {
+						fmt.Println(style.Dimf("Stopped the server in the other terminal — starting fresh here."))
 					}
-					fmt.Println(style.Dimf("Stopped the server in the other terminal — starting fresh here."))
 					// Fall through to the fresh-start path below.
 				}
 			} else {
