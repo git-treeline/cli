@@ -5,6 +5,7 @@ package worktree
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -12,11 +13,14 @@ import (
 
 // gitRun executes a git command in dir and returns trimmed stdout.
 // On failure, the error includes the git subcommand and trimmed stderr.
+// LC_ALL=C forces English messages so callers (e.g. IsDivergedPull) can
+// match on them regardless of the user's locale.
 func gitRun(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		detail := strings.TrimSpace(string(out))

@@ -7,36 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/git-treeline/cli/internal/config"
 )
 
-// --- resolveClaimWorktreePath ---
-
-func TestResolveClaimWorktreePath_FlagOverride(t *testing.T) {
-	oldPath := claimPath
-	defer func() { claimPath = oldPath }()
-
-	claimPath = "/custom/path"
-	uc := config.LoadUserConfig("/nonexistent/config.yml")
-	got := resolveClaimWorktreePath("/repo/main", "myapp", "feat", uc)
-	if got != "/custom/path" {
-		t.Errorf("expected /custom/path, got %s", got)
-	}
-}
-
-func TestResolveClaimWorktreePath_DefaultSiblingLayout(t *testing.T) {
-	oldPath := claimPath
-	defer func() { claimPath = oldPath }()
-
-	claimPath = ""
-	uc := config.LoadUserConfig("/nonexistent/config.yml")
-	got := resolveClaimWorktreePath("/repos/main", "myapp", "feat", uc)
-	want := filepath.Join("/repos", "myapp-feat")
-	if got != want {
-		t.Errorf("expected %s, got %s", want, got)
-	}
-}
+// Path resolution (shared resolveWorktreePath) is covered in new_test.go.
 
 // --- gtl claim integration tests ---
 //

@@ -55,7 +55,7 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		uc := config.LoadUserConfig("")
 
 		if isInWorktree(absPath, mainRepo) && !newForce && !newDryRun {
-			wtPath := resolveNewWorktreePath(mainRepo, pc.Project(), branch, uc)
+			wtPath := resolveWorktreePath(newPath, mainRepo, pc.Project(), branch, uc)
 
 			fmt.Println()
 			fmt.Printf("You're in worktree '%s'. The new worktree will be created at:\n", filepath.Base(absPath))
@@ -93,9 +93,9 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		warnServeNotInstalled()
 
 		projectName := pc.Project()
-		wtPath := resolveNewWorktreePath(mainRepo, projectName, branch, uc)
+		wtPath := resolveWorktreePath(newPath, mainRepo, projectName, branch, uc)
 
-		if err := ensureGitignored(mainRepo, wtPath); err != nil {
+		if err := ensureGitignored(mainRepo, wtPath, os.Stdout); err != nil {
 			return err
 		}
 
@@ -206,7 +206,7 @@ func completeBranches(cmd *cobra.Command, args []string, toComplete string) ([]s
 // createWorktreeOnly creates a worktree without any port/database allocation.
 // Used for non-server projects or when user declines full setup.
 func createWorktreeOnly(mainRepo, branch string, uc *config.UserConfig, pc *config.ProjectConfig) error {
-	wtPath := resolveNewWorktreePath(mainRepo, pc.Project(), branch, uc)
+	wtPath := resolveWorktreePath(newPath, mainRepo, pc.Project(), branch, uc)
 
 	if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
 		fmt.Println(style.Actionf("Branch '%s' already checked out at %s", branch, existingWT))
@@ -215,7 +215,7 @@ func createWorktreeOnly(mainRepo, branch string, uc *config.UserConfig, pc *conf
 		return nil
 	}
 
-	if err := ensureGitignored(mainRepo, wtPath); err != nil {
+	if err := ensureGitignored(mainRepo, wtPath, os.Stdout); err != nil {
 		return err
 	}
 
@@ -250,18 +250,6 @@ func createWorktreeOnly(mainRepo, branch string, uc *config.UserConfig, pc *conf
 	fmt.Println()
 	fmt.Printf("  cd %s\n", wtPath)
 	return nil
-}
-
-// resolveNewWorktreePath returns the target path for a new worktree, applying
-// --path override, user config template, or the default sibling layout.
-func resolveNewWorktreePath(mainRepo, projectName, branch string, uc *config.UserConfig) string {
-	if newPath != "" {
-		return newPath
-	}
-	if p := uc.ResolveWorktreePath(mainRepo, projectName, branch); p != "" {
-		return p
-	}
-	return filepath.Join(filepath.Dir(mainRepo), fmt.Sprintf("%s-%s", projectName, branch))
 }
 
 // runInitInteractive runs the init flow to create .treeline.yml.

@@ -113,7 +113,7 @@ func ensureWorktreeAllocation(wtPath, mainRepo string, uc *config.UserConfig, pr
 	if _, err := s.Run(); err != nil {
 		return nil, errSetupFailed(err)
 	}
-	return registry.New("").Find(wtPath), nil
+	return reg.Find(wtPath), nil
 }
 
 // runSetupWithRollback runs 'gtl setup' in a freshly created worktree,
@@ -142,15 +142,29 @@ func runSetupWithRollback(cmd *cobra.Command, wtPath, mainRepo string, uc *confi
 	return alloc, nil
 }
 
-// ensureGitignored delegates to worktree.EnsureGitignored and prints
-// a message if a pattern was added.
-func ensureGitignored(mainRepo, wtPath string) error {
+// ensureGitignored delegates to worktree.EnsureGitignored and prints a
+// message to progress if a pattern was added (os.Stdout for new/review,
+// os.Stderr for claim so its stdout stays script-friendly).
+func ensureGitignored(mainRepo, wtPath string, progress io.Writer) error {
 	pattern, err := worktree.EnsureGitignored(mainRepo, wtPath)
 	if err != nil {
 		return err
 	}
 	if pattern != "" {
-		fmt.Println(style.Actionf("Added %s to .gitignore", pattern))
+		fmt.Fprintln(progress, style.Actionf("Added %s to .gitignore", pattern))
 	}
 	return nil
+}
+
+// resolveWorktreePath returns the target path for a worktree: the command's
+// --path override, then the user config template, then the default sibling
+// layout. Shared by 'gtl new' and 'gtl claim'.
+func resolveWorktreePath(pathOverride, mainRepo, projectName, branch string, uc *config.UserConfig) string {
+	if pathOverride != "" {
+		return pathOverride
+	}
+	if p := uc.ResolveWorktreePath(mainRepo, projectName, branch); p != "" {
+		return p
+	}
+	return filepath.Join(filepath.Dir(mainRepo), fmt.Sprintf("%s-%s", projectName, branch))
 }

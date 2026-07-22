@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -189,7 +190,7 @@ func TestEnsureGitignored_OutsideRepo_Noop(t *testing.T) {
 	initGitRepo(t, repo)
 	sibling := filepath.Join(filepath.Dir(repo), "sibling-wt")
 
-	if err := ensureGitignored(repo, sibling); err != nil {
+	if err := ensureGitignored(repo, sibling, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(repo, ".gitignore")); err == nil {
@@ -202,7 +203,7 @@ func TestEnsureGitignored_InsideRepo_AddsPattern(t *testing.T) {
 	initGitRepo(t, repo)
 	wtPath := filepath.Join(repo, ".worktrees", "feat-x")
 
-	if err := ensureGitignored(repo, wtPath); err != nil {
+	if err := ensureGitignored(repo, wtPath, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 
@@ -221,7 +222,7 @@ func TestEnsureGitignored_AlreadyIgnored_NoDoubleAdd(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("/.worktrees/\n"), 0o644)
 	wtPath := filepath.Join(repo, ".worktrees", "feat-y")
 
-	if err := ensureGitignored(repo, wtPath); err != nil {
+	if err := ensureGitignored(repo, wtPath, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 
@@ -237,7 +238,7 @@ func TestEnsureGitignored_AppendsToExistingGitignore(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("node_modules/\n"), 0o644)
 	wtPath := filepath.Join(repo, ".worktrees", "feat-z")
 
-	if err := ensureGitignored(repo, wtPath); err != nil {
+	if err := ensureGitignored(repo, wtPath, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 

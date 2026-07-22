@@ -28,10 +28,10 @@ Resolution order:
      branch names that themselves contain a slash (e.g. 'feature/foo',
      'impl/717f7b0e') resolve correctly instead of being misread as
      project/branch.
-  2. If that misses, and the text before the first '/' names a known
-     project, the documented project/branch disambiguation for a branch
-     that exists in more than one project:
+  2. If that misses, the argument as project/branch — the documented
+     disambiguation for a branch that exists in more than one project:
        gtl where salt/feature-auth
+     Used only when that project actually has that branch.
   3. Otherwise, the whole argument as a branch name across all projects
      — erroring if it matches more than one.
 
@@ -54,8 +54,8 @@ Useful for scripting:
 
 		if idx := strings.Index(query, "/"); idx >= 0 {
 			project, branch := query[:idx], query[idx+1:]
-			if whereProjectKnown(allocs, project) {
-				return resolveWhereMatches(cmd, whereMatches(allocs, project, branch), query, branch)
+			if matches := whereMatches(allocs, project, branch); len(matches) > 0 {
+				return resolveWhereMatches(cmd, matches, query, branch)
 			}
 		}
 

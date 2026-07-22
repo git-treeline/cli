@@ -74,9 +74,9 @@ safe to capture, e.g.: wt=$(gtl claim agent/some-branch)`,
 		}
 
 		projectName := pc.Project()
-		wtPath := resolveClaimWorktreePath(mainRepo, projectName, branch, uc)
+		wtPath := resolveWorktreePath(claimPath, mainRepo, projectName, branch, uc)
 
-		if err := ensureGitignored(mainRepo, wtPath); err != nil {
+		if err := ensureGitignored(mainRepo, wtPath, os.Stderr); err != nil {
 			return err
 		}
 
@@ -100,20 +100,6 @@ safe to capture, e.g.: wt=$(gtl claim agent/some-branch)`,
 		fmt.Println(wtPath)
 		return nil
 	},
-}
-
-// resolveClaimWorktreePath returns the target path for a claimed worktree:
-// --path override, then the user config template, then the default sibling
-// layout. Mirrors resolveNewWorktreePath's resolution order but reads
-// claim's own --path flag rather than 'gtl new's.
-func resolveClaimWorktreePath(mainRepo, projectName, branch string, uc *config.UserConfig) string {
-	if claimPath != "" {
-		return claimPath
-	}
-	if p := uc.ResolveWorktreePath(mainRepo, projectName, branch); p != "" {
-		return p
-	}
-	return filepath.Join(filepath.Dir(mainRepo), fmt.Sprintf("%s-%s", projectName, branch))
 }
 
 // warnOnClaimPullFailure prints a non-fatal warning for a failed post-claim
