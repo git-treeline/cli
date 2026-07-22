@@ -5,6 +5,7 @@ package worktree
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -12,11 +13,14 @@ import (
 
 // gitRun executes a git command in dir and returns trimmed stdout.
 // On failure, the error includes the git subcommand and trimmed stderr.
+// LC_ALL=C forces English messages so callers (e.g. IsDivergedPull) can
+// match on them regardless of the user's locale.
 func gitRun(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		detail := strings.TrimSpace(string(out))
@@ -156,6 +160,26 @@ func BranchExists(branch string) bool {
 func Fetch(remote, branch string) error {
 	_, err := gitRun("", "fetch", remote, branch)
 	return err
+}
+
+// Pull runs `git pull --ff-only <remote> <branch>` in dir, fast-forwarding
+// the checked-out branch to match the remote without creating a merge
+// commit. Use IsDivergedPull to distinguish a genuine divergence (caller
+// should warn and let the user resolve manually) from other failures (no
+// remote, network, etc.).
+func Pull(dir, remote, branch string) error {
+	_, err := gitRun(dir, "pull", "--ff-only", remote, branch)
+	return err
+}
+
+// IsDivergedPull reports whether a Pull error is because the local and
+// remote branches have diverged (fast-forward not possible), as opposed to
+// some other failure.
+func IsDivergedPull(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "Not possible to fast-forward")
 }
 
 // FindWorktreeForBranch returns the path of an existing worktree that has

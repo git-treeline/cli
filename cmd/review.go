@@ -12,7 +12,6 @@ import (
 	"github.com/git-treeline/cli/internal/format"
 	"github.com/git-treeline/cli/internal/github"
 	"github.com/git-treeline/cli/internal/registry"
-	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/worktree"
 	"github.com/spf13/cobra"
 )
@@ -134,7 +133,7 @@ The PR may be given as a bare number or with a leading '#':
 			wtPath = filepath.Join(filepath.Dir(mainRepo), fmt.Sprintf("%s-pr-%d", projectName, prNumber))
 		}
 
-		if err := ensureGitignored(mainRepo, wtPath); err != nil {
+		if err := ensureGitignored(mainRepo, wtPath, os.Stdout); err != nil {
 			return err
 		}
 
@@ -142,7 +141,7 @@ The PR may be given as a bare number or with a leading '#':
 		// and treat the command as resumable rather than a dead end.
 		if existing := worktree.FindWorktreeForBranch(branch); existing != "" {
 			fmt.Printf("==> Branch '%s' already checked out at %s\n", branch, existing)
-			alloc, err := ensureWorktreeAllocation(existing, mainRepo, uc)
+			alloc, err := ensureWorktreeAllocation(existing, mainRepo, uc, os.Stdout)
 			if err != nil {
 				return cliErr(cmd, err)
 			}
@@ -174,11 +173,9 @@ The PR may be given as a bare number or with a leading '#':
 			return err
 		}
 
-		fmt.Println("==> Running setup...")
-		s := setup.New(wtPath, mainRepo, uc)
-		alloc, err := s.Run()
+		alloc, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stdout)
 		if err != nil {
-			return cliErr(cmd, errSetupFailed(err))
+			return err
 		}
 
 		fmt.Println()

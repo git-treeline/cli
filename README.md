@@ -851,6 +851,7 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl install` | | Set up git-treeline for this project and machine (config, hook, setup, optional HTTPS) |
 | `gtl init` | `--project` `--template-db` `--skip-agent-config` | Generate `.treeline.yml` (auto-detects framework, writes `AGENTS.md` section) |
 | `gtl new <branch>` | `--base` `--path` `--start` `--open` `--dry-run` `--force`/`-f` | Create worktree + allocate + setup in one step |
+| `gtl claim <branch>` | `--path` | Fetch a branch and ensure a worktree exists at its latest commit — adopts (never creates) the branch and fast-forwards; idempotent, prints only the worktree path to stdout |
 | `gtl review <PR#>` | `--path` `--start` `--open` | Check out a GitHub PR into a worktree with full setup (requires `gh`) |
 | `gtl switch <branch-or-PR#>` | `--setup` `--restart` | Switch worktree to a different branch or PR — fetches, checks out, refreshes env |
 | `gtl setup [PATH]` | `--main-repo` `--dry-run` | Allocate resources and configure a worktree (idempotent) |
