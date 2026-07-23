@@ -107,7 +107,7 @@ func ensureWorktreeAllocation(wtPath, mainRepo string, uc *config.UserConfig, pr
 	if alloc := reg.Find(wtPath); alloc != nil {
 		return alloc, nil
 	}
-	fmt.Fprintln(progress, style.Actionf("No allocation found — running setup..."))
+	_, _ = fmt.Fprintln(progress, style.Actionf("No allocation found — running setup..."))
 	s := setup.New(wtPath, mainRepo, uc)
 	s.Log = progress
 	if _, err := s.Run(); err != nil {
@@ -123,8 +123,8 @@ func ensureWorktreeAllocation(wtPath, mainRepo string, uc *config.UserConfig, pr
 // invisible to prune). Shared by 'gtl new' (both the new-branch and
 // existing-branch paths) and 'gtl claim' (its adopt path).
 func runSetupWithRollback(cmd *cobra.Command, wtPath, mainRepo string, uc *config.UserConfig, progress io.Writer) (*allocator.Allocation, error) {
-	fmt.Fprintln(progress, style.Actionf("Worktree created at %s", wtPath))
-	fmt.Fprintln(progress, style.Actionf("Running setup..."))
+	_, _ = fmt.Fprintln(progress, style.Actionf("Worktree created at %s", wtPath))
+	_, _ = fmt.Fprintln(progress, style.Actionf("Running setup..."))
 
 	s := setup.New(wtPath, mainRepo, uc)
 	s.Log = progress
@@ -135,7 +135,7 @@ func runSetupWithRollback(cmd *cobra.Command, wtPath, mainRepo string, uc *confi
 			fmt.Fprintln(os.Stderr, style.Warnf("Could not remove worktree after failed setup: %s", rmErr))
 			fmt.Fprintln(os.Stderr, style.Dimf("  Remove it manually: git worktree remove --force %s", wtPath))
 		} else {
-			fmt.Fprintln(progress, style.Dimf("Rolled back worktree %s after setup failure.", wtPath))
+			_, _ = fmt.Fprintln(progress, style.Dimf("Rolled back worktree %s after setup failure.", wtPath))
 		}
 		return nil, cliErr(cmd, errSetupFailed(err))
 	}
@@ -151,7 +151,7 @@ func ensureGitignored(mainRepo, wtPath string, progress io.Writer) error {
 		return err
 	}
 	if pattern != "" {
-		fmt.Fprintln(progress, style.Actionf("Added %s to .gitignore", pattern))
+		_, _ = fmt.Fprintln(progress, style.Actionf("Added %s to .gitignore", pattern))
 	}
 	return nil
 }
