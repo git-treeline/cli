@@ -66,7 +66,7 @@ func claimFixture(t *testing.T) (mainRepo, seed string) {
 	if err := os.MkdirAll(origin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	runGit(t, origin, "init", "--bare")
+	runGit(t, origin, "init", "--bare", "--initial-branch=main")
 
 	runGit(t, seed, "remote", "add", "origin", origin)
 	runGit(t, seed, "push", "origin", "main")

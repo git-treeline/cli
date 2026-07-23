@@ -658,7 +658,7 @@ func TestFetch_Success(t *testing.T) {
 
 	remoteDir := t.TempDir()
 	remoteDir, _ = filepath.EvalSymlinks(remoteDir)
-	run(t, remoteDir, "git", "init", "--bare")
+	run(t, remoteDir, "git", "init", "--bare", "--initial-branch=main")
 
 	run(t, repo, "git", "remote", "add", "origin", remoteDir)
 	run(t, repo, "git", "push", "origin", "main")
@@ -691,7 +691,7 @@ func TestFetch_NonexistentBranch(t *testing.T) {
 
 	remoteDir := t.TempDir()
 	remoteDir, _ = filepath.EvalSymlinks(remoteDir)
-	run(t, remoteDir, "git", "init", "--bare")
+	run(t, remoteDir, "git", "init", "--bare", "--initial-branch=main")
 
 	run(t, repo, "git", "remote", "add", "origin", remoteDir)
 	run(t, repo, "git", "push", "origin", "main")
@@ -755,7 +755,7 @@ func TestPull_FastForward(t *testing.T) {
 
 	remoteDir := t.TempDir()
 	remoteDir, _ = filepath.EvalSymlinks(remoteDir)
-	run(t, remoteDir, "git", "init", "--bare")
+	run(t, remoteDir, "git", "init", "--bare", "--initial-branch=main")
 	run(t, repo, "git", "remote", "add", "origin", remoteDir)
 	run(t, repo, "git", "push", "origin", "main")
 
@@ -782,7 +782,7 @@ func TestPull_AlreadyUpToDate(t *testing.T) {
 
 	remoteDir := t.TempDir()
 	remoteDir, _ = filepath.EvalSymlinks(remoteDir)
-	run(t, remoteDir, "git", "init", "--bare")
+	run(t, remoteDir, "git", "init", "--bare", "--initial-branch=main")
 	run(t, repo, "git", "remote", "add", "origin", remoteDir)
 	run(t, repo, "git", "push", "origin", "main")
 
@@ -796,7 +796,7 @@ func TestPull_Diverged(t *testing.T) {
 
 	remoteDir := t.TempDir()
 	remoteDir, _ = filepath.EvalSymlinks(remoteDir)
-	run(t, remoteDir, "git", "init", "--bare")
+	run(t, remoteDir, "git", "init", "--bare", "--initial-branch=main")
 	run(t, repo, "git", "remote", "add", "origin", remoteDir)
 	run(t, repo, "git", "push", "origin", "main")
 
