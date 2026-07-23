@@ -197,16 +197,26 @@ func (s *Supervisor) stopChildLocked() {
 
 	_ = syscall.Kill(-child.Process.Pid, syscall.SIGTERM)
 
+	exited := false
 	select {
 	case <-waitCh:
+		exited = true
 	case <-time.After(10 * time.Second):
 		s.Log("==> Process didn't exit in 10s, sending SIGKILL")
 		_ = syscall.Kill(-child.Process.Pid, syscall.SIGKILL)
 		select {
 		case <-waitCh:
+			exited = true
 		case <-time.After(5 * time.Second):
 			s.Log("==> Process did not exit after SIGKILL — proceeding")
 		}
+	}
+	// The wait goroutine only removes the sidecar on a self-exit (s.child ==
+	// cmd); on this path s.child is already nil, so the removal is ours. Skip
+	// it if the child never exited — the pgid is still needed for a later
+	// force-kill.
+	if exited {
+		_ = os.Remove(ChildPidPath(s.SocketPath))
 	}
 
 	s.mu.Lock()
