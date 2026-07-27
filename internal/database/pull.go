@@ -217,7 +217,7 @@ func (p *Puller) runStage(stage string, env []string, name string, args ...strin
 		}
 		return nil
 	}
-	cmd := exec.Command(name, args...)
+	cmd := exec.Command(pgTool(name), args...)
 	if env != nil {
 		cmd.Env = append(os.Environ(), env...)
 	}
@@ -239,7 +239,7 @@ func (p *Puller) outputStage(stage, name string, args ...string) ([]byte, error)
 		}
 		return out, nil
 	}
-	out, err := exec.Command(name, args...).CombinedOutput()
+	out, err := exec.Command(pgTool(name), args...).CombinedOutput()
 	if err != nil {
 		return nil, &ExecError{Stage: stage, Output: strings.TrimSpace(string(out)), Err: err}
 	}
