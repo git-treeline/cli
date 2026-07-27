@@ -35,7 +35,7 @@ func (pg *PostgreSQL) run(name string, args ...string) error {
 	if pg.execRun != nil {
 		return pg.execRun(name, all...)
 	}
-	cmd := exec.Command(name, all...)
+	cmd := exec.Command(pgTool(name), all...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -46,7 +46,7 @@ func (pg *PostgreSQL) runSilent(name string, args ...string) error {
 	if pg.execRun != nil {
 		return pg.execRun(name, all...)
 	}
-	return exec.Command(name, all...).Run()
+	return exec.Command(pgTool(name), all...).Run()
 }
 
 func (pg *PostgreSQL) output(name string, args ...string) ([]byte, error) {
@@ -54,7 +54,7 @@ func (pg *PostgreSQL) output(name string, args ...string) ([]byte, error) {
 	if pg.execOutput != nil {
 		return pg.execOutput(name, all...)
 	}
-	return exec.Command(name, all...).Output()
+	return exec.Command(pgTool(name), all...).Output()
 }
 
 func (pg *PostgreSQL) Exists(name string) (bool, error) {
