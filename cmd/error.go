@@ -16,11 +16,14 @@ type CliError struct {
 	Message string
 	Hint    string
 	DocsURL string
+	Cause   error
 }
 
 func (e *CliError) Error() string {
 	return e.Message
 }
+
+func (e *CliError) Unwrap() error { return e.Cause }
 
 // cliErr marks the command to suppress usage output and returns the error.
 // Use this for domain/state errors where the user invoked the command correctly
@@ -113,6 +116,7 @@ func errSetupFailed(inner error) error {
 	return &CliError{
 		Message: fmt.Sprintf("Setup failed: %s", inner),
 		Hint:    "Fix the issue above and re-run 'gtl setup'.",
+		Cause:   inner,
 	}
 }
 

@@ -4,6 +4,7 @@
 package setup
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -26,6 +27,18 @@ import (
 	"github.com/git-treeline/cli/internal/style"
 	"github.com/git-treeline/cli/internal/worktree"
 )
+
+// SetupCommandError is returned by Run when the worktree and allocation
+// are intact but a setup command (commands.setup) failed. The caller
+// should keep the worktree and allocation — only the user's build
+// commands failed, not the provisioning infrastructure.
+type SetupCommandError struct {
+	Alloc *allocator.Allocation
+	Err   error
+}
+
+func (e *SetupCommandError) Error() string { return e.Err.Error() }
+func (e *SetupCommandError) Unwrap() error { return e.Err }
 
 // Options controls setup behavior. DryRun prints what would happen without
 // making changes. RefreshOnly re-applies environment files without running
@@ -133,6 +146,13 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	// Both main and non-main allocations are now persisted atomically inside the
 	// allocator's registry transaction, so there is nothing to write here.
 	if err := s.runPostAllocation(alloc, redisURL); err != nil {
+		var sce *SetupCommandError
+		if errors.As(err, &sce) {
+			// Setup commands failed but allocation + worktree are intact.
+			// Populate the alloc reference for the caller and skip release.
+			sce.Alloc = alloc
+			return nil, sce
+		}
 		if !alloc.Reused {
 			_, _ = s.Registry.Release(s.WorktreePath)
 			s.log("Rolled back allocation due to error")
@@ -194,7 +214,7 @@ func (s *Setup) runPostAllocation(alloc *allocator.Allocation, redisURL string) 
 	}
 
 	if err := s.runSetupCommands(); err != nil {
-		return err
+		return &SetupCommandError{Err: err}
 	}
 
 	s.configureEditor(alloc)

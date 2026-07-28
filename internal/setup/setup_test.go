@@ -3,6 +3,7 @@ package setup
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -430,10 +431,51 @@ commands:
 		t.Fatal("expected error from failing setup command")
 	}
 
-	// Registry should be empty after rollback
+	// Should be a SetupCommandError — worktree and allocation are intact.
+	var sce *SetupCommandError
+	if !errors.As(err, &sce) {
+		t.Errorf("expected *SetupCommandError, got %T: %v", err, err)
+	}
+
+	// Registry should NOT be empty — allocation is kept so user can re-run gtl setup.
+	allocs := s.Registry.Allocations()
+	if len(allocs) != 1 {
+		t.Errorf("expected 1 registry entry (allocation kept), got %d entries", len(allocs))
+	}
+}
+
+func TestRun_RollbackOnAllocationError(t *testing.T) {
+	s, mainRepo, _ := testSetup(t, `
+project: test
+env_file:
+  target: .env.local
+  source: .env.local
+database:
+  adapter: badadapter
+  template: db/development.db
+  pattern: "db/{worktree}.db"
+env:
+  PORT: "{port}"
+`)
+	_ = os.WriteFile(filepath.Join(mainRepo, ".env.local"), []byte(""), 0o644)
+	_ = os.MkdirAll(filepath.Join(mainRepo, "db"), 0o755)
+	_ = os.WriteFile(filepath.Join(mainRepo, "db", "development.db"), []byte("data"), 0o644)
+
+	_, err := s.Run()
+	if err == nil {
+		t.Fatal("expected error from bad database adapter")
+	}
+
+	// Should NOT be a SetupCommandError — it's a provisioning failure, not a build failure.
+	var sce *SetupCommandError
+	if errors.As(err, &sce) {
+		t.Errorf("expected plain error (not SetupCommandError) for allocation failure, got SetupCommandError")
+	}
+
+	// Registry should be empty after rollback.
 	allocs := s.Registry.Allocations()
 	if len(allocs) != 0 {
-		t.Errorf("expected empty registry after rollback, got %d entries", len(allocs))
+		t.Errorf("expected empty registry after allocation error rollback, got %d entries", len(allocs))
 	}
 }
 
