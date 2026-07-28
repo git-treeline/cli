@@ -16,7 +16,7 @@ var claimNoSetup bool
 
 func init() {
 	claimCmd.Flags().StringVar(&claimPath, "path", "", "Custom worktree path (default: ../<project>-<branch>)")
-	claimCmd.Flags().BoolVar(&claimNoSetup, "no-setup", false, "Create the worktree without running setup commands")
+	claimCmd.Flags().BoolVar(&claimNoSetup, "no-setup", false, "Create the worktree only — skip allocation, env, and setup commands (run 'gtl setup' later)")
 	claimCmd.ValidArgsFunction = completeBranches
 	rootCmd.AddCommand(claimCmd)
 }

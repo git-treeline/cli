@@ -30,7 +30,9 @@ func init() {
 	newCmd.Flags().BoolVar(&newOpen, "open", false, "Open the worktree in the browser after setup")
 	newCmd.Flags().BoolVar(&newDryRun, "dry-run", false, "Print what would happen without making changes")
 	newCmd.Flags().BoolVarP(&newForce, "force", "f", false, "Skip confirmation when creating from inside a worktree")
-	newCmd.Flags().BoolVar(&newNoSetup, "no-setup", false, "Create the worktree without running setup commands")
+	newCmd.Flags().BoolVar(&newNoSetup, "no-setup", false, "Create the worktree only — skip allocation, env, and setup commands (run 'gtl setup' later)")
+	newCmd.MarkFlagsMutuallyExclusive("no-setup", "start")
+	newCmd.MarkFlagsMutuallyExclusive("no-setup", "open")
 	newCmd.ValidArgsFunction = completeBranches
 	rootCmd.AddCommand(newCmd)
 }

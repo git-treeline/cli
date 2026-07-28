@@ -42,7 +42,9 @@ func init() {
 	reviewCmd.Flags().StringVar(&reviewPath, "path", "", "Custom worktree path (default: ../<project>-pr-<number>)")
 	reviewCmd.Flags().BoolVar(&reviewStart, "start", false, "Run commands.start after setup")
 	reviewCmd.Flags().BoolVar(&reviewOpen, "open", false, "Open the worktree in the browser after setup")
-	reviewCmd.Flags().BoolVar(&reviewNoSetup, "no-setup", false, "Create the worktree without running setup commands")
+	reviewCmd.Flags().BoolVar(&reviewNoSetup, "no-setup", false, "Create the worktree only — skip allocation, env, and setup commands (run 'gtl setup' later)")
+	reviewCmd.MarkFlagsMutuallyExclusive("no-setup", "start")
+	reviewCmd.MarkFlagsMutuallyExclusive("no-setup", "open")
 	reviewCmd.ValidArgsFunction = completePRs
 	rootCmd.AddCommand(reviewCmd)
 }
