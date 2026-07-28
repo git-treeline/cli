@@ -195,7 +195,7 @@ func FindWorktreeForBranch(branch string) string {
 		if strings.HasPrefix(line, "worktree ") {
 			currentPath = strings.TrimPrefix(line, "worktree ")
 		}
-		if strings.HasPrefix(line, "branch refs/heads/"+branch) {
+		if line == "branch refs/heads/"+branch {
 			return currentPath
 		}
 	}

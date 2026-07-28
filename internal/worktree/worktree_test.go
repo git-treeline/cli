@@ -419,6 +419,39 @@ func TestFindWorktreeForBranch(t *testing.T) {
 	}
 }
 
+// A branch name that is a prefix of another checked-out branch must not be
+// misreported as checked out. The porcelain line is `branch refs/heads/<name>`,
+// so a prefix match would let "wt-sibling" resolve to the "wt-sibling-x"
+// worktree — the exact bug the claim/new/review resume path relies on avoiding.
+func TestFindWorktreeForBranch_PrefixSibling(t *testing.T) {
+	repo := initTestRepo(t)
+	run(t, repo, "git", "branch", "wt-sibling-x")
+
+	wtDir := t.TempDir()
+	wtDir, _ = filepath.EvalSymlinks(wtDir)
+	wtPath := filepath.Join(wtDir, "wt-sibling-x")
+
+	run(t, repo, "git", "worktree", "add", wtPath, "wt-sibling-x")
+	defer func() {
+		cmd := exec.Command("git", "worktree", "remove", "--force", wtPath)
+		cmd.Dir = repo
+		_ = cmd.Run()
+	}()
+
+	orig, _ := os.Getwd()
+	_ = os.Chdir(repo)
+	defer func() { _ = os.Chdir(orig) }()
+
+	// "wt-sibling" is a prefix of "wt-sibling-x" but is not checked out.
+	if found := FindWorktreeForBranch("wt-sibling"); found != "" {
+		t.Errorf("prefix of a checked-out branch must not match, got %s", found)
+	}
+	// The full name still resolves.
+	if found := FindWorktreeForBranch("wt-sibling-x"); found != wtPath {
+		t.Errorf("expected %s, got %s", wtPath, found)
+	}
+}
+
 func TestWorktreeBranches(t *testing.T) {
 	repo := initTestRepo(t)
 	run(t, repo, "git", "branch", "branch-a")
