@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -61,11 +62,19 @@ updated template.`,
 		}
 
 		fmt.Printf("==> Pulling %s in %s\n", mergeTarget, mainRepo)
-		pull := exec.Command("git", "pull", "origin", mergeTarget)
+		pull := exec.Command("git", "pull", "--ff-only", "origin", mergeTarget)
 		pull.Dir = mainRepo
 		pull.Stdout = os.Stdout
-		pull.Stderr = os.Stderr
+		var pullStderr strings.Builder
+		pull.Stderr = io.MultiWriter(os.Stderr, &pullStderr)
 		if err := pull.Run(); err != nil {
+			if strings.Contains(pullStderr.String(), "fast-forward") ||
+				strings.Contains(pullStderr.String(), "divergent") {
+				return cliErr(cmd, &CliError{
+					Message: fmt.Sprintf("Branch '%s' has diverged from origin/%s and cannot be fast-forwarded.", mergeTarget, mergeTarget),
+					Hint:    fmt.Sprintf("If origin is the source of truth, reset with:\n  cd %s && git reset --hard origin/%s", mainRepo, mergeTarget),
+				})
+			}
 			return fmt.Errorf("git pull: %w", err)
 		}
 
