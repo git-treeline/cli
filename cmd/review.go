@@ -12,6 +12,7 @@ import (
 	"github.com/git-treeline/cli/internal/format"
 	"github.com/git-treeline/cli/internal/github"
 	"github.com/git-treeline/cli/internal/registry"
+	"github.com/git-treeline/cli/internal/style"
 	"github.com/git-treeline/cli/internal/worktree"
 	"github.com/spf13/cobra"
 )
@@ -19,6 +20,7 @@ import (
 var reviewPath string
 var reviewStart bool
 var reviewOpen bool
+var reviewNoSetup bool
 
 // parsePRNumber parses a PR number argument, accepting an optional leading '#'
 // (e.g. both "473" and "#473") and surrounding whitespace (e.g. a "#473 "
@@ -40,6 +42,7 @@ func init() {
 	reviewCmd.Flags().StringVar(&reviewPath, "path", "", "Custom worktree path (default: ../<project>-pr-<number>)")
 	reviewCmd.Flags().BoolVar(&reviewStart, "start", false, "Run commands.start after setup")
 	reviewCmd.Flags().BoolVar(&reviewOpen, "open", false, "Open the worktree in the browser after setup")
+	reviewCmd.Flags().BoolVar(&reviewNoSetup, "no-setup", false, "Create the worktree without running setup commands")
 	reviewCmd.ValidArgsFunction = completePRs
 	rootCmd.AddCommand(reviewCmd)
 }
@@ -171,6 +174,16 @@ The PR may be given as a bare number or with a leading '#':
 		fmt.Printf("==> Creating worktree at %s\n", wtPath)
 		if err := worktree.Create(wtPath, branch, false, ""); err != nil {
 			return err
+		}
+
+		if reviewNoSetup {
+			fmt.Println()
+			fmt.Printf("PR #%d worktree created:\n", prNumber)
+			fmt.Printf("  Branch:   %s\n", branch)
+			fmt.Printf("  Path:     %s\n", wtPath)
+			fmt.Println(style.Dimf("Run 'gtl setup' to allocate ports and install dependencies."))
+			fmt.Printf("\n  cd %s\n", wtPath)
+			return nil
 		}
 
 		alloc, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stdout)
