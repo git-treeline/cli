@@ -21,6 +21,7 @@ var newStart bool
 var newOpen bool
 var newDryRun bool
 var newForce bool
+var newNoSetup bool
 
 func init() {
 	newCmd.Flags().StringVar(&newBase, "base", "", "Base branch for the new worktree (default: current branch)")
@@ -29,6 +30,9 @@ func init() {
 	newCmd.Flags().BoolVar(&newOpen, "open", false, "Open the worktree in the browser after setup")
 	newCmd.Flags().BoolVar(&newDryRun, "dry-run", false, "Print what would happen without making changes")
 	newCmd.Flags().BoolVarP(&newForce, "force", "f", false, "Skip confirmation when creating from inside a worktree")
+	newCmd.Flags().BoolVar(&newNoSetup, "no-setup", false, "Create the worktree only — skip allocation, env, and setup commands (run 'gtl setup' later)")
+	newCmd.MarkFlagsMutuallyExclusive("no-setup", "start")
+	newCmd.MarkFlagsMutuallyExclusive("no-setup", "open")
 	newCmd.ValidArgsFunction = completeBranches
 	rootCmd.AddCommand(newCmd)
 }
@@ -135,9 +139,13 @@ Otherwise a new branch is created from --base (or the current branch).`,
 				fmt.Printf("[dry-run] Would create new branch '%s' from %s\n", branch, resolveBase(pc))
 			}
 			fmt.Printf("[dry-run] Worktree path: %s\n", wtPath)
-			fmt.Println("[dry-run] Would run: gtl setup")
-			if newStart && pc.StartCommand() != "" {
-				fmt.Printf("[dry-run] Would run: %s\n", pc.StartCommand())
+			if newNoSetup {
+				fmt.Println("[dry-run] --no-setup: would skip gtl setup")
+			} else {
+				fmt.Println("[dry-run] Would run: gtl setup")
+				if newStart && pc.StartCommand() != "" {
+					fmt.Printf("[dry-run] Would run: %s\n", pc.StartCommand())
+				}
 			}
 			return nil
 		}
@@ -154,6 +162,13 @@ Otherwise a new branch is created from --base (or the current branch).`,
 			if err := worktree.Create(wtPath, branch, true, base); err != nil {
 				return err
 			}
+		}
+
+		if newNoSetup {
+			fmt.Println(style.Actionf("Worktree created at %s", wtPath))
+			fmt.Println(style.Dimf("Run 'gtl setup' to allocate ports and install dependencies."))
+			fmt.Printf("\n  cd %s\n", wtPath)
+			return nil
 		}
 
 		alloc, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stdout)

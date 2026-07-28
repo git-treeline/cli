@@ -12,9 +12,11 @@ import (
 )
 
 var claimPath string
+var claimNoSetup bool
 
 func init() {
 	claimCmd.Flags().StringVar(&claimPath, "path", "", "Custom worktree path (default: ../<project>-<branch>)")
+	claimCmd.Flags().BoolVar(&claimNoSetup, "no-setup", false, "Create the worktree only — skip allocation, env, and setup commands (run 'gtl setup' later)")
 	claimCmd.ValidArgsFunction = completeBranches
 	rootCmd.AddCommand(claimCmd)
 }
@@ -85,7 +87,7 @@ safe to capture, e.g.: wt=$(gtl claim agent/some-branch)`,
 			return cliErr(cmd, err)
 		}
 
-		if pc.Exists() {
+		if pc.Exists() && !claimNoSetup {
 			// Same adopt path 'gtl new' uses for an existing branch: run setup,
 			// rolling the worktree back if it fails.
 			if _, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stderr); err != nil {
@@ -93,6 +95,9 @@ safe to capture, e.g.: wt=$(gtl claim agent/some-branch)`,
 			}
 		} else {
 			fmt.Fprintln(os.Stderr, style.Actionf("Worktree created at %s", wtPath))
+			if claimNoSetup && pc.Exists() {
+				fmt.Fprintln(os.Stderr, style.Dimf("Run 'gtl setup' to allocate ports and install dependencies."))
+			}
 		}
 
 		warnOnClaimPullFailure(branch, wtPath, worktree.Pull(wtPath, "origin", branch))
