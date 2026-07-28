@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/git-treeline/cli/internal/platform"
 	"github.com/git-treeline/cli/internal/service"
+	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/style"
 	"github.com/spf13/cobra"
 )
@@ -85,6 +87,10 @@ func rootCommandName(cmd *cobra.Command) string {
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		formatCliError(err)
+		var sce *setup.SetupCommandError
+		if errors.As(err, &sce) {
+			os.Exit(2)
+		}
 		os.Exit(1)
 	}
 }

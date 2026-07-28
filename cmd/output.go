@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -131,6 +132,15 @@ func runSetupWithRollback(cmd *cobra.Command, wtPath, mainRepo string, uc *confi
 	s.Options.DryRun = false
 	alloc, err := s.Run()
 	if err != nil {
+		var sce *setup.SetupCommandError
+		if errors.As(err, &sce) {
+			// Setup commands failed — worktree and allocation are intact.
+			// Don't remove the worktree; user can fix env and re-run gtl setup.
+			_, _ = fmt.Fprintln(progress, style.Warnf("Setup commands failed — worktree kept at %s", wtPath))
+			_, _ = fmt.Fprintln(progress, style.Dimf("Fix the issue above and re-run 'gtl setup'."))
+			return nil, cliErr(cmd, errSetupFailed(err))
+		}
+		// Fatal setup error (allocation, config, env file, DB) — roll back.
 		if rmErr := worktree.Remove(wtPath, true); rmErr != nil {
 			fmt.Fprintln(os.Stderr, style.Warnf("Could not remove worktree after failed setup: %s", rmErr))
 			fmt.Fprintln(os.Stderr, style.Dimf("  Remove it manually: git worktree remove --force %s", wtPath))
