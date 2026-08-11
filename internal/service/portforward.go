@@ -97,6 +97,12 @@ type PortForwardStatus struct {
 	// require sudo — if our calls fail with permission errors, this is
 	// false, and LoadedInKernel should not be trusted as authoritative.
 	KernelStateKnown bool
+	// ConfReverted (macOS only) is true when the anchor file exists but
+	// pf.conf no longer references it — the signature of a macOS update
+	// reverting /etc/pf.conf to the stock file. Distinguishes "was
+	// installed, then wiped by Apple" (repair with 'gtl serve reload-pf')
+	// from "never installed" (run 'gtl serve install').
+	ConfReverted bool
 	// Detail is a one-line human-readable summary, or "" when everything is
 	// healthy.
 	Detail string
@@ -162,7 +168,15 @@ func checkPortForwardDarwin(routerPort int) PortForwardStatus {
 		}
 	}
 
+	if !st.ConfiguredOnDisk {
+		if _, err := os.Stat(pfAnchorPath()); err == nil {
+			st.ConfReverted = true
+		}
+	}
+
 	switch {
+	case st.ConfReverted:
+		st.Detail = "pf.conf lost the treeline lines (macOS updates revert this file) — run 'gtl serve reload-pf' to repair"
 	case !st.ConfiguredOnDisk:
 		st.Detail = "not configured (run 'gtl serve install')"
 	case st.PfStateKnown && !st.PfEnabled:
@@ -358,18 +372,18 @@ func installDarwinPortForward(routerPort int) error {
 		anchorExists = false
 	}
 	pfConfigured := strings.Contains(string(pfConf), pfMarker()) && anchorExists
-	daemonInstalled := IsPfReloadDaemonInstalled()
 
-	if pfConfigured && daemonInstalled {
+	if pfConfigured && IsPfReloadDaemonCurrent() {
 		fmt.Println("  Port forwarding already configured (443 → router).")
 		return reloadPf()
 	}
 
-	if pfConfigured && !daemonInstalled {
-		// Rules are on disk but the boot-time reloader isn't — typical for
-		// installs that predate the daemon, or where a previous install
-		// silently lost the second sudo prompt. Reload kernel state and
-		// drop the daemon in one sudo session.
+	if pfConfigured {
+		// Rules are on disk but the boot-time reloader is missing or
+		// outdated — typical for installs that predate the daemon (or its
+		// self-healing script), or where a previous install silently lost
+		// the second sudo prompt. Reload kernel state and (re)install the
+		// daemon in one sudo session.
 		fmt.Println("  Port forwarding already configured (443 → router); installing boot-time reloader.")
 		return reloadPfAndInstallDaemon()
 	}
@@ -401,22 +415,18 @@ func installDarwinPortForward(routerPort int) error {
 	}
 	_ = tmpPfConf.Close()
 
-	tmpPlist, err := os.CreateTemp("", "treeline-pfreload-*.plist")
+	tmpPlist, tmpScript, cleanupDaemonTmp, err := writePfDaemonTempFiles()
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.Remove(tmpPlist.Name()) }()
-	if _, err := tmpPlist.WriteString(pfReloadDaemonPlistBody()); err != nil {
-		return err
-	}
-	_ = tmpPlist.Close()
+	defer cleanupDaemonTmp()
 
 	// One sudo session for everything that requires root: validate the new
 	// pf.conf, swap it in, apply the rules, and install the boot-time
 	// reloader. Bundling these together means a single password prompt and
 	// guarantees the daemon either lands on disk or the install fails
 	// loudly — no silent half-installs.
-	script := darwinPortForwardScript(tmpAnchor.Name(), tmpPfConf.Name(), tmpPlist.Name())
+	script := darwinPortForwardScript(tmpAnchor.Name(), tmpPfConf.Name(), tmpPlist, tmpScript)
 
 	cmd := exec.Command("sudo", "-p",
 		"\nEnter your password (2 of 2): ",
@@ -439,19 +449,13 @@ func installDarwinPortForward(routerPort int) error {
 // from a previous install where the daemon's separate sudo prompt
 // silently failed.
 func reloadPfAndInstallDaemon() error {
-	tmpPlist, err := os.CreateTemp("", "treeline-pfreload-*.plist")
+	tmpPlist, tmpScript, cleanup, err := writePfDaemonTempFiles()
 	if err != nil {
-		return fmt.Errorf("creating temp plist: %w", err)
-	}
-	defer func() { _ = os.Remove(tmpPlist.Name()) }()
-	if _, err := tmpPlist.WriteString(pfReloadDaemonPlistBody()); err != nil {
 		return err
 	}
-	if err := tmpPlist.Close(); err != nil {
-		return err
-	}
+	defer cleanup()
 
-	script := reloadPfAndInstallDaemonScript(tmpPlist.Name())
+	script := reloadPfAndInstallDaemonScript(tmpPlist, tmpScript)
 	cmd := exec.Command("sudo", "-p",
 		"\nEnter your password to reload port forwarding and install the boot-time reloader: ",
 		"sh", "-c", script)
@@ -477,7 +481,7 @@ func reloadPfAndInstallDaemon() error {
 //     failed `launchctl bootstrap` propagates as the script's exit code.
 //     This is the whole point of the bundling: pf rules and daemon
 //     land together or the install fails loudly.
-func darwinPortForwardScript(tmpAnchorPath, tmpPfConfPath, tmpPlistPath string) string {
+func darwinPortForwardScript(tmpAnchorPath, tmpPfConfPath, tmpPlistPath, tmpScriptPath string) string {
 	return fmt.Sprintf(
 		"/bin/mkdir -p /etc/pf.anchors && /bin/cp '%s' '%s' && /sbin/pfctl -n -f '%s' 2>&1 || exit 1; "+
 			"/bin/cp '%s' '%s' && /bin/cp '%s' '%s' && { /sbin/pfctl -ef '%s' 2>/dev/null; true; } && %s",
@@ -486,7 +490,7 @@ func darwinPortForwardScript(tmpAnchorPath, tmpPfConfPath, tmpPlistPath string) 
 		pfConfPath, pfBackupPath,
 		tmpPfConfPath, pfConfPath,
 		pfConfPath,
-		pfReloadDaemonInstallFragment(tmpPlistPath),
+		pfReloadDaemonInstallFragment(tmpPlistPath, tmpScriptPath),
 	)
 }
 
@@ -494,30 +498,41 @@ func darwinPortForwardScript(tmpAnchorPath, tmpPfConfPath, tmpPlistPath string) 
 // reloadPfAndInstallDaemon. `pfctl -f` failure must propagate (a broken
 // pf.conf means the daemon would fail on every boot), so only `pfctl -e`
 // is masked. The daemon fragment is the final exit-code gate.
-func reloadPfAndInstallDaemonScript(tmpPlistPath string) string {
+func reloadPfAndInstallDaemonScript(tmpPlistPath, tmpScriptPath string) string {
 	return fmt.Sprintf(
 		"/sbin/pfctl -f '%s' 2>/dev/null && { /sbin/pfctl -e 2>/dev/null; true; } && %s",
 		pfConfPath,
-		pfReloadDaemonInstallFragment(tmpPlistPath),
+		pfReloadDaemonInstallFragment(tmpPlistPath, tmpScriptPath),
 	)
 }
 
-// reloadPf ensures the kernel's pf rules match /etc/pf.conf. The reload
-// uses -f (load rules) separately from -e (enable pf) because pfctl
-// returns exit 1 from -e when pf is already running.
+// reloadPf ensures the kernel's pf rules match /etc/pf.conf — including
+// repairing pf.conf itself when a macOS update reverted it to the stock
+// file and stripped our lines. It runs the same repair script the boot
+// daemon uses (rendered to a temp file), so `gtl serve reload-pf` fixes
+// every state the daemon can fix: missing lines, unloaded ruleset,
+// disabled pf.
 func reloadPf() error {
-	script := fmt.Sprintf(
-		"/sbin/pfctl -f '%s' 2>/dev/null && { /sbin/pfctl -e 2>/dev/null; true; }",
-		pfConfPath,
-	)
+	tmp, err := os.CreateTemp("", "treeline-pf-ensure-*.sh")
+	if err != nil {
+		return fmt.Errorf("creating temp pf-ensure script: %w", err)
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.WriteString(pfEnsureScriptBody()); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
 	cmd := exec.Command("sudo", "-p",
 		"\nEnter your password to reload port forwarding: ",
-		"sh", "-c", script)
+		"sh", tmp.Name())
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("pfctl reload failed: %w", err)
+		return fmt.Errorf("pf reload/repair failed: %w", err)
 	}
 	return nil
 }

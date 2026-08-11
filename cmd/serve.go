@@ -112,6 +112,14 @@ should not be an error).`,
 				})
 			}
 			fmt.Println(style.Dimf("pf rules reloaded."))
+		} else if runtime.GOOS == "darwin" {
+			// A restart is the first thing users reach for when clean URLs
+			// stop working — but it cannot fix a pf.conf that a macOS
+			// update reverted. Surface that state instead of reporting an
+			// all-clear that leaves port 443 dead.
+			if st := service.CheckPortForward(routerPort); st.ConfReverted {
+				fmt.Println(style.Warnf("Port forwarding is broken: %s", st.Detail))
+			}
 		}
 		return nil
 	},
@@ -430,6 +438,8 @@ func projectAliases(reg *registry.Registry) proxy.AliasSource {
 // failures as "disabled/missing" is the bug this helper exists to avoid.
 func formatPortForwardStatus(st service.PortForwardStatus, routerPort int) string {
 	switch {
+	case st.ConfReverted:
+		return "Port forwarding: ⚠ pf.conf lost the treeline lines (macOS updates revert this file) — run 'gtl serve reload-pf' to repair"
 	case !st.ConfiguredOnDisk:
 		return "Port forwarding: not configured"
 	case st.PfStateKnown && !st.PfEnabled:
@@ -460,9 +470,10 @@ var serveReloadPFCmd = &cobra.Command{
 	Use:   "reload-pf",
 	Short: "Reload port-forwarding rules into the running kernel",
 	Long: `Re-applies the port-forwarding rules from /etc/pf.conf into pf's running
-ruleset. Useful after a reboot or network state change that left pf.conf on
-disk but cleared the kernel ruleset (a common cause of "port 443 not
-reachable" with the router otherwise healthy).
+ruleset, repairing pf.conf first if it no longer references the treeline
+anchor (macOS updates revert /etc/pf.conf to the stock file, which silently
+removes our lines). Useful whenever port 443 is not reachable while the
+router is otherwise healthy.
 
 Requires sudo on macOS.`,
 	RunE: func(cmd *cobra.Command, args []string) error {

@@ -103,6 +103,7 @@ func TestDarwinPortForwardScript(t *testing.T) {
 		"/tmp/treeline-anchor-xyz",
 		"/tmp/treeline-pfconf-xyz",
 		"/tmp/treeline-pfreload-xyz.plist",
+		"/tmp/treeline-pf-ensure-xyz.sh",
 	)
 
 	// Invariant 1: dry-run validation gates the live pf.conf swap. The
@@ -123,7 +124,8 @@ func TestDarwinPortForwardScript(t *testing.T) {
 	// `&&`-joined at the tail so its exit code is the script's exit code.
 	// A `;` here would silently mask daemon-install failures and reopen
 	// the issue #51 bug.
-	daemonFrag := pfReloadDaemonInstallFragment("/tmp/treeline-pfreload-xyz.plist")
+	daemonFrag := pfReloadDaemonInstallFragment(
+		"/tmp/treeline-pfreload-xyz.plist", "/tmp/treeline-pf-ensure-xyz.sh")
 	if !strings.HasSuffix(strings.TrimSpace(script), daemonFrag) {
 		t.Errorf("daemon fragment must be the final segment so its exit code drives the script\nscript: %s", script)
 	}
@@ -133,7 +135,8 @@ func TestDarwinPortForwardScript(t *testing.T) {
 }
 
 func TestReloadPfAndInstallDaemonScript(t *testing.T) {
-	script := reloadPfAndInstallDaemonScript("/tmp/treeline-pfreload-xyz.plist")
+	script := reloadPfAndInstallDaemonScript(
+		"/tmp/treeline-pfreload-xyz.plist", "/tmp/treeline-pf-ensure-xyz.sh")
 
 	// `pfctl -f` (load) failure MUST propagate — a broken pf.conf means
 	// the daemon would re-apply broken rules every boot. Only `pfctl -e`
@@ -146,7 +149,8 @@ func TestReloadPfAndInstallDaemonScript(t *testing.T) {
 	}
 
 	// Daemon fragment is the exit gate.
-	daemonFrag := pfReloadDaemonInstallFragment("/tmp/treeline-pfreload-xyz.plist")
+	daemonFrag := pfReloadDaemonInstallFragment(
+		"/tmp/treeline-pfreload-xyz.plist", "/tmp/treeline-pf-ensure-xyz.sh")
 	if !strings.HasSuffix(strings.TrimSpace(script), daemonFrag) {
 		t.Errorf("daemon fragment must be the final segment\nscript: %s", script)
 	}

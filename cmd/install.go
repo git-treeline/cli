@@ -317,7 +317,7 @@ func routerInstallIssues() []string {
 		proxy.IsCAInstalled(),
 		service.IsRunning(),
 		daemonRequired,
-		service.IsPfReloadDaemonInstalled(),
+		service.IsPfReloadDaemonInstalled() && service.IsPfReloadDaemonCurrent(),
 	)
 }
 
