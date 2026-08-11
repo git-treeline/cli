@@ -152,7 +152,6 @@ func (r *Router) Run() error {
 			GetCertificate: cm.GetCertificate,
 			MinVersion:     tls.VersionTLS12,
 		}
-		ln = tls.NewListener(ln, server.TLSConfig)
 		scheme = "https"
 	}
 
@@ -174,6 +173,10 @@ func (r *Router) Run() error {
 
 	errCh := make(chan error, 1)
 	go func() {
+		if r.useTLS {
+			errCh <- server.ServeTLS(ln, "", "")
+			return
+		}
 		errCh <- server.Serve(ln)
 	}()
 

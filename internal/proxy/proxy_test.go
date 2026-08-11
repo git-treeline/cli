@@ -109,7 +109,8 @@ func TestProxyTLSTermination(t *testing.T) {
 
 	client := &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+			TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+			ForceAttemptHTTP2: true,
 		},
 	}
 	resp, err := client.Get(fmt.Sprintf("https://localhost:%d/secure", listenPort))
@@ -121,6 +122,9 @@ func TestProxyTLSTermination(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != "ok" {
 		t.Errorf("expected 'ok', got %q", string(body))
+	}
+	if resp.ProtoMajor != 2 {
+		t.Errorf("expected HTTP/2, got %s", resp.Proto)
 	}
 }
 

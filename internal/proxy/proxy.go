@@ -69,7 +69,6 @@ func Run(opts Options) error {
 			Certificates: []tls.Certificate{*cert},
 			MinVersion:   tls.VersionTLS12,
 		}
-		ln = tls.NewListener(ln, server.TLSConfig)
 		scheme = "https"
 	}
 
@@ -78,6 +77,10 @@ func Run(opts Options) error {
 
 	errCh := make(chan error, 1)
 	go func() {
+		if opts.TLS {
+			errCh <- server.ServeTLS(ln, "", "")
+			return
+		}
 		errCh <- server.Serve(ln)
 	}()
 
