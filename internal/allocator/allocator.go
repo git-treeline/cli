@@ -98,6 +98,7 @@ func (a *Allocation) ToInterpolationMap() interpolation.Allocation {
 		"ports":         a.Ports,
 		"database":      a.Database,
 		"worktree_name": a.WorktreeName,
+		"branch":        a.Branch,
 	}
 	if a.RedisDB > 0 {
 		m["redis_db"] = a.RedisDB

@@ -792,6 +792,7 @@ func TestToInterpolationMap_Baseline(t *testing.T) {
 		Ports:        []int{3010, 3011},
 		Database:     "mydb_branch",
 		WorktreeName: "branch",
+		Branch:       "feature/router-url",
 	}
 	m := alloc.ToInterpolationMap()
 	if m["port"] != 3010 {
@@ -802,6 +803,9 @@ func TestToInterpolationMap_Baseline(t *testing.T) {
 	}
 	if m["worktree_name"] != "branch" {
 		t.Errorf("expected worktree_name=branch, got %v", m["worktree_name"])
+	}
+	if m["branch"] != "feature/router-url" {
+		t.Errorf("expected branch=feature/router-url, got %v", m["branch"])
 	}
 	if m["port_1"] != 3010 {
 		t.Errorf("expected port_1=3010, got %v", m["port_1"])
