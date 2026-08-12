@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"crypto/sha1"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -912,5 +913,67 @@ func TestBuildTunnelURL(t *testing.T) {
 				t.Errorf("BuildTunnelURL() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestRouterTLSNegotiatesHTTP2 drives Run() with TLS enabled end to end:
+// TLS termination via the CertManager, HTTP/2 negotiation, and proxying to
+// the HTTP/1.1 backend. Run must hand the listener to http.Server.ServeTLS
+// so Go's ALPN setup advertises h2 — wrapping the listener with
+// tls.NewListener silently downgrades every browser to HTTP/1.1.
+func TestRouterTLSNegotiatesHTTP2(t *testing.T) {
+	withTempCertsDir(t)
+	if _, err := EnsureCA("localhost"); err != nil {
+		t.Fatalf("EnsureCA: %v", err)
+	}
+
+	targetPort := freePort(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/secure", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, "ok")
+	})
+	target := &http.Server{Addr: fmt.Sprintf(":%d", targetPort), Handler: mux}
+	go func() { _ = target.ListenAndServe() }()
+	defer func() { _ = target.Close() }()
+	waitForPort(t, targetPort)
+
+	reg := testRegistry(t, []registry.Allocation{
+		{
+			"project":  "salt",
+			"branch":   "main",
+			"port":     float64(targetPort),
+			"ports":    []any{float64(targetPort)},
+			"worktree": "/nonexistent/salt-main",
+		},
+	})
+
+	listenPort := freePort(t)
+	router := NewRouter(listenPort, reg).WithTLS()
+	go func() { _ = router.Run() }()
+	waitForPort(t, listenPort)
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: true, //nolint:gosec
+				ServerName:         "salt-main.localhost",
+			},
+			ForceAttemptHTTP2: true,
+		},
+	}
+	req, _ := http.NewRequest("GET", fmt.Sprintf("https://127.0.0.1:%d/secure", listenPort), nil)
+	req.Host = "salt-main.localhost"
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("TLS request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "ok" {
+		t.Errorf("expected 'ok', got %q", string(body))
+	}
+	if resp.ProtoMajor != 2 {
+		t.Errorf("expected HTTP/2, got %s", resp.Proto)
 	}
 }
