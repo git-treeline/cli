@@ -1,3 +1,15 @@
+## [0.55.0]
+
+- **TLS proxies now negotiate HTTP/2.** Both the router (`gtl serve`) and the single-port `gtl proxy` wrapped their listener with `tls.NewListener` before calling `Server.Serve`, which bypasses `net/http`'s HTTPS protocol setup — ALPN never advertised `h2`, so browsers silently downgraded every HTTPS request to HTTP/1.1. Both paths now hand the listener to `Server.ServeTLS`, so Go configures ALPN and HTTP/2 automatically. Backends are unchanged (still proxied over HTTP/1.1), and websockets are unaffected — browsers open those on their own HTTP/1.1 connection. First outside contribution, from Zach Sents (@zachsents) — thanks!
+
+## [0.54.2]
+
+- **Port-443 forwarding now survives macOS updates.** macOS updates restore `/etc/pf.conf` to the stock file, silently deleting the treeline rdr-anchor/load lines — the boot daemon then reloaded a ruleset with no 443 redirect, and `gtl serve reload-pf` re-applied the gutted file, reporting success while port 443 stayed dead. The daemon's bare `pfctl -ef` is replaced by a root-owned repair script that re-inserts the missing lines (validated with `pfctl -n` before swapping), runs at boot, and — via `WatchPaths` on `/etc/pf.conf` — re-fires the moment anything rewrites the file, so an OS update triggers its own repair. `reload-pf` runs the same script, `serve status`/`serve restart` call out the reverted state explicitly instead of a bare "not configured", and `gtl serve install` upgrades outdated daemons.
+
+## [0.54.1]
+
+- **`gtl db template` pulls with `--ff-only` and explains divergence instead of merging through it.** The template refresh ran a bare `git pull` in the main repo, so a local `main` that had diverged from origin could produce a surprise merge (or a merge-conflict prompt) inside a repo the user wasn't working in. The pull is now fast-forward-only, and when it can't fast-forward the error says the branch has diverged and shows the exact reset command if origin is the source of truth.
+
 ## [0.54.0]
 
 - **`--no-setup` on `gtl new`, `gtl claim`, and `gtl review` creates the worktree and stops there.** For handing a worktree off to a human or a follow-up step that will run its own setup, `--no-setup` skips the whole provisioning pass — port/database allocation, env-file writing, and `commands.setup` — leaving just the checked-out worktree plus a reminder to run `gtl setup` later. Because nothing is allocated, `--start` and `--open` (both of which need a port) are now an explicit flag conflict with `--no-setup` rather than a silent no-op.
