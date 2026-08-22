@@ -1,11 +1,11 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/registry"
@@ -39,7 +39,7 @@ when it isn't currently checked out (dangling).`,
 		abs, _ := filepath.Abs(cwd)
 
 		reg := registry.New("")
-		idx := buildWorktreeIndex(reg.Allocations())
+		idx := buildWorktreeIndex(cmd.Context(), reg.Allocations())
 
 		selfRef, ok := idx.refByPath[resolveIndexPath(idx, abs)]
 		if !ok {
@@ -105,36 +105,28 @@ type worktreeIndex struct {
 
 // buildWorktreeIndex resolves the (repo, branch) identity of every allocation
 // concurrently. Branch comes from the allocation (already synced by status);
-// only the repo slug requires a git call, mirroring status's existing per-
-// worktree git fan-out.
-func buildWorktreeIndex(allocs []registry.Allocation) *worktreeIndex {
+// only the repo slug requires a git call, bounded per worktree and by ctx so
+// one hung checkout can't stall the index or orphan a git process.
+func buildWorktreeIndex(ctx context.Context, allocs []registry.Allocation) *worktreeIndex {
 	idx := &worktreeIndex{
 		refByPath: make(map[string]registry.RepoRef),
 		pathByRef: make(map[registry.RepoRef]string),
 	}
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	for _, a := range allocs {
-		wt := registry.GetString(a, "worktree")
-		branch := registry.GetString(a, "branch")
-		if wt == "" {
-			continue
-		}
-		wg.Add(1)
-		go func(wt, branch string) {
-			defer wg.Done()
-			repo := worktree.RepoSlugFromRemote(wt)
+	probeAll(ctx, withWorktree(allocs),
+		func(ctx context.Context, a registry.Allocation) string {
+			ctx, cancel := context.WithTimeout(ctx, gitProbeTimeout)
+			defer cancel()
+			return worktree.RepoSlugFromRemoteContext(ctx, registry.GetString(a, "worktree"))
+		},
+		func(a registry.Allocation, repo string) {
 			if repo == "" {
 				return
 			}
-			ref := registry.RepoRef{Repo: repo, Branch: branch}
-			mu.Lock()
+			wt := registry.GetString(a, "worktree")
+			ref := registry.RepoRef{Repo: repo, Branch: registry.GetString(a, "branch")}
 			idx.refByPath[wt] = ref
 			idx.pathByRef[ref] = wt
-			mu.Unlock()
-		}(wt, branch)
-	}
-	wg.Wait()
+		})
 	return idx
 }
 

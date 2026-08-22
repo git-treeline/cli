@@ -4,11 +4,13 @@
 package worktree
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // gitRun executes a git command in dir and returns trimmed stdout.
@@ -35,10 +37,19 @@ func gitRun(dir string, args ...string) (string, error) {
 // gitOutput executes a git command in dir and returns stdout only (no stderr).
 // Returns "" and nil on failure for queries where absence is not an error.
 func gitOutput(dir string, args ...string) string {
-	cmd := exec.Command("git", args...)
+	return gitOutputContext(context.Background(), dir, args...)
+}
+
+// gitOutputContext is gitOutput bounded by ctx: when ctx ends the git child is
+// killed and "" is returned, so a worktree on a hung mount or holding a stale
+// lock can't block the caller or leave an orphaned git behind.
+func gitOutputContext(ctx context.Context, dir string, args ...string) string {
+	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	// Bounds Wait after a kill if a grandchild is still holding the pipe.
+	cmd.WaitDelay = time.Second
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -80,7 +91,12 @@ func RepoNameFromRemote(repoPath string) string {
 // key cross-worktree relationships. Returns "" when there's no origin remote
 // or the URL can't be parsed into at least owner/name.
 func RepoSlugFromRemote(repoPath string) string {
-	url := gitOutput(repoPath, "remote", "get-url", "origin")
+	return RepoSlugFromRemoteContext(context.Background(), repoPath)
+}
+
+// RepoSlugFromRemoteContext is RepoSlugFromRemote bounded by ctx.
+func RepoSlugFromRemoteContext(ctx context.Context, repoPath string) string {
+	url := gitOutputContext(ctx, repoPath, "remote", "get-url", "origin")
 	return parseRepoSlugFromURL(url)
 }
 
@@ -233,7 +249,12 @@ func MergedBranches(repoPath, defaultBranchOverride string) ([]string, error) {
 // CurrentBranch returns the currently checked-out branch in dir.
 // Returns "" if dir is not a git repo or HEAD is detached.
 func CurrentBranch(dir string) string {
-	branch := gitOutput(dir, "rev-parse", "--abbrev-ref", "HEAD")
+	return CurrentBranchContext(context.Background(), dir)
+}
+
+// CurrentBranchContext is CurrentBranch bounded by ctx.
+func CurrentBranchContext(ctx context.Context, dir string) string {
+	branch := gitOutputContext(ctx, dir, "rev-parse", "--abbrev-ref", "HEAD")
 	if branch == "HEAD" {
 		return ""
 	}
