@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -377,5 +378,43 @@ func TestCheckDriftOrAbortWith_ResolveOption_OnlyForSetup(t *testing.T) {
 	}
 	if reg.Find(dir) != nil {
 		t.Error("registry entry should have been released after resolve")
+	}
+}
+
+func TestResolveRegistryDrift_RenameCarriesExtras(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: new_name\n"), 0o644)
+
+	reg := newTestRegistry(t)
+	_ = reg.Allocate(registry.Allocation{
+		"worktree":         dir,
+		"project":          "old_name",
+		"port":             float64(3002),
+		"database":         "old_name_dev_feat",
+		"databases":        []any{"old_name_dev_feat", "old_name_dev_feat_test"},
+		"database_adapter": "postgresql",
+	})
+
+	mock := newMockDB("old_name_dev_feat", "old_name_dev_feat_test")
+	origAdapter := adapterFor
+	origInput := driftReader
+	defer func() { adapterFor = origAdapter; driftReader = origInput }()
+
+	adapterFor = func(name string, args []string) (database.Adapter, error) { return mock, nil }
+	driftReader = bufio.NewReader(strings.NewReader("1\ny\n")) // [1] Rename, then proceed
+
+	if err := resolveRegistryDrift(dir, "new_name", "old_name", reg); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		"old_name_dev_feat->new_name_dev_feat",
+		"old_name_dev_feat_test->new_name_dev_feat_test",
+	}
+	if !slices.Equal(mock.renamed, want) {
+		t.Errorf("expected renames %v, got %v", want, mock.renamed)
+	}
+	if len(mock.dropped) > 0 {
+		t.Errorf("expected no drops on rename, got %v", mock.dropped)
 	}
 }

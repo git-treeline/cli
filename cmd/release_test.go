@@ -219,3 +219,26 @@ func TestIsInsideDir_PlatformSeparator(t *testing.T) {
 		t.Error("expected true for child using platform separator")
 	}
 }
+
+func TestKeptDatabaseNames_ExcludesReleasingByStoredPath(t *testing.T) {
+	allocs := []registry.Allocation{
+		{
+			// The registry stores symlink-resolved worktree paths; the
+			// releasing set must be keyed by that stored form, not by a
+			// caller-computed absolute path.
+			"worktree":  "/private/tmp/proj-wt",
+			"databases": []any{"app_wt", "app_wt_test"},
+		},
+		{
+			"worktree": "/private/tmp/proj-other",
+			"database": "app_other",
+		},
+	}
+	keep := keptDatabaseNames(allocs, map[string]bool{"/private/tmp/proj-wt": true})
+	if keep["app_wt"] || keep["app_wt_test"] {
+		t.Errorf("releasing worktree's own databases must not be kept, got %v", keep)
+	}
+	if !keep["app_other"] {
+		t.Errorf("live worktree's database must be kept, got %v", keep)
+	}
+}

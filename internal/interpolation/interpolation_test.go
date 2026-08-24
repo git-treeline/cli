@@ -217,3 +217,31 @@ func TestInterpolateWithResolver_NilResolver(t *testing.T) {
 		t.Errorf("expected unresolved token, got %s", result)
 	}
 }
+
+func TestInterpolate_PositionalDatabaseTokens(t *testing.T) {
+	// Native slice (fresh allocation) and []any (JSON round-trip).
+	cases := []struct {
+		name  string
+		alloc Allocation
+	}{
+		{"string_slice", Allocation{"databases": []string{"salt_x", "salt_x_test"}}},
+		{"any_slice", Allocation{"databases": []any{"salt_x", "salt_x_test"}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := Interpolate("{database_2}", c.alloc, "", "salt")
+			if got != "salt_x_test" {
+				t.Errorf("expected salt_x_test, got %s", got)
+			}
+		})
+	}
+}
+
+func TestInterpolate_DatabaseTokenLegacyFallback(t *testing.T) {
+	// A registry entry written by a pre-databases-list binary has only the
+	// singular field; {database_1} must resolve to it like {database} does.
+	alloc := Allocation{"database": "salt_x"}
+	if got := Interpolate("{database_1}", alloc, "", "salt"); got != "salt_x" {
+		t.Errorf("expected legacy fallback salt_x, got %s", got)
+	}
+}
