@@ -609,3 +609,29 @@ func TestPostgreSQL_NoConnArgs_UnchangedBehavior(t *testing.T) {
 		t.Errorf("without ConnArgs, first createdb arg should be target, got: %v", createdbCall.args)
 	}
 }
+
+func TestPostgreSQL_ListDatabases(t *testing.T) {
+	pg := &PostgreSQL{
+		execOutput: func(name string, args ...string) ([]byte, error) {
+			return []byte(" salt_x      | jon | UTF8\n salt_x_test | jon | UTF8\n             |     |\n"), nil
+		},
+	}
+	got, err := pg.ListDatabases()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "salt_x" || got[1] != "salt_x_test" {
+		t.Errorf("expected [salt_x salt_x_test], got %v", got)
+	}
+}
+
+func TestPostgreSQL_ListDatabases_Failure(t *testing.T) {
+	pg := &PostgreSQL{
+		execOutput: func(name string, args ...string) ([]byte, error) {
+			return nil, fmt.Errorf("connection refused")
+		},
+	}
+	if _, err := pg.ListDatabases(); err == nil {
+		t.Error("expected error when psql fails, got nil")
+	}
+}

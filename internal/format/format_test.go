@@ -3,6 +3,7 @@ package format
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -108,7 +109,7 @@ func TestPortDisplay(t *testing.T) {
 
 func TestDropSingleDB_EmptyName(t *testing.T) {
 	alloc := Allocation{"database": "", "database_adapter": "sqlite"}
-	if err := DropSingleDB(alloc, t.TempDir()); err != nil {
+	if err := DropSingleDB(alloc, t.TempDir(), nil); err != nil {
 		t.Errorf("expected nil error for empty database name, got %v", err)
 	}
 }
@@ -122,7 +123,7 @@ func TestDropSingleDB_SQLite(t *testing.T) {
 		"database":         "test.db",
 		"database_adapter": "sqlite",
 	}
-	if err := DropSingleDB(alloc, dir); err != nil {
+	if err := DropSingleDB(alloc, dir, nil); err != nil {
 		t.Errorf("expected nil error on successful drop, got %v", err)
 	}
 
@@ -136,7 +137,7 @@ func TestDropSingleDB_UnknownAdapter(t *testing.T) {
 		"database":         "mydb",
 		"database_adapter": "nonexistent_adapter",
 	}
-	if err := DropSingleDB(alloc, t.TempDir()); err == nil {
+	if err := DropSingleDB(alloc, t.TempDir(), nil); err == nil {
 		t.Error("expected error for unknown adapter, got nil")
 	}
 }
@@ -153,11 +154,128 @@ func TestDropDatabases_MixedEntries(t *testing.T) {
 	}
 	// The unknown-adapter entry fails, so a non-nil error is expected even
 	// though the sqlite drop succeeds.
-	if err := DropDatabases(allocs); err == nil {
+	if err := DropDatabases(allocs, nil); err == nil {
 		t.Error("expected error naming the failed drop, got nil")
 	}
 
 	if _, err := os.Stat(dbFile); !os.IsNotExist(err) {
 		t.Error("expected sqlite file to be removed by DropDatabases")
+	}
+}
+
+// fakeListerAdapter implements database.Adapter plus ListDatabases so shard
+// expansion can be tested without a server.
+type fakeListerAdapter struct {
+	databases []string
+	listErr   error
+	dropped   []string
+}
+
+func (f *fakeListerAdapter) Clone(template, target string) error { return nil }
+func (f *fakeListerAdapter) Drop(target string) error {
+	f.dropped = append(f.dropped, target)
+	return nil
+}
+func (f *fakeListerAdapter) Exists(name string) (bool, error)      { return false, nil }
+func (f *fakeListerAdapter) Rename(oldName, newName string) error  { return nil }
+func (f *fakeListerAdapter) Restore(target, dumpFile string) error { return nil }
+func (f *fakeListerAdapter) ListDatabases() ([]string, error)      { return f.databases, f.listErr }
+
+func TestShardTargets_MatchesShardsAndHonorsKeep(t *testing.T) {
+	serverDBs := []string{
+		"salt_x_test", "salt_x_test_0", "salt_x_test_1",
+		"salt_x_test_extra", // suffix is not a pure number — must not match
+		"salt_x_testing",    // prefix-only — must not match
+		"salt_y_test",
+	}
+	got := shardTargets("salt_x_test", true, serverDBs, true, map[string]bool{"salt_x_test_1": true})
+	want := []string{"salt_x_test", "salt_x_test_0"}
+	if !slices.Equal(got, want) {
+		t.Errorf("expected %v, got %v", want, got)
+	}
+}
+
+func TestShardTargets_NoListingFallsBackToExactName(t *testing.T) {
+	got := shardTargets("salt_x_test", true, nil, false, nil)
+	if !slices.Equal(got, []string{"salt_x_test"}) {
+		t.Errorf("expected exact-name fallback, got %v", got)
+	}
+}
+
+func TestShardTargets_PrimaryIsNeverExpanded(t *testing.T) {
+	serverDBs := []string{"salt_dev", "salt_dev_2"}
+	got := shardTargets("salt_dev", false, serverDBs, true, nil)
+	if !slices.Equal(got, []string{"salt_dev"}) {
+		t.Errorf("expected exact primary drop only, got %v", got)
+	}
+}
+
+func TestShardTargets_KeepBlocksExactName(t *testing.T) {
+	if got := shardTargets("salt_x_test", true, []string{"salt_x_test"}, true, map[string]bool{"salt_x_test": true}); len(got) != 0 {
+		t.Errorf("expected kept database to be excluded, got %v", got)
+	}
+	if got := shardTargets("salt_x", false, nil, false, map[string]bool{"salt_x": true}); len(got) != 0 {
+		t.Errorf("expected kept primary to be excluded, got %v", got)
+	}
+}
+
+func TestListDatabasesOnce(t *testing.T) {
+	lister := &fakeListerAdapter{databases: []string{"a", "b"}}
+	if _, ok := listDatabasesOnce(lister, []string{"only_primary"}); ok {
+		t.Error("expected no listing when there are no auxiliary entries")
+	}
+	if got, ok := listDatabasesOnce(lister, []string{"dev", "test"}); !ok || !slices.Equal(got, []string{"a", "b"}) {
+		t.Errorf("expected server list, got %v (ok=%v)", got, ok)
+	}
+	failing := &fakeListerAdapter{listErr: os.ErrPermission}
+	if _, ok := listDatabasesOnce(failing, []string{"dev", "test"}); ok {
+		t.Error("expected failed listing to report ok=false")
+	}
+}
+
+func TestDropDatabases_SQLiteList(t *testing.T) {
+	dir := t.TempDir()
+	primary := filepath.Join(dir, "dev.db")
+	auxiliary := filepath.Join(dir, "test.db")
+	_ = os.WriteFile(primary, []byte("data"), 0o644)
+	_ = os.WriteFile(auxiliary, []byte("data"), 0o644)
+
+	allocs := []Allocation{{
+		"database":         "dev.db",
+		"databases":        []any{"dev.db", "test.db"},
+		"database_adapter": "sqlite",
+		"worktree":         dir,
+	}}
+	if err := DropDatabases(allocs, nil); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if _, err := os.Stat(primary); !os.IsNotExist(err) {
+		t.Error("expected primary sqlite file to be removed")
+	}
+	if _, err := os.Stat(auxiliary); !os.IsNotExist(err) {
+		t.Error("expected auxiliary sqlite file to be removed")
+	}
+}
+
+func TestDropDatabases_KeepGuardsPrimary(t *testing.T) {
+	dir := t.TempDir()
+	primary := filepath.Join(dir, "dev.db")
+	aux := filepath.Join(dir, "test.db")
+	_ = os.WriteFile(primary, []byte("data"), 0o644)
+	_ = os.WriteFile(aux, []byte("data"), 0o644)
+
+	allocs := []Allocation{{
+		"databases":        []any{"dev.db", "test.db"},
+		"database_adapter": "sqlite",
+		"worktree":         dir,
+	}}
+	if err := DropDatabases(allocs, map[string]bool{"dev.db": true}); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if _, err := os.Stat(primary); err != nil {
+		t.Error("expected kept primary to survive the drop")
+	}
+	if _, err := os.Stat(aux); !os.IsNotExist(err) {
+		t.Error("expected auxiliary database to be dropped")
 	}
 }

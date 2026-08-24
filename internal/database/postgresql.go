@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -75,14 +76,33 @@ func parsePsqlListContains(output, name string) bool {
 	if name == "" {
 		return false
 	}
+	return slices.Contains(parsePsqlListNames(output), name)
+}
+
+// ListDatabases returns the names of all databases on the server. Used to
+// find framework-derived parallel-test shards of auxiliary databases.
+func (pg *PostgreSQL) ListDatabases() ([]string, error) {
+	out, err := pg.output("psql", "-lqt")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list databases: %w", err)
+	}
+	return parsePsqlListNames(string(out)), nil
+}
+
+// parsePsqlListNames extracts the database names from psql -lqt output.
+func parsePsqlListNames(output string) []string {
+	var names []string
 	scanner := bufio.NewScanner(strings.NewReader(output))
 	for scanner.Scan() {
 		parts := strings.Split(scanner.Text(), "|")
-		if len(parts) > 0 && strings.TrimSpace(parts[0]) == name {
-			return true
+		if len(parts) == 0 {
+			continue
+		}
+		if name := strings.TrimSpace(parts[0]); name != "" {
+			names = append(names, name)
 		}
 	}
-	return false
+	return names
 }
 
 func (pg *PostgreSQL) Clone(template, target string) error {

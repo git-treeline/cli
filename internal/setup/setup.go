@@ -167,8 +167,8 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	} else {
 		_, _ = fmt.Fprintln(s.Log, style.Dimf("  Port:     %d", alloc.Port))
 	}
-	if alloc.Database != "" {
-		_, _ = fmt.Fprintln(s.Log, style.Dimf("  Database: %s", alloc.Database))
+	if db := alloc.PrimaryDatabase(); db != "" {
+		_, _ = fmt.Fprintln(s.Log, style.Dimf("  Database: %s", db))
 	}
 	_, _ = fmt.Fprintln(s.Log, style.Dimf("  Redis:    %s", redisURL))
 	_, _ = fmt.Fprintln(s.Log, style.Dimf("  Local:    http://localhost:%d", alloc.Port))
@@ -198,7 +198,7 @@ func (s *Setup) runPostAllocation(alloc *allocator.Allocation, redisURL string) 
 		return nil
 	}
 
-	if alloc.Database != "" && !alloc.Reused {
+	if alloc.PrimaryDatabase() != "" && !alloc.Reused {
 		if s.ProjectConfig.DatabaseSyncOnCreate() {
 			if err := s.syncTemplateDatabase(); err != nil {
 				return err
@@ -240,8 +240,8 @@ func (s *Setup) printDryRun(alloc *allocator.Allocation, redisURL string) error 
 	} else {
 		s.detail("  Port:     %d", alloc.Port)
 	}
-	if alloc.Database != "" {
-		s.detail("  Database: %s", alloc.Database)
+	if db := alloc.PrimaryDatabase(); db != "" {
+		s.detail("  Database: %s", db)
 	}
 	s.detail("  Redis:    %s", redisURL)
 	s.detail("  Dir:      %s", s.WorktreePath)
@@ -499,10 +499,11 @@ func (s *Setup) handleProjectRename() error {
 		// was renamed in the same edit (stored name no longer matches). Keep it
 		// and just re-provision — cloneDatabase skips when the DB already exists.
 		s.log("Project renamed %s → %s, keeping template database %s (use `gtl rename` for a proper project rename)", entryProject, s.ProjectConfig.Project(), oldDB)
+		s.dropStaleExtraDatabases(entry)
 	case oldDB != "":
 		s.log("Project renamed %s → %s, dropping database %s", entryProject, s.ProjectConfig.Project(), oldDB)
 		adapterName := registry.GetString(entry, "database_adapter")
-		if adapter, err := database.ForAdapter(adapterName, nil); err == nil {
+		if adapter, err := database.ForAdapter(adapterName, s.ProjectConfig.DatabaseConnArgs()); err == nil {
 			dbPath := oldDB
 			if adapterName == "sqlite" {
 				dbPath = filepath.Join(s.WorktreePath, oldDB)
@@ -513,6 +514,7 @@ func (s *Setup) handleProjectRename() error {
 				}
 			}
 		}
+		s.dropStaleExtraDatabases(entry)
 	default:
 		s.log("Project renamed %s → %s, re-provisioning", entryProject, s.ProjectConfig.Project())
 	}
@@ -520,6 +522,33 @@ func (s *Setup) handleProjectRename() error {
 		return fmt.Errorf("releasing stale registry entry: %w", err)
 	}
 	return nil
+}
+
+// dropStaleExtraDatabases drops the auxiliary databases of a stale registry
+// entry that is about to be discarded. Extras are framework-built and
+// disposable; once the entry is released nothing tracks them anymore, so
+// leaving them behind would orphan them permanently.
+func (s *Setup) dropStaleExtraDatabases(entry registry.Allocation) {
+	names := registry.ExtractDatabases(entry)
+	if len(names) < 2 {
+		return
+	}
+	adapterName := registry.GetString(entry, "database_adapter")
+	adapter, err := database.ForAdapter(adapterName, s.ProjectConfig.DatabaseConnArgs())
+	if err != nil {
+		s.warn("cannot drop auxiliary databases %s: %v", strings.Join(names[1:], ", "), err)
+		return
+	}
+	for _, name := range names[1:] {
+		dbPath := name
+		if adapterName == "sqlite" {
+			dbPath = filepath.Join(s.WorktreePath, name)
+		}
+		s.log("Dropping auxiliary database %s", name)
+		if err := adapter.Drop(dbPath); err != nil {
+			s.warn("failed to drop %s: %v", name, err)
+		}
+	}
 }
 
 func (s *Setup) cloneDatabase(alloc *allocator.Allocation) error {
@@ -534,11 +563,12 @@ func (s *Setup) cloneDatabase(alloc *allocator.Allocation) error {
 		return nil
 	}
 
-	target := alloc.Database
+	primary := alloc.PrimaryDatabase()
+	target := primary
 
 	// SQLite uses file paths relative to the worktree/main repo
 	if adapterName == "sqlite" {
-		target = filepath.Join(s.WorktreePath, alloc.Database)
+		target = filepath.Join(s.WorktreePath, primary)
 		template = filepath.Join(s.MainRepo, template)
 	}
 
@@ -547,16 +577,12 @@ func (s *Setup) cloneDatabase(alloc *allocator.Allocation) error {
 		return err
 	}
 	if exists {
-		s.log("Database %s already exists, skipping", alloc.Database)
+		s.log("Database %s already exists, skipping", primary)
 		return nil
 	}
 
-	s.log("Cloning database %s → %s", s.ProjectConfig.DatabaseTemplate(), alloc.Database)
-	if err := adapter.Clone(template, target); err != nil {
-		return err
-	}
-
-	return nil
+	s.log("Cloning database %s → %s", s.ProjectConfig.DatabaseTemplate(), primary)
+	return adapter.Clone(template, target)
 }
 
 func (s *Setup) runHooks(name string) error {
