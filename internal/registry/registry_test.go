@@ -775,3 +775,31 @@ func TestResolvePath_EmptyStaysEmpty(t *testing.T) {
 		t.Errorf("resolvePath(%q) = %q, want empty", "", got)
 	}
 }
+
+func TestExtractDatabases(t *testing.T) {
+	cases := []struct {
+		name  string
+		alloc Allocation
+		want  []string
+	}{
+		{"string_slice", Allocation{"databases": []string{"db", "db_test"}}, []string{"db", "db_test"}},
+		{"any_slice", Allocation{"databases": []any{"db", "db_test"}}, []string{"db", "db_test"}},
+		{"legacy_single", Allocation{"database": "db"}, []string{"db"}},
+		{"list_wins_over_legacy", Allocation{"database": "db", "databases": []any{"db", "db_test"}}, []string{"db", "db_test"}},
+		{"absent", Allocation{}, nil},
+		{"empty_legacy", Allocation{"database": ""}, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := ExtractDatabases(c.alloc)
+			if len(got) != len(c.want) {
+				t.Fatalf("expected %v, got %v", c.want, got)
+			}
+			for i := range c.want {
+				if got[i] != c.want[i] {
+					t.Errorf("database %d = %q, want %q", i, got[i], c.want[i])
+				}
+			}
+		})
+	}
+}

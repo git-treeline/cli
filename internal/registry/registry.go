@@ -771,6 +771,32 @@ func GetString(a Allocation, key string) string {
 	return ""
 }
 
+// ExtractDatabases extracts the ordered database list from an allocation,
+// handling both the "databases" array and the legacy single "database" field
+// written by older gtl versions. Returns nil when neither is present.
+func ExtractDatabases(a Allocation) []string {
+	switch dbs := a["databases"].(type) {
+	case []string:
+		if len(dbs) > 0 {
+			return dbs
+		}
+	case []any:
+		result := make([]string, 0, len(dbs))
+		for _, d := range dbs {
+			if s, ok := d.(string); ok && s != "" {
+				result = append(result, s)
+			}
+		}
+		if len(result) > 0 {
+			return result
+		}
+	}
+	if db, ok := a["database"].(string); ok && db != "" {
+		return []string{db}
+	}
+	return nil
+}
+
 // ExtractPorts extracts the port list from an allocation, handling both
 // the "ports" array and legacy single "port" field.
 func ExtractPorts(a Allocation) []int {

@@ -117,6 +117,35 @@ func (pc *ProjectConfig) Validate() error {
 				t, ProjectConfigFile, adapter, SanitizeIdentifier(t))
 		}
 	}
+	if raw := Dig(pc.Data, "database", "pattern"); raw != nil {
+		p, ok := raw.(string)
+		if !ok {
+			return fmt.Errorf("database.pattern in %s must be a single database name pattern, not a list; declare auxiliary databases as a list under `database.extra`",
+				ProjectConfigFile)
+		}
+		if p == "" {
+			return fmt.Errorf("database.pattern in %s is empty; it must name the worktree's database", ProjectConfigFile)
+		}
+		if strings.Contains(p, "{database}") {
+			return fmt.Errorf("database.pattern in %s uses {database}, but pattern names the primary database that {database} refers to; the token is only valid in database.extra entries",
+				ProjectConfigFile)
+		}
+	}
+	if raw := Dig(pc.Data, "database", "extra"); raw != nil {
+		entries, ok := raw.([]any)
+		if !ok {
+			return fmt.Errorf("database.extra in %s must be a list of database name patterns", ProjectConfigFile)
+		}
+		for i, item := range entries {
+			s, ok := item.(string)
+			if !ok {
+				return fmt.Errorf("database.extra entry %d in %s must be a database name pattern string", i+1, ProjectConfigFile)
+			}
+			if s == "" {
+				return fmt.Errorf("database.extra entry %d in %s is empty; every entry must name a database", i+1, ProjectConfigFile)
+			}
+		}
+	}
 	return nil
 }
 
@@ -175,11 +204,28 @@ func (pc *ProjectConfig) DatabaseConnArgs() []string {
 	return args
 }
 
-func (pc *ProjectConfig) DatabasePattern() string {
+// DatabasePatterns returns the primary database naming pattern from
+// database.pattern followed by the database.extra patterns, in declaration
+// order. The primary is cloned from database.template; the extras name
+// auxiliary databases that treeline allocates, tracks, and drops but never
+// creates. Validate rejects the malformed entries this getter tolerates.
+func (pc *ProjectConfig) DatabasePatterns() []string {
+	primary := "{template}_{worktree}"
 	if v, ok := Dig(pc.Data, "database", "pattern").(string); ok {
-		return v
+		primary = v
 	}
-	return "{template}_{worktree}"
+
+	patterns := []string{primary}
+	extra, _ := Dig(pc.Data, "database", "extra").([]any)
+	for _, item := range extra {
+		// Empty strings are kept so they can't shift the {database_N} tokens
+		// of the entries after them; non-string entries are skipped here but
+		// Validate rejects both before any production path reaches this.
+		if s, ok := item.(string); ok {
+			patterns = append(patterns, s)
+		}
+	}
+	return patterns
 }
 
 // DBSourceConfig is one configured remote source under database.sources.<env>.

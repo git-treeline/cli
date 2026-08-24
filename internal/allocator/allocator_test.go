@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -102,8 +103,8 @@ func TestAllocate_IdempotentPreservesAllFields(t *testing.T) {
 	_ = reg.Allocate(first.ToRegistryEntry())
 
 	second, _ := al.Allocate("/wt/branch-a", "branch-a", false)
-	if second.Database != first.Database {
-		t.Errorf("expected database %s, got %s", first.Database, second.Database)
+	if second.PrimaryDatabase() != first.PrimaryDatabase() {
+		t.Errorf("expected database %s, got %s", first.PrimaryDatabase(), second.PrimaryDatabase())
 	}
 	if len(second.Ports) != 2 {
 		t.Errorf("expected 2 ports preserved, got %d", len(second.Ports))
@@ -176,12 +177,12 @@ func TestAllocate_DatabaseName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if alloc.Database != "test_dev_feature_branch" {
-		t.Errorf("expected test_dev_feature_branch, got %s", alloc.Database)
+	if alloc.PrimaryDatabase() != "test_dev_feature_branch" {
+		t.Errorf("expected test_dev_feature_branch, got %s", alloc.PrimaryDatabase())
 	}
 }
 
-func TestBuildDatabaseName_SanitizesFullResult(t *testing.T) {
+func TestBuildDatabaseNames_SanitizesFullResult(t *testing.T) {
 	cases := []struct {
 		name, project, template, pattern, worktreeName, want string
 	}{
@@ -229,9 +230,9 @@ func TestBuildDatabaseName_SanitizesFullResult(t *testing.T) {
 				"template": c.template,
 				"pattern":  c.pattern,
 			}
-			got := al.buildDatabaseName(c.worktreeName)
-			if got != c.want {
-				t.Errorf("buildDatabaseName(%q) with project=%q template=%q pattern=%q\n  got:  %q\n  want: %q",
+			got := al.buildDatabaseNames(c.worktreeName)
+			if len(got) != 1 || got[0] != c.want {
+				t.Errorf("buildDatabaseNames(%q) with project=%q template=%q pattern=%q\n  got:  %q\n  want: [%q]",
 					c.worktreeName, c.project, c.template, c.pattern, got, c.want)
 			}
 		})
@@ -363,7 +364,7 @@ func TestToRegistryEntry_Format(t *testing.T) {
 		Branch:       "feature-auth",
 		Port:         3010,
 		Ports:        []int{3010, 3011},
-		Database:     "salt_dev_branch",
+		Databases:    []string{"salt_dev_branch"},
 		RedisPrefix:  "salt:branch",
 	}
 
@@ -402,8 +403,8 @@ func TestAllocate_MainWorktree(t *testing.T) {
 	if alloc.Port != alloc.Ports[0] {
 		t.Errorf("expected Port to match Ports[0], got %d vs %d", alloc.Port, alloc.Ports[0])
 	}
-	if alloc.Database != "test_dev" {
-		t.Errorf("expected template database 'test_dev', got %s", alloc.Database)
+	if alloc.PrimaryDatabase() != "test_dev" {
+		t.Errorf("expected template database 'test_dev', got %s", alloc.PrimaryDatabase())
 	}
 	if alloc.RedisDB != 0 {
 		t.Errorf("expected redis db 0 for main, got %d", alloc.RedisDB)
@@ -432,8 +433,8 @@ func TestAllocate_MainWorktreeSkipsOccupiedPorts(t *testing.T) {
 	if alloc.Ports[1] != alloc.Ports[0]+1 {
 		t.Errorf("expected contiguous ports, got %v", alloc.Ports)
 	}
-	if alloc.Database != "test_dev" {
-		t.Errorf("main should still get template database, got %s", alloc.Database)
+	if alloc.PrimaryDatabase() != "test_dev" {
+		t.Errorf("main should still get template database, got %s", alloc.PrimaryDatabase())
 	}
 }
 
@@ -790,7 +791,7 @@ func TestToInterpolationMap_Baseline(t *testing.T) {
 	alloc := &Allocation{
 		Port:         3010,
 		Ports:        []int{3010, 3011},
-		Database:     "mydb_branch",
+		Databases:    []string{"mydb_branch"},
 		WorktreeName: "branch",
 		Branch:       "feature/router-url",
 	}
@@ -1383,5 +1384,102 @@ func TestAllocateMain_Concurrent(t *testing.T) {
 	// invariant that replaced the old separate setup-layer write.
 	if got := len(reg.Allocations()); got != n {
 		t.Errorf("expected %d persisted allocations, got %d", n, got)
+	}
+}
+
+// withDatabases sets the allocator's primary database.pattern and its
+// database.extra list, the form testAllocator's yaml fixture can't express.
+func withDatabases(t *testing.T, al *Allocator, primary string, extra ...string) {
+	t.Helper()
+	db, _ := al.ProjectConfig.Data["database"].(map[string]any)
+	if db == nil {
+		t.Fatal("expected a database config block")
+	}
+	db["pattern"] = primary
+	list := make([]any, len(extra))
+	for i, p := range extra {
+		list[i] = p
+	}
+	db["extra"] = list
+}
+
+func TestAllocate_DatabaseList(t *testing.T) {
+	al, reg := testAllocator(t, 1, "")
+	withDatabases(t, al, "{template}_{worktree}", "{database}_test")
+
+	alloc, err := al.Allocate("/wt/feature-branch", "feature-branch", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"test_dev_feature_branch", "test_dev_feature_branch_test"}
+	if !slices.Equal(alloc.Databases, want) {
+		t.Errorf("expected databases %v, got %v", want, alloc.Databases)
+	}
+
+	entry := reg.Find("/wt/feature-branch")
+	if entry == nil {
+		t.Fatal("expected registry entry")
+	}
+	// The legacy single field keeps older gtl binaries able to drop the primary.
+	if got := registry.GetString(entry, "database"); got != want[0] {
+		t.Errorf("expected legacy database field %q, got %q", want[0], got)
+	}
+	if got := registry.ExtractDatabases(entry); !slices.Equal(got, want) {
+		t.Errorf("expected registry databases %v, got %v", want, got)
+	}
+
+	// Reuse path must round-trip the list.
+	reused, err := al.Allocate("/wt/feature-branch", "feature-branch", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reused.Reused || !slices.Equal(reused.Databases, want) {
+		t.Errorf("expected reused allocation to keep databases %v, got %v (reused=%v)", want, reused.Databases, reused.Reused)
+	}
+}
+
+func TestBuildDatabaseNames_TokensAndSanitize(t *testing.T) {
+	al, _ := testAllocator(t, 1, "")
+	withDatabases(t, al, "{template}_{worktree}", "{database}--test", "{project}-{worktree}_queue")
+
+	got := al.buildDatabaseNames("feature/x")
+	want := []string{"test_dev_feature_x", "test_dev_feature_x_test", "test_feature_x_queue"}
+	if !slices.Equal(got, want) {
+		t.Errorf("expected %v, got %v", want, got)
+	}
+}
+
+func TestBuildDatabaseNames_RequiresTemplate(t *testing.T) {
+	al, _ := testAllocator(t, 1, "")
+	withDatabases(t, al, "{project}_{worktree}", "{database}_test")
+	delete(al.ProjectConfig.Data["database"].(map[string]any), "template")
+
+	if names := al.buildDatabaseNames("x"); names != nil {
+		t.Errorf("expected no databases without a template, got %v", names)
+	}
+}
+
+func TestAllocateMain_RendersExtraDatabases(t *testing.T) {
+	al, _ := testAllocator(t, 1, "")
+	withDatabases(t, al, "{template}_{worktree}", "{database}_test")
+
+	alloc, err := al.Allocate("/wt/main", "main", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Main's primary is the template itself; extras render with {database}
+	// bound to it so shared env {database_2} tokens still resolve.
+	want := []string{"test_dev", "test_dev_test"}
+	if !slices.Equal(alloc.Databases, want) {
+		t.Errorf("expected %v, got %v", want, alloc.Databases)
+	}
+}
+
+func TestBuildDatabaseNames_EmptyPrimaryYieldsNoDatabases(t *testing.T) {
+	al, _ := testAllocator(t, 1, "")
+	withDatabases(t, al, "---", "{database}_test")
+
+	if names := al.buildDatabaseNames("x"); names != nil {
+		t.Errorf("expected no databases when the primary sanitizes to empty, got %v", names)
 	}
 }

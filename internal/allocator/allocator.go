@@ -58,11 +58,20 @@ type Allocation struct {
 	Branch          string
 	Port            int
 	Ports           []int
-	Database        string
+	Databases       []string
 	DatabaseAdapter string
 	RedisDB         int
 	RedisPrefix     string
 	Reused          bool
+}
+
+// PrimaryDatabase returns the first database in the allocation — the one
+// cloned from database.template — or "" when the project has no database.
+func (a *Allocation) PrimaryDatabase() string {
+	if len(a.Databases) == 0 {
+		return ""
+	}
+	return a.Databases[0]
 }
 
 func (a *Allocation) ToRegistryEntry() registry.Allocation {
@@ -73,12 +82,22 @@ func (a *Allocation) ToRegistryEntry() registry.Allocation {
 		"branch":           a.Branch,
 		"port":             a.Port,
 		"ports":            intsToAny(a.Ports),
-		"database":         a.Database,
+		"database":         a.PrimaryDatabase(),
 		"database_adapter": a.DatabaseAdapter,
 	}
 
 	for i, p := range a.Ports {
 		entry[fmt.Sprintf("port_%d", i+1)] = p
+	}
+
+	// `database` stays written as the primary alone so older gtl binaries
+	// sharing the registry can still drop it; `databases` carries the full list.
+	if len(a.Databases) > 0 {
+		dbs := make([]any, len(a.Databases))
+		for i, name := range a.Databases {
+			dbs[i] = name
+		}
+		entry["databases"] = dbs
 	}
 
 	if a.RedisDB > 0 {
@@ -96,7 +115,7 @@ func (a *Allocation) ToInterpolationMap() interpolation.Allocation {
 	m := interpolation.Allocation{
 		"port":          a.Port,
 		"ports":         a.Ports,
-		"database":      a.Database,
+		"database":      a.PrimaryDatabase(),
 		"worktree_name": a.WorktreeName,
 		"branch":        a.Branch,
 	}
@@ -105,6 +124,9 @@ func (a *Allocation) ToInterpolationMap() interpolation.Allocation {
 	}
 	if a.RedisPrefix != "" {
 		m["redis_prefix"] = a.RedisPrefix
+	}
+	if len(a.Databases) > 0 {
+		m["databases"] = a.Databases
 	}
 	for i, p := range a.Ports {
 		m[fmt.Sprintf("port_%d", i+1)] = p
@@ -171,7 +193,7 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string, mainWorktr
 		Branch:          registry.GetString(entry, "branch"),
 		Port:            ports[0],
 		Ports:           ports,
-		Database:        registry.GetString(entry, "database"),
+		Databases:       registry.ExtractDatabases(entry),
 		DatabaseAdapter: registry.GetString(entry, "database_adapter"),
 		Reused:          true,
 	}
@@ -246,6 +268,16 @@ func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*A
 
 	project := al.ProjectConfig.Project()
 
+	// The main worktree works against the template database itself rather
+	// than a per-worktree clone, so its primary is the template — but its
+	// auxiliary databases still render, with {database} = the template:
+	// otherwise a shared env block referencing {database_2} would write the
+	// literal token into the main repo's env file.
+	var mainDatabases []string
+	if t := al.ProjectConfig.DatabaseTemplate(); t != "" {
+		mainDatabases = append([]string{t}, al.renderExtraNames(t, sanitizeIdentifier(worktreeName))...)
+	}
+
 	// build selects the main worktree's port block against a snapshot of
 	// already-used ports. Like allocateNew it runs inside the registry lock for a
 	// real allocation — so the read of used ports, the choice, and the write are
@@ -275,7 +307,7 @@ func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*A
 			WorktreeName:    worktreeName,
 			Port:            ports[0],
 			Ports:           ports,
-			Database:        al.ProjectConfig.DatabaseTemplate(),
+			Databases:       mainDatabases,
 			DatabaseAdapter: al.ProjectConfig.DatabaseAdapter(),
 		}, nil
 	}
@@ -305,7 +337,7 @@ func (al *Allocator) allocateNew(worktreePath, worktreeName, branch string) (*Al
 	}
 
 	project := al.ProjectConfig.Project()
-	database := al.buildDatabaseName(worktreeName)
+	databases := al.buildDatabaseNames(worktreeName)
 	adapter := al.ProjectConfig.DatabaseAdapter()
 
 	// build chooses ports and Redis isolation against a snapshot of already-used
@@ -344,7 +376,7 @@ func (al *Allocator) allocateNew(worktreePath, worktreeName, branch string) (*Al
 			Port:            ports[0],
 			Ports:           ports,
 			Branch:          branch,
-			Database:        database,
+			Databases:       databases,
 			DatabaseAdapter: adapter,
 			RedisDB:         redisDB,
 			RedisPrefix:     redisPrefix,
@@ -606,19 +638,51 @@ func sanitizeIdentifier(s string) string {
 	return strings.Trim(s, "_")
 }
 
-func (al *Allocator) buildDatabaseName(worktreeName string) string {
+// buildDatabaseNames renders database.pattern into concrete names, in order.
+// Databases exist only alongside a template to clone the primary from, so with
+// none configured the worktree gets no databases at all. A primary whose
+// pattern sanitizes to nothing also yields no databases — a shifted list
+// would silently reassign every {database_N} token and the drop path's
+// primary/auxiliary split. In entries after the first, {database} resolves to
+// the primary's final (sanitized) name.
+func (al *Allocator) buildDatabaseNames(worktreeName string) []string {
 	template := al.ProjectConfig.DatabaseTemplate()
 	if template == "" {
-		return ""
+		return nil
 	}
 
-	name := strings.NewReplacer(
+	worktree := sanitizeIdentifier(worktreeName)
+	primary := sanitizeIdentifier(strings.NewReplacer(
 		"{template}", template,
-		"{worktree}", sanitizeIdentifier(worktreeName),
+		"{worktree}", worktree,
 		"{project}", al.ProjectConfig.Project(),
-	).Replace(al.ProjectConfig.DatabasePattern())
+	).Replace(al.ProjectConfig.DatabasePatterns()[0]))
+	if primary == "" {
+		return nil
+	}
 
-	return sanitizeIdentifier(name)
+	return append([]string{primary}, al.renderExtraNames(primary, worktree)...)
+}
+
+// renderExtraNames renders the database.extra patterns against an
+// already-final primary name. worktree must already be sanitized.
+func (al *Allocator) renderExtraNames(primary, worktree string) []string {
+	patterns := al.ProjectConfig.DatabasePatterns()
+	if len(patterns) == 1 {
+		return nil
+	}
+
+	replacer := strings.NewReplacer(
+		"{database}", primary,
+		"{template}", al.ProjectConfig.DatabaseTemplate(),
+		"{worktree}", worktree,
+		"{project}", al.ProjectConfig.Project(),
+	)
+	names := make([]string, 0, len(patterns)-1)
+	for _, p := range patterns[1:] {
+		names = append(names, sanitizeIdentifier(replacer.Replace(p)))
+	}
+	return names
 }
 
 func intsToAny(ints []int) []any {
