@@ -97,47 +97,59 @@ func runStatusWatch(ctx context.Context) error {
 	}
 }
 
-// probeAll runs probe for every allocation concurrently and applies each
-// result on the calling goroutine until ctx is done. Probes that outlive ctx
-// are abandoned: their results are dropped rather than written late, so a
-// stalled worktree can neither block the command nor race its output.
-func probeAll[T any](ctx context.Context, allocs []registry.Allocation, probe func(context.Context, registry.Allocation) T, apply func(registry.Allocation, T)) {
+// probeAll runs probe over inputs concurrently and applies each result on the
+// calling goroutine until ctx is done. Inputs must be plain values snapshotted
+// from the allocation maps before the call — probe goroutines never see the
+// maps, so a probe that outlives ctx cannot race the rendering that follows.
+// Late results are dropped rather than applied, so a stalled probe can neither
+// block the command nor corrupt its output.
+func probeAll[K, T any](ctx context.Context, inputs []K, probe func(context.Context, K) T, apply func(int, T)) {
 	type result struct {
-		alloc registry.Allocation
+		i     int
 		value T
 	}
-	results := make(chan result, len(allocs))
-	for _, a := range allocs {
-		go func() { results <- result{a, probe(ctx, a)} }()
+	results := make(chan result, len(inputs))
+	for i, in := range inputs {
+		go func() { results <- result{i, probe(ctx, in)} }()
 	}
-	for range allocs {
+	for range inputs {
+		if ctx.Err() != nil {
+			return
+		}
 		select {
 		case r := <-results:
-			apply(r.alloc, r.value)
+			apply(r.i, r.value)
 		case <-ctx.Done():
 			return
 		}
 	}
 }
 
-func syncBranches(ctx context.Context, reg *registry.Registry, allocs []registry.Allocation) {
-	probeAll(ctx, withWorktree(allocs),
-		func(ctx context.Context, a registry.Allocation) string {
-			ctx, cancel := context.WithTimeout(ctx, gitProbeTimeout)
-			defer cancel()
-			return worktree.CurrentBranchContext(ctx, a["worktree"].(string))
-		},
-		func(a registry.Allocation, branch string) {
-			old, _ := a["branch"].(string)
-			if branch == "" || branch == old {
-				return
-			}
-			a["branch"] = branch
-			wt := a["worktree"].(string)
-			if err := reg.UpdateField(wt, "branch", branch); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: could not update branch in registry for %s: %v\n", wt, err)
-			}
-		})
+// worktreeProbe is everything status reads from a single worktree.
+type worktreeProbe struct {
+	branch          string
+	repo            string
+	supervisorState string
+}
+
+// probeWorktree gathers one worktree's state. The two git reads share a single
+// deadline — a hung mount stalls both, so paying gitProbeTimeout twice buys
+// nothing — keeping the worst case per worktree well inside the status budget.
+// forJSON adds the repo slug and supervisor state that only JSON output uses.
+func probeWorktree(ctx context.Context, wt string, forJSON bool) worktreeProbe {
+	gitCtx, cancel := context.WithTimeout(ctx, gitProbeTimeout)
+	defer cancel()
+	p := worktreeProbe{branch: worktree.CurrentBranchContext(gitCtx, wt)}
+	if !forJSON {
+		return p
+	}
+	p.repo = worktree.RepoSlugFromRemoteContext(gitCtx, wt)
+	state, err := supervisor.SendWithTimeout(supervisor.SocketPath(wt), "status", supervisorProbeTimeout)
+	if err != nil {
+		state = "not running"
+	}
+	p.supervisorState = state
+	return p
 }
 
 // withWorktree filters allocs to those with a non-empty worktree path.
@@ -151,36 +163,76 @@ func withWorktree(allocs []registry.Allocation) []registry.Allocation {
 	return out
 }
 
+// worktreePaths snapshots each allocation's worktree path, giving probe
+// goroutines something safe to hold after their deadline has passed.
+func worktreePaths(allocs []registry.Allocation) []string {
+	paths := make([]string, len(allocs))
+	for i, a := range allocs {
+		paths[i], _ = a["worktree"].(string)
+	}
+	return paths
+}
+
+// filterByProject filters in memory rather than via reg.FindByProject, so the
+// filtered view shares maps with the full set that JSON output probes.
+func filterByProject(allocs []registry.Allocation, project string) []registry.Allocation {
+	var out []registry.Allocation
+	for _, a := range allocs {
+		if p, _ := a["project"].(string); p == project {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 func renderStatus(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, statusBudget)
 	defer cancel()
 
 	reg := registry.New("")
-	allocs := reg.Allocations()
+	all := reg.Allocations()
+	allocs := all
 	if statusProject != "" {
-		allocs = reg.FindByProject(statusProject)
+		allocs = filterByProject(all, statusProject)
 	}
 
-	syncBranches(ctx, reg, allocs)
+	// JSON output probes the whole registry — its worktree index spans every
+	// project so edge endpoints elsewhere resolve — while text output only
+	// needs the allocations it displays. One fan-out covers branch, repo
+	// slug, and supervisor state per worktree.
+	probed := withWorktree(allocs)
+	if statusJSON {
+		probed = withWorktree(all)
+	}
+	paths := worktreePaths(probed)
+	branchChanges := make(map[string]string)
+	repoByPath := make(map[string]string)
+	probeAll(ctx, paths,
+		func(ctx context.Context, wt string) worktreeProbe {
+			return probeWorktree(ctx, wt, statusJSON)
+		},
+		func(i int, p worktreeProbe) {
+			a := probed[i]
+			if old, _ := a["branch"].(string); p.branch != "" && p.branch != old {
+				a["branch"] = p.branch
+				branchChanges[paths[i]] = p.branch
+			}
+			if statusJSON {
+				a["supervisor"] = p.supervisorState
+				repoByPath[paths[i]] = p.repo
+			}
+		})
 
 	if statusCheck || statusJSON {
-		for _, a := range allocs {
-			ports := format.GetPorts(format.Allocation(a))
-			a["listening"] = allocator.CheckPortsListening(ports)
+		portSets := make([][]int, len(allocs))
+		for i, a := range allocs {
+			portSets[i] = format.GetPorts(format.Allocation(a))
 		}
-	}
-
-	if statusJSON {
-		probeAll(ctx, withWorktree(allocs),
-			func(_ context.Context, a registry.Allocation) string {
-				sockPath := supervisor.SocketPath(a["worktree"].(string))
-				resp, err := supervisor.SendWithTimeout(sockPath, "status", supervisorProbeTimeout)
-				if err != nil {
-					return "not running"
-				}
-				return resp
+		probeAll(ctx, portSets,
+			func(_ context.Context, ports []int) bool {
+				return allocator.CheckPortsListening(ports)
 			},
-			func(a registry.Allocation, state string) { a["supervisor"] = state })
+			func(i int, up bool) { allocs[i]["listening"] = up })
 	}
 
 	// A signal means the caller gave up; don't emit output they will never
@@ -189,10 +241,16 @@ func renderStatus(ctx context.Context) error {
 		return ctx.Err()
 	}
 
+	// One lock acquisition for every branch write-back, and none once the
+	// budget is spent, so a contended registry costs at most one lock wait.
+	if len(branchChanges) > 0 && ctx.Err() == nil {
+		if err := reg.UpdateBranches(branchChanges); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not update branches in registry: %v\n", err)
+		}
+	}
+
 	if statusJSON {
-		// Index spans the whole registry, not just the (possibly project-
-		// filtered) output set, so edge endpoints in other projects resolve.
-		idx := buildWorktreeIndex(ctx, reg.Allocations())
+		idx := assembleWorktreeIndex(probed, repoByPath)
 		for _, a := range withWorktree(allocs) {
 			wt := a["worktree"].(string)
 			if ref, ok := idx.refByPath[wt]; ok {

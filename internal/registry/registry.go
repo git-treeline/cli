@@ -352,6 +352,27 @@ func (r *Registry) UpdateField(worktreePath, key, value string) error {
 	})
 }
 
+// UpdateBranches sets the branch on every allocation whose worktree path is a
+// key in changes, under a single lock acquisition so callers pay at most one
+// lock wait rather than one per worktree. Paths match through resolvePath,
+// like UpdateField.
+func (r *Registry) UpdateBranches(changes map[string]string) error {
+	if len(changes) == 0 {
+		return nil
+	}
+	resolved := make(map[string]string, len(changes))
+	for wt, branch := range changes {
+		resolved[resolvePath(wt)] = branch
+	}
+	return r.withLock(func(data *RegistryData) {
+		for _, a := range data.Allocations {
+			if branch, ok := resolved[resolvePath(GetString(a, "worktree"))]; ok {
+				a["branch"] = branch
+			}
+		}
+	})
+}
+
 // SetLink stores a resolve override for the given worktree. When the worktree's
 // env template contains {resolve:project}, the link causes it to resolve against
 // the specified branch instead of the same-branch default.

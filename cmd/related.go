@@ -103,30 +103,41 @@ type worktreeIndex struct {
 	pathByRef map[registry.RepoRef]string
 }
 
-// buildWorktreeIndex resolves the (repo, branch) identity of every allocation
-// concurrently. Branch comes from the allocation (already synced by status);
-// only the repo slug requires a git call, bounded per worktree and by ctx so
-// one hung checkout can't stall the index or orphan a git process.
+// buildWorktreeIndex resolves the (repo, branch) identity of every allocation.
+// Branch comes from the allocation; the repo slug's git call runs concurrently
+// per worktree, each bounded so one hung checkout can't stall the index or
+// orphan a git process.
 func buildWorktreeIndex(ctx context.Context, allocs []registry.Allocation) *worktreeIndex {
+	wts := withWorktree(allocs)
+	paths := worktreePaths(wts)
+	repoByPath := make(map[string]string, len(paths))
+	probeAll(ctx, paths,
+		func(ctx context.Context, wt string) string {
+			ctx, cancel := context.WithTimeout(ctx, gitProbeTimeout)
+			defer cancel()
+			return worktree.RepoSlugFromRemoteContext(ctx, wt)
+		},
+		func(i int, repo string) { repoByPath[paths[i]] = repo })
+	return assembleWorktreeIndex(wts, repoByPath)
+}
+
+// assembleWorktreeIndex is the pure half of buildWorktreeIndex: it maps each
+// allocation's (repo, branch) identity both ways from already-probed slugs.
+func assembleWorktreeIndex(allocs []registry.Allocation, repoByPath map[string]string) *worktreeIndex {
 	idx := &worktreeIndex{
 		refByPath: make(map[string]registry.RepoRef),
 		pathByRef: make(map[registry.RepoRef]string),
 	}
-	probeAll(ctx, withWorktree(allocs),
-		func(ctx context.Context, a registry.Allocation) string {
-			ctx, cancel := context.WithTimeout(ctx, gitProbeTimeout)
-			defer cancel()
-			return worktree.RepoSlugFromRemoteContext(ctx, registry.GetString(a, "worktree"))
-		},
-		func(a registry.Allocation, repo string) {
-			if repo == "" {
-				return
-			}
-			wt := registry.GetString(a, "worktree")
-			ref := registry.RepoRef{Repo: repo, Branch: registry.GetString(a, "branch")}
-			idx.refByPath[wt] = ref
-			idx.pathByRef[ref] = wt
-		})
+	for _, a := range allocs {
+		wt := registry.GetString(a, "worktree")
+		repo := repoByPath[wt]
+		if repo == "" {
+			continue
+		}
+		ref := registry.RepoRef{Repo: repo, Branch: registry.GetString(a, "branch")}
+		idx.refByPath[wt] = ref
+		idx.pathByRef[ref] = wt
+	}
 	return idx
 }
 

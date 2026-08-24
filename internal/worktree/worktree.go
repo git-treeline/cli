@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -50,6 +51,15 @@ func gitOutputContext(ctx context.Context, dir string, args ...string) string {
 	}
 	// Bounds Wait after a kill if a grandchild is still holding the pipe.
 	cmd.WaitDelay = time.Second
+	if ctx.Done() != nil {
+		// Cancellable callers get a process group so git's own descendants
+		// (hooks, helpers) die with it. Plain gitOutput keeps the default
+		// group so terminal signals still reach the child directly.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		return ""

@@ -87,3 +87,71 @@ func TestGitOutputContextKillsStalledGit(t *testing.T) {
 		t.Fatalf("stalled git (pid %d) survived cancellation (kill -0: %v)", pid, err)
 	}
 }
+
+// TestGitOutputContextKillsDescendants proves the whole process group dies on
+// cancel, not just the direct child: a fake git that spawns a grandchild (no
+// exec, so the shell stays the direct child) must take the grandchild with it.
+func TestGitOutputContextKillsDescendants(t *testing.T) {
+	bin := t.TempDir()
+	kidFile := filepath.Join(bin, "kid.pid")
+	pidFile := filepath.Join(bin, "git.pid")
+	script := "#!/bin/sh\n" +
+		"sleep 60 &\n" +
+		"echo $! > " + kidFile + ".tmp && mv " + kidFile + ".tmp " + kidFile + "\n" +
+		"echo $$ > " + pidFile + ".tmp && mv " + pidFile + ".tmp " + pidFile + "\n" +
+		"wait\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan string, 1)
+	go func() { done <- CurrentBranchContext(ctx, t.TempDir()) }()
+
+	pid := waitForPidFile(t, pidFile)
+	kid := waitForPidFile(t, kidFile)
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CurrentBranchContext did not return after cancel")
+	}
+
+	waitForDeath(t, pid, "fake git")
+	waitForDeath(t, kid, "grandchild")
+}
+
+func waitForPidFile(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if raw, err := os.ReadFile(path); err == nil {
+			pid, aerr := strconv.Atoi(strings.TrimSpace(string(raw)))
+			if aerr != nil {
+				t.Fatalf("bad pid %q in %s: %v", raw, path, aerr)
+			}
+			return pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pid file %s never appeared", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitForDeath polls kill -0 until ESRCH: the direct child is reaped by Wait,
+// but an orphaned grandchild is reparented and reaped by the system a beat
+// later, so a single immediate check would flake.
+func waitForDeath(t *testing.T, pid int, label string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for syscall.Kill(pid, 0) != syscall.ESRCH {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s (pid %d) survived cancellation", label, pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

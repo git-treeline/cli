@@ -14,6 +14,43 @@ func newTestRegistry(t *testing.T) *Registry {
 	return New(filepath.Join(dir, "registry.json"))
 }
 
+func TestRegistry_UpdateBranches(t *testing.T) {
+	reg := newTestRegistry(t)
+	for _, e := range []Allocation{
+		{"project": "a", "worktree": "/tmp/wt/one", "branch": "old-one"},
+		{"project": "a", "worktree": "/tmp/wt/two", "branch": "old-two"},
+		{"project": "b", "worktree": "/tmp/wt/three", "branch": "keep"},
+	} {
+		if err := reg.Allocate(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := reg.UpdateBranches(map[string]string{
+		"/tmp/wt/one":  "new-one",
+		"/tmp/wt/two":  "new-two",
+		"/tmp/wt/gone": "ignored",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]string{
+		"/tmp/wt/one":   "new-one",
+		"/tmp/wt/two":   "new-two",
+		"/tmp/wt/three": "keep",
+	}
+	for wt, branch := range want {
+		if got := GetString(reg.Find(wt), "branch"); got != branch {
+			t.Errorf("%s: branch = %q, want %q", wt, got, branch)
+		}
+	}
+
+	if err := reg.UpdateBranches(nil); err != nil {
+		t.Fatalf("empty changes: %v", err)
+	}
+}
+
 func TestRegistry_AllocateAndFind(t *testing.T) {
 	reg := newTestRegistry(t)
 
