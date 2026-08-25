@@ -15,6 +15,8 @@ import (
 	"github.com/git-treeline/cli/internal/allocator"
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/format"
+	"github.com/git-treeline/cli/internal/platform"
+	"github.com/git-treeline/cli/internal/process"
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/supervisor"
 	"github.com/git-treeline/cli/internal/worktree"
@@ -188,6 +190,18 @@ func filterByProject(allocs []registry.Allocation, project string) []registry.Al
 func renderStatus(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, statusBudget)
 	defer cancel()
+
+	// A caller that SIGKILLs us gets no chance to clean up, and macOS has no
+	// way to tie a child's lifetime to its parent, so orphaned git probes are
+	// reaped by the next run instead. This keeps a repeatedly-killed poll from
+	// accumulating them — the process storm this bounding exists to prevent.
+	stateDir := platform.ConfigDir()
+	if n := process.ReapStale(stateDir); n > 0 {
+		fmt.Fprintf(os.Stderr, "note: reaped %d orphaned git process group(s) from a previous run\n", n)
+	}
+	tracker := process.NewTracker(stateDir)
+	defer tracker.Close()
+	ctx = process.WithTracker(ctx, tracker)
 
 	reg := registry.New("")
 	all := reg.Allocations()

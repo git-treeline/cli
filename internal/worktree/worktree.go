@@ -4,6 +4,7 @@
 package worktree
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/git-treeline/cli/internal/process"
 )
 
 // gitRun executes a git command in dir and returns trimmed stdout.
@@ -51,20 +54,36 @@ func gitOutputContext(ctx context.Context, dir string, args ...string) string {
 	}
 	// Bounds Wait after a kill if a grandchild is still holding the pipe.
 	cmd.WaitDelay = time.Second
-	if ctx.Done() != nil {
-		// Cancellable callers get a process group so git's own descendants
-		// (hooks, helpers) die with it. Plain gitOutput keeps the default
-		// group so terminal signals still reach the child directly.
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Cancel = func() error {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	if ctx.Done() == nil {
+		out, err := cmd.Output()
+		if err != nil {
+			return ""
 		}
+		return strings.TrimSpace(string(out))
 	}
-	out, err := cmd.Output()
-	if err != nil {
+
+	// Cancellable callers get a process group so git's own descendants (hooks,
+	// helpers) die with it. Plain gitOutput keeps the default group so terminal
+	// signals still reach the child directly.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+
+	// Start explicitly rather than via Output so the child's pid can be
+	// recorded before it runs: that window is exactly when a SIGKILL to us
+	// would orphan it, and the record is what lets the next run reap it.
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	if err := cmd.Start(); err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	// Setpgid makes the child its own group leader, so pgid == pid.
+	process.TrackerFrom(ctx).Add(cmd.Process.Pid)
+	if err := cmd.Wait(); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(buf.String())
 }
 
 // gitCheck runs a git command and returns true if it exits 0.
