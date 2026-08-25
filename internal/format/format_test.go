@@ -295,6 +295,7 @@ func TestDropDatabases_NeverDropsTemplate(t *testing.T) {
 		"databases":        []any{"dev.db", "test.db"},
 		"database_adapter": "sqlite",
 		"worktree":         dir,
+		"main_worktree":    true,
 	}}
 	if err := DropDatabases(allocs, nil); err != nil {
 		t.Fatalf("expected nil error, got %v", err)
@@ -304,5 +305,71 @@ func TestDropDatabases_NeverDropsTemplate(t *testing.T) {
 	}
 	if _, err := os.Stat(aux); !os.IsNotExist(err) {
 		t.Error("expected auxiliary database to be dropped")
+	}
+}
+
+func TestDropDatabases_SQLiteWorktreeCloneSharingTemplateNameDrops(t *testing.T) {
+	// A per-worktree sqlite clone legitimately shares the template's file
+	// name — identity is (directory, name), so the name match alone must not
+	// keep it: only the main worktree's files live beside the template.
+	dir := t.TempDir()
+	yml := "project: myapp\ndatabase:\n  adapter: sqlite\n  template: dev.db\n"
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+	clone := filepath.Join(dir, "dev.db")
+	_ = os.WriteFile(clone, []byte("data"), 0o644)
+
+	allocs := []Allocation{{
+		"database":         "dev.db",
+		"database_adapter": "sqlite",
+		"worktree":         dir,
+	}}
+	if err := DropDatabases(allocs, nil); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if _, err := os.Stat(clone); !os.IsNotExist(err) {
+		t.Error("expected the worktree's own clone to be dropped despite sharing the template's name")
+	}
+}
+
+func TestDropDatabases_MainEntryPrimaryKeptEvenWhenTemplateRenamed(t *testing.T) {
+	// The stored primary of a main entry IS the template by construction —
+	// it must survive even when database.template was renamed in config and
+	// the stored name no longer matches.
+	dir := t.TempDir()
+	yml := "project: myapp\ndatabase:\n  adapter: sqlite\n  template: renamed.db\n"
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+	stale := filepath.Join(dir, "old_dev.db")
+	_ = os.WriteFile(stale, []byte("data"), 0o644)
+
+	allocs := []Allocation{{
+		"database":         "old_dev.db",
+		"database_adapter": "sqlite",
+		"worktree":         dir,
+		"main_worktree":    true,
+	}}
+	if err := DropDatabases(allocs, nil); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if _, err := os.Stat(stale); err != nil {
+		t.Error("expected main entry's primary to survive despite a renamed template")
+	}
+}
+
+func TestDropDatabases_UnparseableConfigRefusesDrop(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: myapp\n\tbad: indent\n"), 0o644)
+	db := filepath.Join(dir, "dev.db")
+	_ = os.WriteFile(db, []byte("data"), 0o644)
+
+	allocs := []Allocation{{
+		"database":         "dev.db",
+		"database_adapter": "sqlite",
+		"worktree":         dir,
+	}}
+	if err := DropDatabases(allocs, nil); err == nil {
+		t.Error("expected an error when the config is unparseable")
+	}
+	if _, err := os.Stat(db); err != nil {
+		t.Error("expected no drop on an unparseable config")
 	}
 }

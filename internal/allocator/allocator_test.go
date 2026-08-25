@@ -1483,3 +1483,17 @@ func TestBuildDatabaseNames_EmptyPrimaryYieldsNoDatabases(t *testing.T) {
 		t.Errorf("expected no databases when the primary sanitizes to empty, got %v", names)
 	}
 }
+
+func TestAllocateMain_MarksMainWorktreeEntry(t *testing.T) {
+	al, reg := testAllocator(t, 1, "")
+	if _, err := al.Allocate("/wt/main", "main", true); err != nil {
+		t.Fatal(err)
+	}
+	entry := reg.Find("/wt/main")
+	if entry == nil {
+		t.Fatal("expected registry entry")
+	}
+	if entry["main_worktree"] != true {
+		t.Errorf("expected main_worktree flag on the main entry, got %v", entry["main_worktree"])
+	}
+}

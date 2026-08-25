@@ -540,6 +540,10 @@ func (s *Setup) dropStaleExtraDatabases(entry registry.Allocation) {
 		return
 	}
 	for _, name := range names[1:] {
+		if s.ProjectConfig.IsTemplateDatabase(name) {
+			s.log("Keeping template database %s (clone source)", name)
+			continue
+		}
 		dbPath := name
 		if adapterName == "sqlite" {
 			dbPath = filepath.Join(s.WorktreePath, name)

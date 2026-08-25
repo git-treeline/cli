@@ -129,6 +129,9 @@ in .treeline.yml. Use --from to clone from a different database instead.`,
 				Hint:    "Set 'database.template' in .treeline.yml, or pass --from <db_name>.",
 			})
 		}
+		if err := validateResetSource(info.target, source); err != nil {
+			return cliErr(cmd, err.(*CliError))
+		}
 
 		if dbResetDryRun {
 			fmt.Printf("Would drop %s and re-clone from %s. (dry-run)\n", info.target, source)
@@ -198,6 +201,20 @@ pg_dump file. Supports both custom format and plain SQL dumps.`,
 		fmt.Printf("==> Done. Database %s restored.\n", info.target)
 		return nil
 	},
+}
+
+// validateResetSource guards `gtl db reset`: dropping the target and then
+// cloning the source into it is incoherent when they are the same database —
+// on the main worktree the target IS the template, so the drop would destroy
+// the clone source and the clone-from-itself would then fail, unrecoverably.
+func validateResetSource(target, source string) error {
+	if source != target {
+		return nil
+	}
+	return &CliError{
+		Message: fmt.Sprintf("Database %q is the clone source itself — resetting it onto itself would drop the template and then fail.", target),
+		Hint:    "Use `gtl db template update` to advance the template, or `--from <db_name>` to re-clone it from another database.",
+	}
 }
 
 type dbInfo struct {

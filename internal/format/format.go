@@ -97,23 +97,25 @@ func DropDatabases(allocs []Allocation, keep map[string]bool) error {
 		// worktree whose checkout is already gone degrades to no args (and to
 		// no template guard below).
 		pc := config.LoadProjectConfig(GetStr(a, "worktree"))
+		// An unparseable config must refuse the drop, not degrade to "no
+		// template configured" — same rule handleProjectRename applies: a
+		// config-derived destructive decision on garbage input loses data.
+		if cfgErr := pc.LoadError(); cfgErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: %s — refusing to drop %s\n", cfgErr, strings.Join(names, ", "))
+			failed = append(failed, names...)
+			continue
+		}
 		adapter, err := database.ForAdapter(adapterName, pc.DatabaseConnArgs())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: %s, skipping database drop for %s\n", err, strings.Join(names, ", "))
 			failed = append(failed, names...)
 			continue
 		}
-		template := pc.DatabaseTemplate()
+		mainEntry := a["main_worktree"] == true
 		serverDBs, haveList := listDatabasesOnce(adapter, names)
 		for i, name := range names {
 			for _, target := range shardTargets(name, i > 0, serverDBs, haveList, keep) {
-				// A template database is never dropped as a side effect: on
-				// the main worktree the registry's primary IS the template —
-				// the clone source every future worktree needs — and a
-				// worktree pattern can also resolve to it. Same rule
-				// handleProjectRename applies on rename. Deliberate removal
-				// stays with `gtl db drop` / `gtl db template`.
-				if template != "" && target == template {
+				if keepAsTemplate(pc, target, adapterName, mainEntry, i == 0) {
 					fmt.Printf("==> Keeping template database %s (clone source); use `gtl db drop` to remove it deliberately\n", target)
 					continue
 				}
@@ -133,6 +135,31 @@ func DropDatabases(allocs []Allocation, keep map[string]bool) error {
 		return fmt.Errorf("failed to drop database(s): %s", strings.Join(failed, "; "))
 	}
 	return nil
+}
+
+// keepAsTemplate reports whether a drop target must be kept because it is (or
+// may be) the template database — the clone source every future worktree
+// needs, which is never dropped as a side effect (same rule
+// handleProjectRename applies on rename; deliberate removal stays with
+// `gtl db drop`). Three cases:
+//
+//   - The primary of a main-worktree entry IS the template by construction
+//     (allocateMain), even when the config's template was since renamed and
+//     the stored name no longer matches.
+//   - On server adapters, a name equal to the configured template denotes the
+//     same server-global object regardless of which worktree tracked it.
+//   - On sqlite a database's identity is (directory, name): a per-worktree
+//     clone legitimately shares the template's file name, so the name match
+//     only counts for the main worktree's entry, whose files live beside the
+//     template.
+func keepAsTemplate(pc *config.ProjectConfig, target, adapterName string, mainEntry, primary bool) bool {
+	if mainEntry && primary {
+		return true
+	}
+	if !pc.IsTemplateDatabase(target) {
+		return false
+	}
+	return adapterName != "sqlite" || mainEntry
 }
 
 // databaseLister is implemented by adapters that can enumerate databases on
