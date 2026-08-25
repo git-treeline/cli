@@ -312,6 +312,10 @@ func TestDropDatabases_SQLiteWorktreeCloneSharingTemplateNameDrops(t *testing.T)
 	// A per-worktree sqlite clone legitimately shares the template's file
 	// name — identity is (directory, name), so the name match alone must not
 	// keep it: only the main worktree's files live beside the template.
+	orig := detectMainRepo
+	detectMainRepo = func(string) string { return "/somewhere/else/main" }
+	defer func() { detectMainRepo = orig }()
+
 	dir := t.TempDir()
 	yml := "project: myapp\ndatabase:\n  adapter: sqlite\n  template: dev.db\n"
 	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
@@ -371,5 +375,32 @@ func TestDropDatabases_UnparseableConfigRefusesDrop(t *testing.T) {
 	}
 	if _, err := os.Stat(db); err != nil {
 		t.Error("expected no drop on an unparseable config")
+	}
+}
+
+func TestDropDatabases_LegacyMainEntrySQLiteTemplateKept(t *testing.T) {
+	// A main entry allocated before the main_worktree flag existed has no
+	// flag; when git identifies the directory as the main repo, the sqlite
+	// name match must still protect the template file.
+	orig := detectMainRepo
+	detectMainRepo = func(wt string) string { return wt }
+	defer func() { detectMainRepo = orig }()
+
+	dir := t.TempDir()
+	yml := "project: myapp\ndatabase:\n  adapter: sqlite\n  template: dev.db\n"
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+	template := filepath.Join(dir, "dev.db")
+	_ = os.WriteFile(template, []byte("data"), 0o644)
+
+	allocs := []Allocation{{
+		"database":         "dev.db",
+		"database_adapter": "sqlite",
+		"worktree":         dir,
+	}}
+	if err := DropDatabases(allocs, nil); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if _, err := os.Stat(template); err != nil {
+		t.Error("expected legacy main entry's template to survive")
 	}
 }

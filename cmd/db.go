@@ -129,8 +129,8 @@ in .treeline.yml. Use --from to clone from a different database instead.`,
 				Hint:    "Set 'database.template' in .treeline.yml, or pass --from <db_name>.",
 			})
 		}
-		if err := validateResetSource(info.target, source); err != nil {
-			return cliErr(cmd, err.(*CliError))
+		if resetErr := validateResetSource(info.target, source); resetErr != nil {
+			return cliErr(cmd, resetErr)
 		}
 
 		if dbResetDryRun {
@@ -207,7 +207,7 @@ pg_dump file. Supports both custom format and plain SQL dumps.`,
 // cloning the source into it is incoherent when they are the same database —
 // on the main worktree the target IS the template, so the drop would destroy
 // the clone source and the clone-from-itself would then fail, unrecoverably.
-func validateResetSource(target, source string) error {
+func validateResetSource(target, source string) *CliError {
 	if source != target {
 		return nil
 	}

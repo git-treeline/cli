@@ -13,6 +13,7 @@ import (
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/database"
 	"github.com/git-treeline/cli/internal/registry"
+	"github.com/git-treeline/cli/internal/worktree"
 )
 
 // JoinInts formats a slice of integers as a string with the given separator.
@@ -115,7 +116,7 @@ func DropDatabases(allocs []Allocation, keep map[string]bool) error {
 		serverDBs, haveList := listDatabasesOnce(adapter, names)
 		for i, name := range names {
 			for _, target := range shardTargets(name, i > 0, serverDBs, haveList, keep) {
-				if keepAsTemplate(pc, target, adapterName, mainEntry, i == 0) {
+				if keepAsTemplate(pc, GetStr(a, "worktree"), target, adapterName, mainEntry, i == 0) {
 					fmt.Printf("==> Keeping template database %s (clone source); use `gtl db drop` to remove it deliberately\n", target)
 					continue
 				}
@@ -152,15 +153,27 @@ func DropDatabases(allocs []Allocation, keep map[string]bool) error {
 //     clone legitimately shares the template's file name, so the name match
 //     only counts for the main worktree's entry, whose files live beside the
 //     template.
-func keepAsTemplate(pc *config.ProjectConfig, target, adapterName string, mainEntry, primary bool) bool {
+func keepAsTemplate(pc *config.ProjectConfig, worktree, target, adapterName string, mainEntry, primary bool) bool {
 	if mainEntry && primary {
 		return true
 	}
 	if !pc.IsTemplateDatabase(target) {
 		return false
 	}
-	return adapterName != "sqlite" || mainEntry
+	if adapterName != "sqlite" {
+		return true
+	}
+	// Registry entries written before the main_worktree flag existed leave
+	// the sqlite name match ambiguous: main entry (the template file itself)
+	// or a per-worktree clone? Ask git which directory is the main repo; a
+	// directory git can't answer for keeps the database — a destroyed
+	// template is unrecoverable, a leaked clone file is not.
+	return mainEntry || detectMainRepo(worktree) == worktree
 }
+
+// detectMainRepo is worktree.DetectMainRepo, injectable for tests (the real
+// one shells out to git, which a bare test tempdir can't answer).
+var detectMainRepo = worktree.DetectMainRepo
 
 // databaseLister is implemented by adapters that can enumerate databases on
 // the server (PostgreSQL). Used to find framework-derived parallel-test
