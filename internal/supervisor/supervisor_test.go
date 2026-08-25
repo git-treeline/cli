@@ -15,7 +15,7 @@ import (
 
 func TestSupervisor_StopAndResume(t *testing.T) {
 	dir := t.TempDir()
-	sock := testSocket(t, dir)
+	sock := tmpSocket(t)
 	marker := filepath.Join(dir, "started")
 
 	cmd := "echo $$ >> " + marker + " && sleep 60"
@@ -90,7 +90,7 @@ func TestSupervisor_StopAndResume(t *testing.T) {
 
 func TestSupervisor_Shutdown(t *testing.T) {
 	dir := t.TempDir()
-	sock := testSocket(t, dir)
+	sock := tmpSocket(t)
 
 	sv := newTestSupervisor(t, "sleep 60", dir, sock)
 
@@ -123,7 +123,7 @@ func TestSupervisor_Shutdown(t *testing.T) {
 
 func TestSupervisor_Restart(t *testing.T) {
 	dir := t.TempDir()
-	sock := testSocket(t, dir)
+	sock := tmpSocket(t)
 	marker := filepath.Join(dir, "started")
 
 	// Command creates a marker file with PID, then sleeps
@@ -159,7 +159,7 @@ func TestSupervisor_Restart(t *testing.T) {
 
 func TestSupervisor_UpdateEnv(t *testing.T) {
 	dir := t.TempDir()
-	sock := testSocket(t, dir)
+	sock := tmpSocket(t)
 	envOut := filepath.Join(dir, "env.out")
 
 	cmd := "env > " + envOut + " && sleep 60"
@@ -211,7 +211,7 @@ func TestSupervisor_UpdateEnv(t *testing.T) {
 
 func TestSupervisor_GetCommand(t *testing.T) {
 	dir := t.TempDir()
-	sock := testSocket(t, dir)
+	sock := tmpSocket(t)
 
 	cmd := "sleep 60"
 	sv := newTestSupervisor(t, cmd, dir, sock)
@@ -346,7 +346,7 @@ func TestSupervisor_StartDuringStopReturnsRetryError(t *testing.T) {
 
 func TestSupervisor_UpdateEnvEmpty(t *testing.T) {
 	dir := t.TempDir()
-	sock := testSocket(t, dir)
+	sock := tmpSocket(t)
 
 	sv := newTestSupervisor(t, "sleep 60", dir, sock)
 
@@ -468,8 +468,6 @@ func TestSupervisor_StartDuringStopSpawnsNoExtraChild(t *testing.T) {
 	}
 }
 
-// tmpSocket returns a short /tmp socket path (macOS caps unix socket paths at
-// ~104 bytes, which t.TempDir() paths exceed) and registers its cleanup.
 // newTestSupervisor builds a Supervisor wired for tests: quiet logging, child
 // output captured instead of inherited, and a guaranteed reap of the child
 // process group when the test ends.
@@ -537,20 +535,8 @@ func reapChildGroup(t *testing.T, sock string) {
 	_ = os.Remove(ChildPidPath(sock))
 }
 
-// testSocket returns a socket path under the test's temp dir, with the same
-// cleanup guarantees as tmpSocket.
-func testSocket(t *testing.T, dir string) string {
-	t.Helper()
-	sock := filepath.Join(dir, "test.sock")
-	t.Cleanup(func() {
-		reapChildGroup(t, sock)
-		_ = os.Remove(sock)
-		_ = os.Remove(ChildPidPath(sock))
-		_ = os.Remove(PidPath(sock))
-	})
-	return sock
-}
-
+// tmpSocket returns a short /tmp socket path (macOS caps unix socket paths at
+// ~104 bytes, which t.TempDir() paths exceed) and registers its cleanup.
 func tmpSocket(t *testing.T) string {
 	t.Helper()
 	f, err := os.CreateTemp("/tmp", "gtl-test-*.sock")
@@ -623,7 +609,7 @@ func waitForFile(t *testing.T, path string, timeout time.Duration) {
 
 func TestSupervisor_SIGHUPShutdown(t *testing.T) {
 	dir := t.TempDir()
-	sock := testSocket(t, dir)
+	sock := tmpSocket(t)
 
 	sv := newTestSupervisor(t, "sleep 60", dir, sock)
 
@@ -726,8 +712,6 @@ func TestSupervisor_ChildOutputRouting(t *testing.T) {
 
 	t.Run("override receives child output", func(t *testing.T) {
 		dir := t.TempDir()
-		// tmpSocket, not the temp dir: this subtest's name makes t.TempDir()
-		// long enough to blow past the ~104 byte macOS socket path limit.
 		sock := tmpSocket(t)
 		sv := newTestSupervisor(t, "echo hello-from-child && sleep 60", dir, sock)
 		out := &syncBuffer{}
