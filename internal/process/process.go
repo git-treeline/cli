@@ -84,6 +84,37 @@ func Alive(pid int) bool {
 	return syscall.Kill(pid, 0) != syscall.ESRCH
 }
 
+// StartTime returns when the process began, via ps. The second return is
+// false when the process is gone or ps could not be read. Used to tell a
+// process apart from a later one that happens to reuse its pid.
+func StartTime(pid int) (time.Time, bool) {
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "lstart=").Output()
+	if err != nil {
+		return time.Time{}, false
+	}
+	raw := strings.TrimSpace(string(out))
+	if raw == "" {
+		return time.Time{}, false
+	}
+	// macOS ps renders lstart as "Tue Aug 25 17:22:57 2026", padding the day
+	// to two columns for single digits.
+	t, err := time.ParseInLocation("Mon Jan _2 15:04:05 2006", raw, time.Local)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// KillGroup SIGKILLs the process group led by pgid, falling back to the single
+// pid when the group signal is rejected. Returns true if a signal was
+// delivered to something.
+func KillGroup(pgid int) bool {
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err == nil {
+		return true
+	}
+	return syscall.Kill(pgid, syscall.SIGKILL) == nil
+}
+
 // KillGracefully sends SIGTERM, waits up to timeout for the process to exit,
 // then escalates to SIGKILL. It signals the whole process group (negative pid)
 // so children spawned via `sh -c` die too, falling back to the single pid when
