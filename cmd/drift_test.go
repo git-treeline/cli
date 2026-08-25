@@ -418,3 +418,37 @@ func TestResolveRegistryDrift_RenameCarriesExtras(t *testing.T) {
 		t.Errorf("expected no drops on rename, got %v", mock.dropped)
 	}
 }
+
+func TestResolveRegistryDrift_MainEntryKeepsTemplate(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: new_name\ndatabase:\n  template: club_development\n"), 0o644)
+
+	reg := newTestRegistry(t)
+	_ = reg.Allocate(registry.Allocation{
+		"worktree":         dir,
+		"project":          "old_name",
+		"port":             float64(3002),
+		"database":         "club_development",
+		"database_adapter": "postgresql",
+		"main_worktree":    true,
+	})
+
+	mock := newMockDB("club_development")
+	origAdapter := adapterFor
+	origInput := driftReader
+	defer func() { adapterFor = origAdapter; driftReader = origInput }()
+
+	adapterFor = func(name string, args []string) (database.Adapter, error) { return mock, nil }
+	// No menu should appear — only the final Proceed? prompt.
+	driftReader = bufio.NewReader(strings.NewReader("y\n"))
+
+	if err := resolveRegistryDrift(dir, "new_name", "old_name", reg); err != nil {
+		t.Fatal(err)
+	}
+	if len(mock.dropped) > 0 || len(mock.renamed) > 0 {
+		t.Errorf("template must be left untouched, got drops=%v renames=%v", mock.dropped, mock.renamed)
+	}
+	if reg.Find(dir) != nil {
+		t.Error("expected registry entry to be reset")
+	}
+}

@@ -116,7 +116,20 @@ func resolveRegistryDrift(absPath, yamlName, registryName string, reg *registry.
 	dbAction := dbLeave
 	var oldDBPath, newDB, newDBPath string
 
-	if oldDB != "" {
+	// The template database is never dropped or renamed here: on the main
+	// worktree the entry's primary IS the template (allocateMain), and a
+	// worktree pattern can resolve to it. This path front-runs
+	// handleProjectRename (the entry is released below, so its guard never
+	// sees it), so the same rule must hold here. dbAction stays dbLeave.
+	templateProtected := alloc["main_worktree"] == true ||
+		config.LoadProjectConfig(absPath).IsTemplateDatabase(oldDB)
+
+	if oldDB != "" && templateProtected {
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintf(os.Stderr, "  Database %s is the template (clone source); it will be kept.\n", oldDB)
+	}
+
+	if oldDB != "" && !templateProtected {
 		pc := config.LoadProjectConfig(absPath)
 		adapter, err := adapterFor(adapterName, pc.DatabaseConnArgs())
 		if err != nil {
@@ -212,6 +225,10 @@ func resolveRegistryDrift(absPath, yamlName, registryName string, reg *registry.
 		// nothing would track them. Failures warn rather than abort: the
 		// primary action already succeeded.
 		for _, ex := range extras {
+			if pc.IsTemplateDatabase(ex) {
+				fmt.Printf("==> Keeping template database %s (clone source)\n", ex)
+				continue
+			}
 			exPath := ex
 			if adapterName == "sqlite" {
 				exPath = filepath.Join(absPath, ex)

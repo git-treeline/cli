@@ -47,3 +47,25 @@ func TestResolveDBPaths_PostgreSQL_EmptyTemplate(t *testing.T) {
 		t.Errorf("template = %q, want empty", tmpl)
 	}
 }
+
+func TestValidateResetSource(t *testing.T) {
+	cases := []struct {
+		name, target, source string
+		wantErr              bool
+	}{
+		{"worktree_clone_from_template", "myapp_dev_feat", "myapp_development", false},
+		{"main_target_is_template", "myapp_development", "myapp_development", true},
+		{"main_with_from_other", "myapp_development", "staging_snapshot", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateResetSource(c.target, c.source)
+			if c.wantErr && err == nil {
+				t.Error("expected refusal when source == target, got nil")
+			}
+			if !c.wantErr && err != nil {
+				t.Errorf("expected nil, got %v", err)
+			}
+		})
+	}
+}

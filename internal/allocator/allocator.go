@@ -62,7 +62,11 @@ type Allocation struct {
 	DatabaseAdapter string
 	RedisDB         int
 	RedisPrefix     string
-	Reused          bool
+	// MainWorktree marks the main repo's allocation, whose primary database
+	// IS the template. Persisted so teardown can protect the clone source
+	// even when the config's template name has since changed.
+	MainWorktree bool
+	Reused       bool
 }
 
 // PrimaryDatabase returns the first database in the allocation — the one
@@ -98,6 +102,10 @@ func (a *Allocation) ToRegistryEntry() registry.Allocation {
 			dbs[i] = name
 		}
 		entry["databases"] = dbs
+	}
+
+	if a.MainWorktree {
+		entry["main_worktree"] = true
 	}
 
 	if a.RedisDB > 0 {
@@ -195,6 +203,7 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string, mainWorktr
 		Ports:           ports,
 		Databases:       registry.ExtractDatabases(entry),
 		DatabaseAdapter: registry.GetString(entry, "database_adapter"),
+		MainWorktree:    entry["main_worktree"] == true,
 		Reused:          true,
 	}
 
@@ -309,6 +318,7 @@ func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*A
 			Ports:           ports,
 			Databases:       mainDatabases,
 			DatabaseAdapter: al.ProjectConfig.DatabaseAdapter(),
+			MainWorktree:    true,
 		}, nil
 	}
 
