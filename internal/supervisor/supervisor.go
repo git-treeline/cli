@@ -407,7 +407,9 @@ func Send(socketPath, command string) (string, error) {
 // SendWithTimeout is like Send but with a caller-specified deadline.
 // Used by --await which may need to wait longer than the default 30s.
 func SendWithTimeout(socketPath, command string, timeout time.Duration) (string, error) {
-	conn, err := net.Dial("unix", socketPath)
+	// The dial is bounded too: a wedged supervisor with a full accept backlog
+	// would otherwise block connect() indefinitely, before the deadline applies.
+	conn, err := net.DialTimeout("unix", socketPath, timeout)
 	if err != nil {
 		return "", fmt.Errorf("server not running (no socket at %s)", socketPath)
 	}

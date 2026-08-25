@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -191,7 +192,7 @@ func gcDanglingEdges(reg *registry.Registry) {
 	if len(reg.AllEdges()) == 0 {
 		return
 	}
-	idx := buildWorktreeIndex(reg.Allocations())
+	idx := buildWorktreeIndex(context.Background(), reg.Allocations())
 	resolvable := func(ref registry.RepoRef) bool {
 		_, ok := idx.pathByRef[ref]
 		return ok

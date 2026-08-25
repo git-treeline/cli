@@ -1,11 +1,11 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/registry"
@@ -39,7 +39,7 @@ when it isn't currently checked out (dangling).`,
 		abs, _ := filepath.Abs(cwd)
 
 		reg := registry.New("")
-		idx := buildWorktreeIndex(reg.Allocations())
+		idx := buildWorktreeIndex(cmd.Context(), reg.Allocations())
 
 		selfRef, ok := idx.refByPath[resolveIndexPath(idx, abs)]
 		if !ok {
@@ -103,38 +103,41 @@ type worktreeIndex struct {
 	pathByRef map[registry.RepoRef]string
 }
 
-// buildWorktreeIndex resolves the (repo, branch) identity of every allocation
-// concurrently. Branch comes from the allocation (already synced by status);
-// only the repo slug requires a git call, mirroring status's existing per-
-// worktree git fan-out.
-func buildWorktreeIndex(allocs []registry.Allocation) *worktreeIndex {
+// buildWorktreeIndex resolves the (repo, branch) identity of every allocation.
+// Branch comes from the allocation; the repo slug's git call runs concurrently
+// per worktree, each bounded so one hung checkout can't stall the index or
+// orphan a git process.
+func buildWorktreeIndex(ctx context.Context, allocs []registry.Allocation) *worktreeIndex {
+	wts := withWorktree(allocs)
+	paths := worktreePaths(wts)
+	repoByPath := make(map[string]string, len(paths))
+	probeAll(ctx, paths,
+		func(ctx context.Context, wt string) string {
+			ctx, cancel := context.WithTimeout(ctx, gitProbeTimeout)
+			defer cancel()
+			return worktree.RepoSlugFromRemoteContext(ctx, wt)
+		},
+		func(i int, repo string) { repoByPath[paths[i]] = repo })
+	return assembleWorktreeIndex(wts, repoByPath)
+}
+
+// assembleWorktreeIndex is the pure half of buildWorktreeIndex: it maps each
+// allocation's (repo, branch) identity both ways from already-probed slugs.
+func assembleWorktreeIndex(allocs []registry.Allocation, repoByPath map[string]string) *worktreeIndex {
 	idx := &worktreeIndex{
 		refByPath: make(map[string]registry.RepoRef),
 		pathByRef: make(map[registry.RepoRef]string),
 	}
-	var mu sync.Mutex
-	var wg sync.WaitGroup
 	for _, a := range allocs {
 		wt := registry.GetString(a, "worktree")
-		branch := registry.GetString(a, "branch")
-		if wt == "" {
+		repo := repoByPath[wt]
+		if repo == "" {
 			continue
 		}
-		wg.Add(1)
-		go func(wt, branch string) {
-			defer wg.Done()
-			repo := worktree.RepoSlugFromRemote(wt)
-			if repo == "" {
-				return
-			}
-			ref := registry.RepoRef{Repo: repo, Branch: branch}
-			mu.Lock()
-			idx.refByPath[wt] = ref
-			idx.pathByRef[ref] = wt
-			mu.Unlock()
-		}(wt, branch)
+		ref := registry.RepoRef{Repo: repo, Branch: registry.GetString(a, "branch")}
+		idx.refByPath[wt] = ref
+		idx.pathByRef[ref] = wt
 	}
-	wg.Wait()
 	return idx
 }
 
