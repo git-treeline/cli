@@ -228,6 +228,14 @@ func (pc *ProjectConfig) DatabasePatterns() []string {
 	return patterns
 }
 
+// IsTemplateDatabase reports whether name is the configured template database.
+// Sites that drop databases as a side effect consult this so the clone source
+// is never destroyed except through an explicit command (`gtl db drop`).
+func (pc *ProjectConfig) IsTemplateDatabase(name string) bool {
+	t := pc.DatabaseTemplate()
+	return t != "" && name == t
+}
+
 // DBSourceConfig is one configured remote source under database.sources.<env>.
 type DBSourceConfig struct {
 	Via string // "fly" | "heroku" | "env"

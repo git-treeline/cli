@@ -776,7 +776,7 @@ If your project uses PostgreSQL or SQLite, Treeline can clone your development d
 
 Set `database.template` in your `.treeline.yml` to enable cloning. Omit it entirely if your project doesn't need database isolation, or if you use migrations instead (e.g. `npx prisma migrate deploy` in `commands.setup`).
 
-Use `--drop-db` with `gtl release` to clean up cloned databases.
+Use `--drop-db` with `gtl release` to clean up cloned databases. The template database itself is never dropped this way — on the main worktree the allocation's database *is* the template — so the clone source survives releases; remove it deliberately with `gtl db drop` if you really mean to.
 
 ## Redis namespacing (optional)
 
