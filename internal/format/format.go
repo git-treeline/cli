@@ -94,17 +94,29 @@ func DropDatabases(allocs []Allocation, keep map[string]bool) error {
 		adapterName := GetStr(a, "database_adapter")
 		// Connection args come from the worktree's project config so listing
 		// and dropping hit the configured server, not psql's default one. A
-		// worktree whose checkout is already gone degrades to no args.
-		connArgs := config.LoadProjectConfig(GetStr(a, "worktree")).DatabaseConnArgs()
-		adapter, err := database.ForAdapter(adapterName, connArgs)
+		// worktree whose checkout is already gone degrades to no args (and to
+		// no template guard below).
+		pc := config.LoadProjectConfig(GetStr(a, "worktree"))
+		adapter, err := database.ForAdapter(adapterName, pc.DatabaseConnArgs())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: %s, skipping database drop for %s\n", err, strings.Join(names, ", "))
 			failed = append(failed, names...)
 			continue
 		}
+		template := pc.DatabaseTemplate()
 		serverDBs, haveList := listDatabasesOnce(adapter, names)
 		for i, name := range names {
 			for _, target := range shardTargets(name, i > 0, serverDBs, haveList, keep) {
+				// A template database is never dropped as a side effect: on
+				// the main worktree the registry's primary IS the template —
+				// the clone source every future worktree needs — and a
+				// worktree pattern can also resolve to it. Same rule
+				// handleProjectRename applies on rename. Deliberate removal
+				// stays with `gtl db drop` / `gtl db template`.
+				if template != "" && target == template {
+					fmt.Printf("==> Keeping template database %s (clone source); use `gtl db drop` to remove it deliberately\n", target)
+					continue
+				}
 				dropTarget := target
 				if adapterName == "sqlite" {
 					dropTarget = filepath.Join(GetStr(a, "worktree"), target)

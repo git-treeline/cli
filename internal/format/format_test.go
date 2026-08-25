@@ -279,3 +279,30 @@ func TestDropDatabases_KeepGuardsPrimary(t *testing.T) {
 		t.Error("expected auxiliary database to be dropped")
 	}
 }
+
+func TestDropDatabases_NeverDropsTemplate(t *testing.T) {
+	dir := t.TempDir()
+	yml := "project: myapp\ndatabase:\n  adapter: sqlite\n  template: dev.db\n"
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+
+	template := filepath.Join(dir, "dev.db")
+	aux := filepath.Join(dir, "test.db")
+	_ = os.WriteFile(template, []byte("data"), 0o644)
+	_ = os.WriteFile(aux, []byte("data"), 0o644)
+
+	// A main-worktree entry: the primary IS the template.
+	allocs := []Allocation{{
+		"databases":        []any{"dev.db", "test.db"},
+		"database_adapter": "sqlite",
+		"worktree":         dir,
+	}}
+	if err := DropDatabases(allocs, nil); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if _, err := os.Stat(template); err != nil {
+		t.Error("expected template database to survive --drop-db")
+	}
+	if _, err := os.Stat(aux); !os.IsNotExist(err) {
+		t.Error("expected auxiliary database to be dropped")
+	}
+}
