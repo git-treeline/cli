@@ -502,12 +502,12 @@ env:
 		t.Fatal(err)
 	}
 
-	if alloc.Database == "" {
+	if alloc.PrimaryDatabase() == "" {
 		t.Fatal("expected database name to be set")
 	}
 
 	// The cloned DB should exist in the worktree
-	clonedPath := filepath.Join(worktree, alloc.Database)
+	clonedPath := filepath.Join(worktree, alloc.PrimaryDatabase())
 	data, err := os.ReadFile(clonedPath)
 	if err != nil {
 		t.Fatalf("expected cloned SQLite file at %s: %v", clonedPath, err)
@@ -1209,7 +1209,7 @@ env:
 	if err != nil {
 		t.Fatalf("Run() failed: %v", err)
 	}
-	if alloc.Database == "" {
+	if alloc.PrimaryDatabase() == "" {
 		t.Fatal("expected database name to be set")
 	}
 
@@ -1217,7 +1217,7 @@ env:
 		t.Error("expected migrate command to have run")
 	}
 
-	clonedPath := filepath.Join(worktreeDir, alloc.Database)
+	clonedPath := filepath.Join(worktreeDir, alloc.PrimaryDatabase())
 	data, err := os.ReadFile(clonedPath)
 	if err != nil {
 		t.Fatalf("expected cloned SQLite file at %s: %v", clonedPath, err)

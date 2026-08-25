@@ -174,8 +174,8 @@ func handleSetup(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToo
 	if alloc.Port > 0 {
 		result["ports"] = alloc.Ports
 	}
-	if alloc.Database != "" {
-		result["database"] = alloc.Database
+	if db := alloc.PrimaryDatabase(); db != "" {
+		result["database"] = db
 	}
 
 	return jsonResult(result)
@@ -307,8 +307,8 @@ func handleNew(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolR
 		result["ports"] = alloc.Ports
 		result["url"] = buildWorktreeURL(alloc.Port, projectName, alloc.Branch, uc)
 	}
-	if alloc.Database != "" {
-		result["database"] = alloc.Database
+	if db := alloc.PrimaryDatabase(); db != "" {
+		result["database"] = db
 	}
 	if wantOpen {
 		if url, ok := result["url"].(string); ok {

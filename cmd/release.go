@@ -109,7 +109,7 @@ func runReleaseSingle(args []string) error {
 	fa := format.Allocation(alloc)
 	ports := format.GetPorts(fa)
 	name := format.DisplayName(fa)
-	db := format.GetStr(fa, "database")
+	db := strings.Join(registry.ExtractDatabases(alloc), ", ")
 
 	line := fmt.Sprintf("Release: %s", name)
 	if len(ports) > 0 {
@@ -148,7 +148,13 @@ func runReleaseSingle(args []string) error {
 	}
 
 	if releaseDropDB {
-		if err := format.DropSingleDB(fa, absPath); err != nil {
+		// Key the releasing set by the entry's STORED worktree path: the
+		// registry stores symlink-resolved paths (macOS /tmp → /private/tmp),
+		// so the raw absPath may never match and the entry's own databases
+		// would land in the keep-set, silently blocking their drop.
+		storedPath := registry.GetString(alloc, "worktree")
+		keep := keptDatabaseNames(reg.Allocations(), map[string]bool{storedPath: true})
+		if err := format.DropSingleDB(fa, absPath, keep); err != nil {
 			return err
 		}
 	}
@@ -169,7 +175,7 @@ func runReleaseSingle(args []string) error {
 		fmt.Printf("  Port:     %d\n", ports[0])
 	}
 	if db != "" {
-		fmt.Printf("  Database: %s\n", db)
+		fmt.Printf("  Databases: %s\n", db)
 	}
 
 	if releaseRemoveWorktree {
@@ -219,7 +225,7 @@ func runReleaseBatch(project string, all bool) error {
 		fa := format.Allocation(a)
 		ports := format.GetPorts(fa)
 		name := format.DisplayName(fa)
-		db := format.GetStr(fa, "database")
+		db := strings.Join(registry.ExtractDatabases(a), ", ")
 		proj := format.GetStr(fa, "project")
 
 		var line string
@@ -281,10 +287,12 @@ func releaseAndTeardown(reg *registry.Registry, allocs []registry.Allocation, dr
 
 	if dropDB {
 		formatAllocs := make([]format.Allocation, len(allocs))
+		releasing := make(map[string]bool, len(allocs))
 		for i, a := range allocs {
 			formatAllocs[i] = format.Allocation(a)
+			releasing[registry.GetString(a, "worktree")] = true
 		}
-		if err := format.DropDatabases(formatAllocs); err != nil {
+		if err := format.DropDatabases(formatAllocs, keptDatabaseNames(reg.Allocations(), releasing)); err != nil {
 			return 0, err
 		}
 	}
@@ -356,6 +364,25 @@ func runPreReleaseHooks(allocs []registry.Allocation, force bool, runHook func(n
 		kept = append(kept, a)
 	}
 	return kept, post
+}
+
+// keptDatabaseNames returns every database name tracked by registry entries
+// other than the ones being released, keyed for the shard-pattern drop guard:
+// a live worktree's database can never be dropped even if a released
+// worktree's name collides or shard-overlaps it. The releasing set must be
+// keyed by the entries' stored worktree paths (symlink-resolved at allocation
+// time), not by caller-supplied paths.
+func keptDatabaseNames(allocs []registry.Allocation, releasing map[string]bool) map[string]bool {
+	keep := map[string]bool{}
+	for _, a := range allocs {
+		if releasing[registry.GetString(a, "worktree")] {
+			continue
+		}
+		for _, name := range registry.ExtractDatabases(a) {
+			keep[name] = true
+		}
+	}
+	return keep
 }
 
 // runReleaseHook runs one release lifecycle hook's commands in dir. An empty

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -468,22 +469,22 @@ func TestProjectConfig_EditorAccessors_Empty(t *testing.T) {
 	}
 }
 
-func TestProjectConfig_DatabasePattern_Default(t *testing.T) {
+func TestProjectConfig_DatabasePatterns_Default(t *testing.T) {
 	dir := t.TempDir()
 	pc := LoadProjectConfig(dir)
-	if pc.DatabasePattern() != "{template}_{worktree}" {
-		t.Errorf("expected default pattern, got %s", pc.DatabasePattern())
+	if got := pc.DatabasePatterns(); len(got) != 1 || got[0] != "{template}_{worktree}" {
+		t.Errorf("expected default pattern, got %v", got)
 	}
 }
 
-func TestProjectConfig_DatabasePattern_Custom(t *testing.T) {
+func TestProjectConfig_DatabasePatterns_Custom(t *testing.T) {
 	dir := t.TempDir()
 	yml := "project: myapp\ndatabase:\n  adapter: postgresql\n  pattern: \"{template}--{worktree}\"\n"
 	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
 
 	pc := LoadProjectConfig(dir)
-	if pc.DatabasePattern() != "{template}--{worktree}" {
-		t.Errorf("expected custom pattern, got %s", pc.DatabasePattern())
+	if got := pc.DatabasePatterns(); len(got) != 1 || got[0] != "{template}--{worktree}" {
+		t.Errorf("expected custom pattern as a one-entry list, got %v", got)
 	}
 }
 
@@ -1137,5 +1138,74 @@ func TestLoadProjectConfig_AbsentIsNotError(t *testing.T) {
 	}
 	if err := pc.Validate(); err != nil {
 		t.Errorf("expected Validate to pass for an absent config, got %v", err)
+	}
+}
+
+func TestDatabasePatterns_ExtraAppendedInOrder(t *testing.T) {
+	dir := t.TempDir()
+	yml := `project: myapp
+database:
+  adapter: postgresql
+  template: myapp_development
+  pattern: "myapp_{worktree}"
+  extra:
+    - "{database}_test"
+    - "{database}_queue"
+`
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+
+	got := LoadProjectConfig(dir).DatabasePatterns()
+	want := []string{"myapp_{worktree}", "{database}_test", "{database}_queue"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d patterns, got %v", len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("pattern %d = %q, want %q (the primary leads, extras follow in order)", i, got[i], want[i])
+		}
+	}
+}
+
+func TestDatabasePatterns_ExtraWithoutPatternUsesDefaultPrimary(t *testing.T) {
+	dir := t.TempDir()
+	yml := "project: myapp\ndatabase:\n  template: myapp_development\n  extra:\n    - \"{database}_test\"\n"
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+
+	got := LoadProjectConfig(dir).DatabasePatterns()
+	want := []string{"{template}_{worktree}", "{database}_test"}
+	if !slices.Equal(got, want) {
+		t.Errorf("expected %v, got %v", want, got)
+	}
+}
+
+func TestValidate_DatabasePatternAndExtra(t *testing.T) {
+	cases := []struct {
+		name, db string
+		wantErr  bool
+	}{
+		{"scalar_pattern", "  pattern: \"{template}_{worktree}\"\n", false},
+		{"scalar_pattern_with_extra", "  pattern: \"myapp_{worktree}\"\n  extra:\n    - \"{database}_test\"\n", false},
+		{"extra_without_pattern", "  extra:\n    - \"{database}_test\"\n", false},
+		{"list_form_pattern", "  pattern:\n    - \"myapp_{worktree}\"\n    - \"{database}_test\"\n", true},
+		{"empty_pattern", "  pattern: \"\"\n", true},
+		{"database_token_in_pattern", "  pattern: \"{database}_main\"\n", true},
+		{"empty_extra_entry", "  pattern: \"myapp_{worktree}\"\n  extra:\n    - \"{database}_test\"\n    - \"\"\n", true},
+		{"non_string_extra_entry", "  pattern: \"myapp_{worktree}\"\n  extra:\n    - 42\n", true},
+		{"scalar_extra", "  pattern: \"myapp_{worktree}\"\n  extra: \"{database}_test\"\n", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			yml := "project: myapp\ndatabase:\n  adapter: postgresql\n  template: myapp_development\n" + c.db
+			_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+
+			err := LoadProjectConfig(dir).Validate()
+			if c.wantErr && err == nil {
+				t.Error("expected validation error, got nil")
+			}
+			if !c.wantErr && err != nil {
+				t.Errorf("expected valid config, got %s", err)
+			}
+		})
 	}
 }

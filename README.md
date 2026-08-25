@@ -678,7 +678,8 @@ See [Framework examples](#framework-examples) for complete examples. Available f
 | `env_file` | Env file path (string shorthand, e.g. `.env.local`) — or map with `path` and `seed_from` when they differ |
 | `database.adapter` | `postgresql` or `sqlite` |
 | `database.template` | Source database to clone from (omit if no DB needed) |
-| `database.pattern` | Naming pattern — `{template}_{worktree}` |
+| `database.pattern` | Naming pattern for the worktree's database — `{template}_{worktree}` — with `{template}` `{worktree}` `{project}` tokens |
+| `database.extra` | List of naming patterns for auxiliary databases (e.g. a Rails test DB) — same tokens plus `{database}` (the `database.pattern` name). Treeline names them, tracks them, and drops them on `release --drop-db` (including `_0..N` parallel-test shards), but never creates them |
 | `copy_files` | Files copied from main repo to worktree |
 | `env` | Key-value pairs written to the env file, with token interpolation |
 | `commands.setup` | Shell commands run in the worktree after setup |
@@ -708,6 +709,7 @@ Available in `env` values:
 | `{port}` | First allocated port |
 | `{port_N}` | Nth allocated port (e.g. `{port_2}`) |
 | `{database}` | Database name (if configured) |
+| `{database_N}` | Nth database: `{database_1}` is the primary (same as `{database}`), `{database_2}` the first `database.extra` entry, and so on |
 | `{redis_url}` | Full Redis URL |
 | `{redis_prefix}` | Redis key prefix (if using prefixed strategy) |
 | `{project}` | Project name |

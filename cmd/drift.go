@@ -108,6 +108,10 @@ func resolveRegistryDrift(absPath, yamlName, registryName string, reg *registry.
 
 	oldDB := registry.GetString(alloc, "database")
 	adapterName := registry.GetString(alloc, "database_adapter")
+	var extras []string
+	if names := registry.ExtractDatabases(alloc); len(names) > 1 {
+		extras = names[1:]
+	}
 
 	dbAction := dbLeave
 	var oldDBPath, newDB, newDBPath string
@@ -174,6 +178,9 @@ func resolveRegistryDrift(absPath, yamlName, registryName string, reg *registry.
 	case dbDrop:
 		fmt.Fprintf(os.Stderr, "    • Drop database %s (a fresh one will be created on setup)\n", oldDB)
 	}
+	if dbAction != dbLeave && len(extras) > 0 {
+		fmt.Fprintf(os.Stderr, "    • Auxiliary databases follow suit: %s\n", strings.Join(extras, ", "))
+	}
 	fmt.Fprintln(os.Stderr)
 
 	if !promptProceed("  Proceed?") {
@@ -196,6 +203,34 @@ func resolveRegistryDrift(absPath, yamlName, registryName string, reg *registry.
 			fmt.Printf("==> Dropping database %s\n", oldDB)
 			if err := adapter.Drop(oldDBPath); err != nil {
 				return fmt.Errorf("dropping database %s: %w", oldDB, err)
+			}
+		}
+		// Auxiliary databases follow the primary's action. On rename, an
+		// extra sharing the old-project prefix renames the same way; one
+		// that doesn't (or any extra on drop) is dropped — extras are
+		// framework-built and disposable, and after the registry reset
+		// nothing would track them. Failures warn rather than abort: the
+		// primary action already succeeded.
+		for _, ex := range extras {
+			exPath := ex
+			if adapterName == "sqlite" {
+				exPath = filepath.Join(absPath, ex)
+			}
+			if dbAction == dbRename && strings.HasPrefix(ex, registryName) {
+				newEx := yamlName + ex[len(registryName):]
+				newExPath := newEx
+				if adapterName == "sqlite" {
+					newExPath = filepath.Join(absPath, newEx)
+				}
+				fmt.Printf("==> Renaming database %s → %s\n", ex, newEx)
+				if err := adapter.Rename(exPath, newExPath); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to rename %s: %s\n", ex, err)
+				}
+				continue
+			}
+			fmt.Printf("==> Dropping database %s\n", ex)
+			if err := adapter.Drop(exPath); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to drop %s: %s\n", ex, err)
 			}
 		}
 	}

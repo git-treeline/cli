@@ -89,6 +89,26 @@ func buildTokenMap(allocation Allocation, redisURL, project string) map[string]s
 		"{tunnel_host}":   getString(allocation, "tunnel_host"),
 	}
 
+	switch dbs := allocation["databases"].(type) {
+	case []any:
+		for i, d := range dbs {
+			if s, ok := d.(string); ok {
+				tokens[fmt.Sprintf("{database_%d}", i+1)] = s
+			}
+		}
+	case []string:
+		for i, d := range dbs {
+			tokens[fmt.Sprintf("{database_%d}", i+1)] = d
+		}
+	default:
+		// Registry entries written before the databases list existed carry
+		// only the legacy singular field; {database_1} must still resolve to
+		// it, as the docs promise it is interchangeable with {database}.
+		if db := getString(allocation, "database"); db != "" {
+			tokens["{database_1}"] = db
+		}
+	}
+
 	if ports, ok := allocation["ports"].([]any); ok {
 		for i, p := range ports {
 			key := fmt.Sprintf("{port_%d}", i+1)
