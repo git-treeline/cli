@@ -22,6 +22,9 @@ import (
 
 const probeDirName = "probes"
 
+// ownerField prefixes the sidecar line recording the owning run's start time.
+const ownerField = "owner"
+
 // staleAfter is how old a sidecar must be before its owner pid is disbelieved.
 // Comfortably longer than any single run holds one open.
 const staleAfter = 5 * time.Minute
@@ -46,15 +49,24 @@ func NewTracker(dir string) *Tracker {
 		return nil
 	}
 	path := filepath.Join(probeDir, strconv.Itoa(os.Getpid())+".pgids")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	// Truncate: a file already at this name belongs to a dead predecessor
+	// whose pid we now carry. ReapStale runs first and has already dealt with
+	// its records, so starting clean is what we want.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil
+	}
+	// Stamp our own start time so a later run can tell this sidecar apart from
+	// one left by a dead predecessor that happened to share our pid.
+	if start, ok := StartTime(os.Getpid()); ok {
+		_, _ = fmt.Fprintf(f, "%s %d\n", ownerField, start.Unix())
 	}
 	return &Tracker{path: path, f: f}
 }
 
-// Add records a process group id. Called right after a child starts, so the
-// record exists before the child can be orphaned.
+// Add records a process group id. Callers invoke it immediately after starting
+// a child, which narrows — but cannot close — the window in which a kill would
+// orphan a child that was never recorded.
 func (t *Tracker) Add(pgid int) {
 	if t == nil {
 		return
@@ -64,8 +76,11 @@ func (t *Tracker) Add(pgid int) {
 	if t.closed {
 		return
 	}
+	// No Sync: os.File.Write reaches the kernel, so the record survives our
+	// process being killed, which is the only case that matters. Only a
+	// machine crash could lose it, and then the recorded pids are meaningless
+	// anyway. fsync here costs milliseconds per probe on a polled command.
 	_, _ = fmt.Fprintf(t.f, "%d %d\n", pgid, time.Now().Unix())
-	_ = t.f.Sync()
 }
 
 // Close removes the sidecar. Reaching it means this run cleaned up after
@@ -99,18 +114,12 @@ func ReapStale(dir string) int {
 		if !ok {
 			continue
 		}
-		if owner == os.Getpid() {
-			continue
-		}
-		// A run that is still going still owns its children. The age check
-		// covers the case where the dead owner's pid has since been recycled
-		// onto an unrelated live process: no single run holds a sidecar for
-		// anywhere near staleAfter, so an old one is stale whatever its pid
-		// now points at.
-		if Alive(owner) && !olderThan(filepath.Join(probeDir, e.Name()), staleAfter) {
-			continue
-		}
 		path := filepath.Join(probeDir, e.Name())
+		// A run that is still going still owns its children — including this
+		// one, whose own sidecar is skipped by the same check.
+		if ownerIsLive(owner, path) {
+			continue
+		}
 		for _, r := range readRecords(path) {
 			if killGroupIfOurs(r.pgid, r.recordedAt) {
 				killed++
@@ -119,6 +128,56 @@ func ReapStale(dir string) int {
 		_ = os.Remove(path)
 	}
 	return killed
+}
+
+// ownerIsLive reports whether the run that wrote this sidecar is still going.
+//
+// Identity is (pid, start time), never the pid alone. A dead owner's pid can
+// be recycled — including onto us — and treating that as "still running" would
+// skip a predecessor's sidecar as though it were our own, leaking its orphans
+// permanently and then destroying the record on Close.
+//
+// When the start time can't be established at either end, fall back to the
+// sidecar's age: no single run holds one open for anywhere near staleAfter.
+func ownerIsLive(owner int, path string) bool {
+	if !Alive(owner) {
+		return false
+	}
+	recorded, haveRecorded := readOwnerStart(path)
+	start, haveStart := StartTime(owner)
+	if !haveRecorded || !haveStart {
+		return !olderThan(path, staleAfter)
+	}
+	diff := start.Sub(recorded)
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= ownerStartTolerance
+}
+
+// ownerStartTolerance absorbs the second-granularity of the two clocks the
+// owner's start time is read through.
+const ownerStartTolerance = 2 * time.Second
+
+// readOwnerStart returns the start time the owning run stamped into its
+// sidecar.
+func readOwnerStart(path string) (time.Time, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != ownerField {
+			continue
+		}
+		sec, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			return time.Time{}, false
+		}
+		return time.Unix(sec, 0), true
+	}
+	return time.Time{}, false
 }
 
 // olderThan reports whether the file was last written more than d ago.
@@ -161,7 +220,9 @@ func readRecords(path string) []record {
 			continue
 		}
 		pgid, err := strconv.Atoi(fields[0])
-		if err != nil || pgid <= 0 {
+		// Reject 0 and 1 as well as junk: see killablePgid — their negations
+		// mean "our own group" and "every process this user owns".
+		if err != nil || pgid <= 1 {
 			continue
 		}
 		sec, err := strconv.ParseInt(fields[1], 10, 64)

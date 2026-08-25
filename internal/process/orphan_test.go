@@ -61,6 +61,13 @@ func TestTrackerRecordsAndCleansUp(t *testing.T) {
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("expected 1 sidecar, got %v (err %v)", entries, err)
 	}
+	path := filepath.Join(sidecar, entries[0].Name())
+	if _, ok := readOwnerStart(path); !ok {
+		t.Error("sidecar carries no owner start time, so a recycled pid could not be detected")
+	}
+	if recs := readRecords(path); len(recs) != 1 || recs[0].pgid != 4242 {
+		t.Errorf("records = %v, want one entry for 4242", recs)
+	}
 
 	// A clean exit leaves nothing for a later run to reap.
 	tr.Close()
@@ -79,7 +86,7 @@ func TestReapStale(t *testing.T) {
 	t.Run("reaps a group left by a dead owner", func(t *testing.T) {
 		dir := t.TempDir()
 		pid := startGroupLeader(t)
-		writeSidecar(t, dir, 999999, pid, time.Now())
+		writeSidecar(t, dir, 999999, pid, time.Now(), time.Time{})
 
 		if n := ReapStale(dir); n != 1 {
 			t.Fatalf("ReapStale killed %d groups, want 1", n)
@@ -96,7 +103,7 @@ func TestReapStale(t *testing.T) {
 		dir := t.TempDir()
 		pid := startGroupLeader(t)
 		// os.Getppid() is alive, standing in for another running gtl.
-		writeSidecar(t, dir, os.Getppid(), pid, time.Now())
+		writeSidecar(t, dir, os.Getppid(), pid, time.Now(), ownerStartOf(t, os.Getppid()))
 
 		if n := ReapStale(dir); n != 0 {
 			t.Fatalf("ReapStale killed %d groups, want 0", n)
@@ -112,7 +119,7 @@ func TestReapStale(t *testing.T) {
 	t.Run("skips our own sidecar", func(t *testing.T) {
 		dir := t.TempDir()
 		pid := startGroupLeader(t)
-		writeSidecar(t, dir, os.Getpid(), pid, time.Now())
+		writeSidecar(t, dir, os.Getpid(), pid, time.Now(), ownerStartOf(t, os.Getpid()))
 
 		if n := ReapStale(dir); n != 0 {
 			t.Fatalf("ReapStale killed %d groups, want 0", n)
@@ -126,7 +133,7 @@ func TestReapStale(t *testing.T) {
 		dir := t.TempDir()
 		pid := startGroupLeader(t)
 		// The hallmark of pid reuse: the live process is newer than the record.
-		writeSidecar(t, dir, 999999, pid, time.Now().Add(-time.Hour))
+		writeSidecar(t, dir, 999999, pid, time.Now().Add(-time.Hour), time.Time{})
 
 		if n := ReapStale(dir); n != 0 {
 			t.Fatalf("ReapStale killed %d groups, want 0", n)
@@ -141,7 +148,7 @@ func TestReapStale(t *testing.T) {
 		pid := startGroupLeader(t)
 		// os.Getppid() is alive, standing in for a recycled owner pid; the
 		// sidecar is backdated past staleAfter so the pid is disbelieved.
-		writeSidecar(t, dir, os.Getppid(), pid, time.Now())
+		writeSidecar(t, dir, os.Getppid(), pid, time.Now(), time.Time{})
 		sidecar := filepath.Join(dir, probeDirName, strconv.Itoa(os.Getppid())+".pgids")
 		old := time.Now().Add(-staleAfter - time.Minute)
 		if err := os.Chtimes(sidecar, old, old); err != nil {
@@ -153,6 +160,36 @@ func TestReapStale(t *testing.T) {
 		}
 		if !waitGone(t, pid, 2*time.Second) {
 			t.Error("group behind a stale sidecar survived reaping")
+		}
+	})
+
+	t.Run("reaps a dead predecessor whose pid we now carry", func(t *testing.T) {
+		dir := t.TempDir()
+		pid := startGroupLeader(t)
+		// The sidecar names our own pid, but was written by a run that started
+		// long before us — the signature of a recycled pid. Trusting the pid
+		// alone would skip this as "ours", leak the orphan permanently, and
+		// then destroy the record when our own tracker closed.
+		writeSidecar(t, dir, os.Getpid(), pid, time.Now(), time.Now().Add(-24*time.Hour))
+
+		if n := ReapStale(dir); n != 1 {
+			t.Fatalf("ReapStale killed %d groups, want 1", n)
+		}
+		if !waitGone(t, pid, 2*time.Second) {
+			t.Error("predecessor's orphan survived; it would never be reaped again")
+		}
+	})
+
+	t.Run("keeps our own sidecar when the start time matches", func(t *testing.T) {
+		dir := t.TempDir()
+		pid := startGroupLeader(t)
+		writeSidecar(t, dir, os.Getpid(), pid, time.Now(), ownerStartOf(t, os.Getpid()))
+
+		if n := ReapStale(dir); n != 0 {
+			t.Fatalf("ReapStale killed %d groups, want 0", n)
+		}
+		if !Alive(pid) {
+			t.Error("reaped a group belonging to the current run")
 		}
 	})
 
@@ -210,15 +247,70 @@ func TestStartTime(t *testing.T) {
 }
 
 // writeSidecar fabricates a tracker sidecar as if owner had recorded pgid.
-func writeSidecar(t *testing.T, dir string, owner, pgid int, at time.Time) {
+// ownerStart is the start time stamped for the owning run; the zero value
+// omits the line, standing in for a run that could not read its own.
+func writeSidecar(t *testing.T, dir string, owner, pgid int, at time.Time, ownerStart time.Time) {
 	t.Helper()
 	probeDir := filepath.Join(dir, probeDirName)
 	if err := os.MkdirAll(probeDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	name := filepath.Join(probeDir, strconv.Itoa(owner)+".pgids")
-	body := strconv.Itoa(pgid) + " " + strconv.FormatInt(at.Unix(), 10) + "\n"
+	body := ""
+	if !ownerStart.IsZero() {
+		body += ownerField + " " + strconv.FormatInt(ownerStart.Unix(), 10) + "\n"
+	}
+	body += strconv.Itoa(pgid) + " " + strconv.FormatInt(at.Unix(), 10) + "\n"
 	if err := os.WriteFile(name, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// ownerStartOf returns a pid's real start time, for sidecars that should look
+// like they belong to a genuinely running owner.
+func ownerStartOf(t *testing.T, pid int) time.Time {
+	t.Helper()
+	start, ok := StartTime(pid)
+	if !ok {
+		t.Fatalf("could not read start time for pid %d", pid)
+	}
+	return start
+}
+
+// TestKillablePgid guards the blast radius of KillGroup/KillGracefully.
+// kill(-1, sig) signals every process with this uid and kill(-0, sig) signals
+// our own process group, so a pid record must never be able to reach either.
+//
+// This deliberately tests the predicate rather than calling KillGroup(1): a
+// regression that removed the guard would otherwise make running the test
+// suite kill the developer's entire session.
+func TestKillablePgid(t *testing.T) {
+	for _, pgid := range []int{-1, 0, 1} {
+		if killablePgid(pgid) {
+			t.Errorf("killablePgid(%d) = true; kill(-%d) would signal far more than one group", pgid, pgid)
+		}
+	}
+	if !killablePgid(2) {
+		t.Error("killablePgid(2) = false, want true")
+	}
+}
+
+// TestReapStaleRefusesDangerousPgids ensures a corrupt sidecar naming pgid 0
+// or 1 reaps nothing, rather than signalling our own group or the whole
+// session.
+func TestReapStaleRefusesDangerousPgids(t *testing.T) {
+	dir := t.TempDir()
+	probeDir := filepath.Join(dir, probeDirName)
+	if err := os.MkdirAll(probeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := "0 " + strconv.FormatInt(time.Now().Unix(), 10) + "\n" +
+		"1 " + strconv.FormatInt(time.Now().Unix(), 10) + "\n" +
+		"-1 " + strconv.FormatInt(time.Now().Unix(), 10) + "\n"
+	if err := os.WriteFile(filepath.Join(probeDir, "999999.pgids"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if n := ReapStale(dir); n != 0 {
+		t.Fatalf("ReapStale acted on %d dangerous pgid(s), want 0", n)
 	}
 }

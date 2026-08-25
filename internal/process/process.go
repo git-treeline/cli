@@ -105,10 +105,22 @@ func StartTime(pid int) (time.Time, bool) {
 	return t, true
 }
 
+// killablePgid rejects pids whose negation has a special meaning to kill(2).
+// kill(-1, sig) signals EVERY process with the caller's uid — the user's whole
+// session — and kill(-0, sig) signals our own process group. Neither is ever
+// what a caller reaping a recorded child intends, so a corrupt, truncated, or
+// hand-edited pid record must not be able to reach them.
+func killablePgid(pgid int) bool {
+	return pgid > 1
+}
+
 // KillGroup SIGKILLs the process group led by pgid, falling back to the single
 // pid when the group signal is rejected. Returns true if a signal was
 // delivered to something.
 func KillGroup(pgid int) bool {
+	if !killablePgid(pgid) {
+		return false
+	}
 	if err := syscall.Kill(-pgid, syscall.SIGKILL); err == nil {
 		return true
 	}
@@ -120,6 +132,9 @@ func KillGroup(pgid int) bool {
 // so children spawned via `sh -c` die too, falling back to the single pid when
 // the group signal is rejected. Returns true once the process is gone.
 func KillGracefully(pid int, timeout time.Duration) bool {
+	if !killablePgid(pid) {
+		return false
+	}
 	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
 		_ = syscall.Kill(pid, syscall.SIGTERM)
 	}
