@@ -1,11 +1,13 @@
 package supervisor
 
 import (
+	"bytes"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -13,12 +15,11 @@ import (
 
 func TestSupervisor_StopAndResume(t *testing.T) {
 	dir := t.TempDir()
-	sock := filepath.Join(dir, "test.sock")
+	sock := testSocket(t, dir)
 	marker := filepath.Join(dir, "started")
 
 	cmd := "echo $$ >> " + marker + " && sleep 60"
-	sv := New(cmd, dir, sock)
-	sv.Log = func(f string, a ...any) {}
+	sv := newTestSupervisor(t, cmd, dir, sock)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- sv.Run() }()
@@ -89,10 +90,9 @@ func TestSupervisor_StopAndResume(t *testing.T) {
 
 func TestSupervisor_Shutdown(t *testing.T) {
 	dir := t.TempDir()
-	sock := filepath.Join(dir, "test.sock")
+	sock := testSocket(t, dir)
 
-	sv := New("sleep 60", dir, sock)
-	sv.Log = func(f string, a ...any) {}
+	sv := newTestSupervisor(t, "sleep 60", dir, sock)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- sv.Run() }()
@@ -123,13 +123,12 @@ func TestSupervisor_Shutdown(t *testing.T) {
 
 func TestSupervisor_Restart(t *testing.T) {
 	dir := t.TempDir()
-	sock := filepath.Join(dir, "test.sock")
+	sock := testSocket(t, dir)
 	marker := filepath.Join(dir, "started")
 
 	// Command creates a marker file with PID, then sleeps
 	cmd := "echo $$ >> " + marker + " && sleep 60"
-	sv := New(cmd, dir, sock)
-	sv.Log = func(f string, a ...any) {}
+	sv := newTestSupervisor(t, cmd, dir, sock)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- sv.Run() }()
@@ -160,13 +159,12 @@ func TestSupervisor_Restart(t *testing.T) {
 
 func TestSupervisor_UpdateEnv(t *testing.T) {
 	dir := t.TempDir()
-	sock := filepath.Join(dir, "test.sock")
+	sock := testSocket(t, dir)
 	envOut := filepath.Join(dir, "env.out")
 
 	cmd := "env > " + envOut + " && sleep 60"
-	sv := New(cmd, dir, sock)
+	sv := newTestSupervisor(t, cmd, dir, sock)
 	sv.Env = map[string]string{"GTL_TEST": "original"}
-	sv.Log = func(f string, a ...any) {}
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- sv.Run() }()
@@ -213,11 +211,10 @@ func TestSupervisor_UpdateEnv(t *testing.T) {
 
 func TestSupervisor_GetCommand(t *testing.T) {
 	dir := t.TempDir()
-	sock := filepath.Join(dir, "test.sock")
+	sock := testSocket(t, dir)
 
 	cmd := "sleep 60"
-	sv := New(cmd, dir, sock)
-	sv.Log = func(f string, a ...any) {}
+	sv := newTestSupervisor(t, cmd, dir, sock)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- sv.Run() }()
@@ -244,8 +241,7 @@ func TestSupervisor_UpdateEnvLargePayload(t *testing.T) {
 	dir := t.TempDir()
 	sock := tmpSocket(t)
 
-	sv := New("sleep 60", dir, sock)
-	sv.Log = func(f string, a ...any) {}
+	sv := newTestSupervisor(t, "sleep 60", dir, sock)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- sv.Run() }()
@@ -286,8 +282,7 @@ func TestSupervisor_GetCommandLargeReply(t *testing.T) {
 
 	// A start command comfortably over 256 bytes.
 	cmd := "echo " + strings.Repeat("a", 512) + " && sleep 60"
-	sv := New(cmd, dir, sock)
-	sv.Log = func(f string, a ...any) {}
+	sv := newTestSupervisor(t, cmd, dir, sock)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- sv.Run() }()
@@ -315,8 +310,7 @@ func TestSupervisor_StartDuringStopReturnsRetryError(t *testing.T) {
 
 	// Linger on SIGTERM so the stop window stays open for the racing start.
 	cmd := "trap 'sleep 1; exit 0' TERM; echo $$ >> " + marker + "; sleep 60"
-	sv := New(cmd, dir, sock)
-	sv.Log = func(f string, a ...any) {}
+	sv := newTestSupervisor(t, cmd, dir, sock)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- sv.Run() }()
@@ -337,10 +331,10 @@ func TestSupervisor_StartDuringStopReturnsRetryError(t *testing.T) {
 	}
 
 	// The supervisor must recover: restart finishes and the server is running.
-	time.Sleep(2 * time.Second)
-	if resp, err := Send(sock, "status"); err != nil || resp != "running" {
-		t.Errorf("expected running after restart, got %q (err %v)", resp, err)
-	}
+	// Poll rather than sleeping a fixed 2s — the child lingers 1s on SIGTERM
+	// before the fresh one starts, which under parallel-suite load overran a
+	// fixed wait and reported a spurious "stopped".
+	waitForStatus(t, sock, "running", 15*time.Second)
 
 	_, _ = Send(sock, "shutdown")
 	select {
@@ -352,10 +346,9 @@ func TestSupervisor_StartDuringStopReturnsRetryError(t *testing.T) {
 
 func TestSupervisor_UpdateEnvEmpty(t *testing.T) {
 	dir := t.TempDir()
-	sock := filepath.Join(dir, "test.sock")
+	sock := testSocket(t, dir)
 
-	sv := New("sleep 60", dir, sock)
-	sv.Log = func(f string, a ...any) {}
+	sv := newTestSupervisor(t, "sleep 60", dir, sock)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- sv.Run() }()
@@ -389,8 +382,7 @@ func TestSupervisor_ChildPidFileLifecycle(t *testing.T) {
 	sock := tmpSocket(t)
 	childPidPath := ChildPidPath(sock)
 
-	sv := New("sleep 60", dir, sock)
-	sv.Log = func(f string, a ...any) {}
+	sv := newTestSupervisor(t, "sleep 60", dir, sock)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- sv.Run() }()
@@ -434,8 +426,7 @@ func TestSupervisor_StartDuringStopSpawnsNoExtraChild(t *testing.T) {
 	// On SIGTERM, linger ~1s before exiting so the stop window stays open long
 	// enough for a racing 'start' to land inside it.
 	cmd := "trap 'sleep 1; exit 0' TERM; echo $$ >> " + marker + "; sleep 60"
-	sv := New(cmd, dir, sock)
-	sv.Log = func(f string, a ...any) {}
+	sv := newTestSupervisor(t, cmd, dir, sock)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- sv.Run() }()
@@ -479,6 +470,87 @@ func TestSupervisor_StartDuringStopSpawnsNoExtraChild(t *testing.T) {
 
 // tmpSocket returns a short /tmp socket path (macOS caps unix socket paths at
 // ~104 bytes, which t.TempDir() paths exceed) and registers its cleanup.
+// newTestSupervisor builds a Supervisor wired for tests: quiet logging, child
+// output captured instead of inherited, and a guaranteed reap of the child
+// process group when the test ends.
+//
+// Containing the child's output is what keeps a leak from failing the whole
+// package: with ChildStdout left at os.Stdout the child inherits the test
+// binary's stdout pipe, and one child outliving its test makes `go test` sit
+// waiting for EOF and report "Test I/O incomplete" against the package — not
+// against the test that leaked.
+func newTestSupervisor(t *testing.T, command, dir, sock string) *Supervisor {
+	t.Helper()
+	sv := New(command, dir, sock)
+	sv.Log = func(f string, a ...any) {}
+	out := &syncBuffer{}
+	sv.ChildStdout = out
+	sv.ChildStderr = out
+	t.Cleanup(func() {
+		reapChildGroup(t, sock)
+		if t.Failed() {
+			if s := out.String(); s != "" {
+				t.Logf("child output:\n%s", s)
+			}
+		}
+	})
+	return sv
+}
+
+// syncBuffer is an io.Writer safe for a child that outlives the test. Writing
+// to t.Log after a test completes panics, and a leaked child is exactly the
+// case where that would happen, so output is buffered and only surfaced on
+// failure.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// reapChildGroup SIGKILLs the supervised process group recorded in the sidecar
+// pid file. Tests that fail or time out can return before the supervisor stops
+// its child; without this the orphan survives the run.
+func reapChildGroup(t *testing.T, sock string) {
+	t.Helper()
+	raw, err := os.ReadFile(ChildPidPath(sock))
+	if err != nil {
+		return
+	}
+	pgid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pgid <= 0 {
+		return
+	}
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err == nil {
+		t.Logf("reaped leaked child group %d", pgid)
+	}
+	_ = os.Remove(ChildPidPath(sock))
+}
+
+// testSocket returns a socket path under the test's temp dir, with the same
+// cleanup guarantees as tmpSocket.
+func testSocket(t *testing.T, dir string) string {
+	t.Helper()
+	sock := filepath.Join(dir, "test.sock")
+	t.Cleanup(func() {
+		reapChildGroup(t, sock)
+		_ = os.Remove(sock)
+		_ = os.Remove(ChildPidPath(sock))
+		_ = os.Remove(PidPath(sock))
+	})
+	return sock
+}
+
 func tmpSocket(t *testing.T) string {
 	t.Helper()
 	f, err := os.CreateTemp("/tmp", "gtl-test-*.sock")
@@ -489,6 +561,7 @@ func tmpSocket(t *testing.T) string {
 	_ = f.Close()
 	_ = os.Remove(sock)
 	t.Cleanup(func() {
+		reapChildGroup(t, sock)
 		_ = os.Remove(sock)
 		_ = os.Remove(ChildPidPath(sock))
 		_ = os.Remove(PidPath(sock))
@@ -506,6 +579,22 @@ func waitForFileGone(t *testing.T, path string, timeout time.Duration) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("file %s still present after %s", path, timeout)
+}
+
+// waitForStatus polls the supervisor's status until it reports want.
+func waitForStatus(t *testing.T, sock, want string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	var lastErr error
+	for time.Now().Before(deadline) {
+		last, lastErr = Send(sock, "status")
+		if lastErr == nil && last == want {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("status never became %q within %s (last %q, err %v)", want, timeout, last, lastErr)
 }
 
 func waitForSocket(t *testing.T, path string, timeout time.Duration) {
@@ -534,10 +623,9 @@ func waitForFile(t *testing.T, path string, timeout time.Duration) {
 
 func TestSupervisor_SIGHUPShutdown(t *testing.T) {
 	dir := t.TempDir()
-	sock := filepath.Join(dir, "test.sock")
+	sock := testSocket(t, dir)
 
-	sv := New("sleep 60", dir, sock)
-	sv.Log = func(f string, a ...any) {}
+	sv := newTestSupervisor(t, "sleep 60", dir, sock)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- sv.Run() }()
@@ -577,8 +665,7 @@ func TestSupervisor_WriteDeadlineUnblocksLock(t *testing.T) {
 	_ = os.Remove(sock)
 	t.Cleanup(func() { _ = os.Remove(sock) })
 
-	sv := New("sleep 60", dir, sock)
-	sv.Log = func(f string, a ...any) {}
+	sv := newTestSupervisor(t, "sleep 60", dir, sock)
 	sv.ConnWriteDeadline = 200 * time.Millisecond // fast deadline for the test
 
 	errCh := make(chan error, 1)
@@ -619,4 +706,46 @@ func splitNonEmpty(s string) []string {
 		}
 	}
 	return result
+}
+
+// TestSupervisor_ChildOutputRouting pins the two halves of the contract that
+// keeps a leaked child from failing the whole package: New must default the
+// child's output to this process's own streams (so a real server still shows
+// up in the user's terminal), and an override must actually receive it (so
+// tests can keep the child off the test binary's stdout pipe).
+func TestSupervisor_ChildOutputRouting(t *testing.T) {
+	t.Run("New defaults to the process streams", func(t *testing.T) {
+		sv := New("true", t.TempDir(), "/tmp/unused.sock")
+		if sv.ChildStdout != os.Stdout {
+			t.Errorf("ChildStdout = %v, want os.Stdout", sv.ChildStdout)
+		}
+		if sv.ChildStderr != os.Stderr {
+			t.Errorf("ChildStderr = %v, want os.Stderr", sv.ChildStderr)
+		}
+	})
+
+	t.Run("override receives child output", func(t *testing.T) {
+		dir := t.TempDir()
+		// tmpSocket, not the temp dir: this subtest's name makes t.TempDir()
+		// long enough to blow past the ~104 byte macOS socket path limit.
+		sock := tmpSocket(t)
+		sv := newTestSupervisor(t, "echo hello-from-child && sleep 60", dir, sock)
+		out := &syncBuffer{}
+		sv.ChildStdout = out
+
+		errCh := make(chan error, 1)
+		go func() { errCh <- sv.Run() }()
+		waitForSocket(t, sock, 3*time.Second)
+
+		deadline := time.Now().Add(3 * time.Second)
+		for !strings.Contains(out.String(), "hello-from-child") {
+			if time.Now().After(deadline) {
+				t.Fatalf("child output never reached the override, got %q", out.String())
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+
+		_, _ = Send(sock, "shutdown")
+		<-errCh
+	})
 }

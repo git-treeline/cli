@@ -57,6 +57,13 @@ type Supervisor struct {
 	// ConnWriteDeadline caps how long handleConn waits to write a response.
 	// Defaults to 15s. Override in tests to avoid slow-test hangs.
 	ConnWriteDeadline time.Duration
+	// ChildStdout/ChildStderr receive the supervised process's output. They
+	// default to this process's own stdout/stderr so the user sees the server
+	// in their terminal. Tests override them: when these are os.Stdout, the
+	// child inherits the fd directly, so a child that outlives its test keeps
+	// the test binary's stdout pipe open and `go test` stalls waiting for EOF.
+	ChildStdout io.Writer
+	ChildStderr io.Writer
 
 	mu           sync.Mutex
 	child        *exec.Cmd
@@ -67,6 +74,16 @@ type Supervisor struct {
 	shutdownOnce sync.Once
 }
 
+// orWriter returns w, or fallback when w is nil. A nil cmd.Stdout means
+// /dev/null, so a Supervisor built without New would silently swallow the
+// server's output instead of showing it.
+func orWriter(w, fallback io.Writer) io.Writer {
+	if w == nil {
+		return fallback
+	}
+	return w
+}
+
 func New(command, dir, socketPath string) *Supervisor {
 	return &Supervisor{
 		Command:           command,
@@ -74,6 +91,8 @@ func New(command, dir, socketPath string) *Supervisor {
 		SocketPath:        socketPath,
 		Log:               func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) },
 		ConnWriteDeadline: 15 * time.Second,
+		ChildStdout:       os.Stdout,
+		ChildStderr:       os.Stderr,
 		done:              make(chan struct{}),
 	}
 }
@@ -137,8 +156,8 @@ func (s *Supervisor) startChildLocked() error {
 	s.Log("==> Starting: %s", s.Command)
 	cmd := exec.Command("sh", "-c", s.Command)
 	cmd.Dir = s.Dir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = orWriter(s.ChildStdout, os.Stdout)
+	cmd.Stderr = orWriter(s.ChildStderr, os.Stderr)
 	cmd.Stdin = os.Stdin
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
