@@ -6,6 +6,7 @@ package worktree
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,6 +17,9 @@ import (
 
 	"github.com/git-treeline/cli/internal/process"
 )
+
+// ErrNotRepository indicates that a path is outside any Git repository.
+var ErrNotRepository = errors.New("not a git repository")
 
 // gitRun executes a git command in dir and returns trimmed stdout.
 // On failure, the error includes the git subcommand and trimmed stderr.
@@ -93,6 +97,22 @@ func gitCheck(dir string, args ...string) bool {
 		cmd.Dir = dir
 	}
 	return cmd.Run() == nil
+}
+
+// RepoRoot returns the top-level directory of the current Git worktree.
+// It returns an error when Git cannot resolve a repository from path.
+func RepoRoot(path string) (string, error) {
+	root, err := gitRun(path, "rev-parse", "--show-toplevel")
+	if err != nil {
+		if strings.Contains(err.Error(), "not a git repository") {
+			return "", fmt.Errorf("%w: %v", ErrNotRepository, err)
+		}
+		return "", err
+	}
+	if root == "" {
+		return "", fmt.Errorf("git rev-parse returned an empty repository root")
+	}
+	return root, nil
 }
 
 // DetectRepoRoot returns the top-level directory of the current git worktree.

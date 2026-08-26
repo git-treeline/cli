@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/git-treeline/cli/internal/style"
+	"github.com/git-treeline/cli/internal/worktree"
 	"github.com/spf13/cobra"
 )
 
@@ -34,6 +35,17 @@ func cliErr(cmd *cobra.Command, err error) error {
 		cmd.SilenceUsage = true
 	}
 	return err
+}
+
+func resolveRepoRoot(cmd *cobra.Command, path string) (string, error) {
+	root, err := worktree.RepoRoot(path)
+	if err != nil {
+		if errors.Is(err, worktree.ErrNotRepository) {
+			return "", cliErr(cmd, errNotInGitRepo())
+		}
+		return "", cliErr(cmd, fmt.Errorf("resolving Git repository: %w", err))
+	}
+	return root, nil
 }
 
 // formatCliError writes a structured error to stderr. Regular errors get a
@@ -88,6 +100,13 @@ func errNotInWorktree() error {
 	return &CliError{
 		Message: "You're in the main repo, not a worktree.",
 		Hint:    "Run 'gtl switch <branch>' from here, or 'cd' into a worktree directory.",
+	}
+}
+
+func errNotInGitRepo() error {
+	return &CliError{
+		Message: "You're not inside a Git repository.",
+		Hint:    "Change to a Git repository directory and re-run this command.",
 	}
 }
 

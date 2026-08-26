@@ -251,9 +251,22 @@ func installPreCommit(repoRoot string) (string, error) {
 	return path, nil
 }
 
-// resolveHooksDir returns the directory where Git hooks live and the name
-// of any hook manager in use. Returns (".git/hooks", "git") for standard setup.
+// resolveHooksDir returns Git's resolved hooks directory and the name of any
+// hook manager in use.
 func resolveHooksDir(repoRoot string) (string, string) {
+	gitHooksDir := filepath.Join(repoRoot, ".git", "hooks")
+	gitPath := exec.Command("git", "rev-parse", "--git-path", "hooks")
+	gitPath.Dir = repoRoot
+	if out, err := gitPath.Output(); err == nil {
+		hooksDir := strings.TrimSpace(string(out))
+		if hooksDir != "" && !filepath.IsAbs(hooksDir) {
+			hooksDir = filepath.Join(repoRoot, hooksDir)
+		}
+		if hooksDir != "" {
+			gitHooksDir = hooksDir
+		}
+	}
+
 	cmd := exec.Command("git", "config", "--local", "core.hooksPath")
 	cmd.Dir = repoRoot
 	if out, err := cmd.Output(); err == nil {
@@ -274,15 +287,14 @@ func resolveHooksDir(repoRoot string) (string, string) {
 
 	if fileExists(filepath.Join(repoRoot, "lefthook.yml")) ||
 		fileExists(filepath.Join(repoRoot, ".lefthook.yml")) {
-		return filepath.Join(repoRoot, ".git", "hooks"), "lefthook"
+		return gitHooksDir, "lefthook"
 	}
 
 	if fileExists(filepath.Join(repoRoot, ".pre-commit-config.yaml")) {
-		return filepath.Join(repoRoot, ".git", "hooks"), "pre-commit"
+		return gitHooksDir, "pre-commit"
 	}
 
-	gitDir := filepath.Join(repoRoot, ".git", "hooks")
-	return gitDir, "git"
+	return gitHooksDir, "git"
 }
 
 func detectHookManager(repoRoot, hooksPath string) string {

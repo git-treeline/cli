@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -115,6 +116,50 @@ func TestDetectMainRepo(t *testing.T) {
 	result := DetectMainRepo(repo)
 	if result != repo {
 		t.Errorf("DetectMainRepo = %q, want %q", result, repo)
+	}
+}
+
+func TestRepoRootNested(t *testing.T) {
+	repo := initTestRepo(t)
+	nested := filepath.Join(repo, "apps", "web")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := RepoRoot(nested)
+	if err != nil {
+		t.Fatalf("RepoRoot(%q): %v", nested, err)
+	}
+	if root != repo {
+		t.Errorf("RepoRoot(%q) = %q, want %q", nested, root, repo)
+	}
+}
+
+func TestRepoRootNonRepo(t *testing.T) {
+	dir := t.TempDir()
+
+	root, err := RepoRoot(dir)
+	if err == nil {
+		t.Fatalf("RepoRoot(%q) = %q, nil error; want error", dir, root)
+	}
+	if !errors.Is(err, ErrNotRepository) {
+		t.Fatalf("RepoRoot(%q) error = %v, want ErrNotRepository", dir, err)
+	}
+	if root != "" {
+		t.Errorf("RepoRoot(%q) root = %q, want empty", dir, root)
+	}
+}
+
+func TestRepoRootOnlyClassifiesNotRepositoryFailures(t *testing.T) {
+	root, err := RepoRoot(filepath.Join(t.TempDir(), "missing"))
+	if err == nil {
+		t.Fatal("expected error for missing path")
+	}
+	if root != "" {
+		t.Errorf("root = %q, want empty", root)
+	}
+	if errors.Is(err, ErrNotRepository) {
+		t.Fatalf("missing path error incorrectly classified as ErrNotRepository: %v", err)
 	}
 }
 

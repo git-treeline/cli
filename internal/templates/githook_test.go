@@ -2,10 +2,43 @@ package templates
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestInstallPostCheckoutHook_BareBackedWorktreeUsesCommonHooks(t *testing.T) {
+	seed := t.TempDir()
+	bare := filepath.Join(t.TempDir(), "repo.git")
+	worktree := filepath.Join(t.TempDir(), "feature")
+	for _, args := range [][]string{
+		{"git", "init", "--initial-branch=main", seed},
+		{"git", "-C", seed, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "init"},
+		{"git", "clone", "--bare", seed, bare},
+		{"git", "--git-dir=" + bare, "worktree", "add", worktree, "main"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+
+	path, err := InstallPostCheckoutHook(bare)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(bare, "hooks", "post-checkout")
+	if path != want {
+		t.Fatalf("hook path = %q, want %q", path, want)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("expected hook at common hooks dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(bare, ".git", "hooks", "post-checkout")); !os.IsNotExist(err) {
+		t.Fatalf("unexpected hook under bare/.git/hooks: %v", err)
+	}
+}
 
 func TestInstallPostCheckoutHook_CreatesNew(t *testing.T) {
 	dir := t.TempDir()

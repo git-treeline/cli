@@ -51,7 +51,10 @@ What it does:
 		if err != nil {
 			return fmt.Errorf("could not resolve current directory: %w", err)
 		}
-		worktreeRoot := worktree.DetectRepoRoot(absPath)
+		worktreeRoot, err := resolveRepoRoot(cmd, absPath)
+		if err != nil {
+			return err
+		}
 		mainRepo := worktree.DetectMainRepo(worktreeRoot)
 
 		configPath := filepath.Join(worktreeRoot, config.ProjectConfigFile)
