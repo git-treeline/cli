@@ -877,6 +877,7 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl port` | `--json` | Print the allocated port for the current worktree |
 | `gtl refresh` | `--dry-run` `--force`/`-f` | Re-allocate all worktrees with current reservations; restarts supervised servers |
 | `gtl doctor` | `--json` | Check config, allocation, runtime, and diagnostics |
+| `gtl update` | | Update git-treeline via the package manager it was installed with (Homebrew or `go install`) |
 | `gtl status` | `--project` `--json` `--check` `--watch` `--interval` | Show allocations across projects |
 | `gtl worktrees` | aliases: `wt` | Interactive TUI picker for worktrees (grouped by project) |
 | `gtl where <branch>` | | Print path to a worktree by branch name (use `project/branch` to disambiguate) |

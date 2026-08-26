@@ -27,6 +27,7 @@ var rootCmd = &cobra.Command{
 // emitting a "router is stale" warning during these is just noise.
 var commandsThatSelfRepair = map[string]bool{
 	"install":      true,
+	"update":       true,
 	"serve":        true, // covers all serve subcommands
 	"version":      true,
 	"help":         true,
