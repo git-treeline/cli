@@ -470,13 +470,13 @@ env_file: .env.local
 
 env:
   PORT: "{port}"
-  DATABASE_URL: "postgresql://localhost:5432/{database}"
+  DATABASE_URL: "postgresql://localhost:5432/{database.name}"
   NEXT_PUBLIC_APP_URL: "http://localhost:{port}"
 
 database:
   adapter: postgresql
   template: myapp_development
-  pattern: "{template}_{worktree}"
+  name: "{template}_{worktree}"
 
 commands:
   setup:
@@ -549,14 +549,17 @@ env_file: .env.local
 database:
   adapter: postgresql
   template: myapp_development
-  pattern: "{template}_{worktree}"
+  name: "{template}_{worktree}"
+  extra:
+    test: "{database.name}_test"
 
 copy_files:
   - config/master.key
 
 env:
   PORT: "{port}"
-  DATABASE_NAME: "{database}"
+  DATABASE_NAME: "{database.name}"
+  TEST_DATABASE_NAME: "{database.extra.test}"
   REDIS_URL: "{redis_url}"
   ESBUILD_PORT: "{port_2}"
   APPLICATION_HOST: "localhost:{port}"
@@ -678,8 +681,8 @@ See [Framework examples](#framework-examples) for complete examples. Available f
 | `env_file` | Env file path (string shorthand, e.g. `.env.local`) — or map with `path` and `seed_from` when they differ |
 | `database.adapter` | `postgresql` or `sqlite` |
 | `database.template` | Source database to clone from (omit if no DB needed) |
-| `database.pattern` | Naming pattern for the worktree's database — `{template}_{worktree}` — with `{template}` `{worktree}` `{project}` tokens |
-| `database.extra` | List of naming patterns for auxiliary databases (e.g. a Rails test DB) — same tokens plus `{database}` (the `database.pattern` name). Treeline names them, tracks them, and drops them on `release --drop-db` (including `_0..N` parallel-test shards), but never creates them |
+| `database.name` | Naming pattern for the worktree's database — `{template}_{worktree}` — with `{template}` `{worktree}` `{project}` tokens. Mints `{database.name}` (alias `{database}`). Reads the older `database.pattern` key and migrates it in place |
+| `database.extra` | Auxiliary databases (e.g. a Rails test DB), either a map of `name: pattern` entries — each minting `{database.extra.<name>}` — or a list of patterns, each minting `{database_N}` by position. Same tokens as `database.name` plus `{database.name}` (alias `{database}`). Treeline names them, tracks them, and drops them on `release --drop-db` (including `_0..N` parallel-test shards), but never creates them |
 | `copy_files` | Files copied from main repo to worktree |
 | `env` | Key-value pairs written to the env file, with token interpolation |
 | `commands.setup` | Shell commands run in the worktree after setup |
@@ -703,14 +706,18 @@ See [Framework examples](#framework-examples) for complete examples. Available f
 
 ### Interpolation tokens
 
-Available in `env` values:
+Available in `env` values. A dotted token is a path to a field in this file; a
+bare token is minted by treeline. Both spellings are permanent — neither is
+deprecated.
 
 | Token | Value |
 |---|---|
 | `{port}` | First allocated port |
 | `{port_N}` | Nth allocated port (e.g. `{port_2}`) |
-| `{database}` | Database name (if configured) |
-| `{database_N}` | Nth database: `{database_1}` is the primary (same as `{database}`), `{database_2}` the first `database.extra` entry, and so on |
+| `{database.name}` | The worktree's database, as named by `database.name` |
+| `{database.extra.<name>}` | The auxiliary database declared under that name in a map-form `database.extra` |
+| `{database}` | Alias for `{database.name}` |
+| `{database_N}` | Nth database by position: `{database_1}` is the primary (alias for `{database}`), `{database_2}` the first entry of a list-form `database.extra`, and so on |
 | `{redis_url}` | Full Redis URL |
 | `{redis_prefix}` | Redis key prefix (if using prefixed strategy) |
 | `{project}` | Project name |
