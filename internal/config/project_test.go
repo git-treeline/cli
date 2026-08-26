@@ -1253,6 +1253,66 @@ func TestValidate_DatabaseExtraMapAndDottedReferences(t *testing.T) {
 	}
 }
 
+func TestValidate_ExtrasCannotReferenceEachOther(t *testing.T) {
+	// Names render independently — the primary first, then every extra against
+	// that primary — so a chained reference would survive rendering as a
+	// literal token and be sanitized into a garbage database name. Reject it
+	// at Validate() instead of inventing a render order the config can't express.
+	cases := []struct {
+		name, db string
+		wantErr  bool
+	}{
+		{"extra_references_primary", "  name: \"myapp_{worktree}\"\n  extra:\n    test: \"{database.name}_test\"\n", false},
+		{"extra_references_bare_alias", "  name: \"myapp_{worktree}\"\n  extra:\n    test: \"{database}_test\"\n", false},
+		{"extra_chains_to_another_extra", "  name: \"myapp_{worktree}\"\n  extra:\n    test: \"{database.name}_test\"\n    shard: \"{database.extra.test}_0\"\n", true},
+		{"extra_references_itself", "  name: \"myapp_{worktree}\"\n  extra:\n    test: \"{database.extra.test}_x\"\n", true},
+		{"primary_references_existing_extra", "  name: \"{database.extra.test}_x\"\n  extra:\n    test: \"{database.name}_test\"\n", true},
+		{"primary_references_missing_extra", "  name: \"{database.extra.nope}_x\"\n  extra:\n    test: \"{database.name}_test\"\n", true},
+		{"env_references_everything", "  name: \"myapp_{worktree}\"\n  extra:\n    test: \"{database.name}_test\"\n", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			yml := "project: myapp\ndatabase:\n  adapter: postgresql\n  template: myapp_development\n" + c.db
+			if c.name == "env_references_everything" {
+				yml += "env:\n  DB: \"{database.name}\"\n  TEST_DB: \"{database.extra.test}\"\n"
+			}
+			_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+
+			err := LoadProjectConfig(dir).Validate()
+			if c.wantErr && err == nil {
+				t.Error("expected validation error, got nil")
+			}
+			if !c.wantErr && err != nil {
+				t.Errorf("expected valid config, got %s", err)
+			}
+		})
+	}
+}
+
+func TestValidate_ChainedExtraErrorExplainsWhy(t *testing.T) {
+	dir := t.TempDir()
+	yml := `project: myapp
+database:
+  template: myapp_development
+  name: "myapp_{worktree}"
+  extra:
+    test: "{database.name}_test"
+    shard: "{database.extra.test}_0"
+`
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+
+	err := LoadProjectConfig(dir).Validate()
+	if err == nil {
+		t.Fatal("expected an error for an extra referencing another extra")
+	}
+	for _, want := range []string{"database.extra.shard", "{database.extra.test}", "independently", "{database.name}"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
+	}
+}
+
 func TestValidate_UnknownDottedTokenNamesThePath(t *testing.T) {
 	dir := t.TempDir()
 	yml := `project: myapp

@@ -682,7 +682,7 @@ See [Framework examples](#framework-examples) for complete examples. Available f
 | `database.adapter` | `postgresql` or `sqlite` |
 | `database.template` | Source database to clone from (omit if no DB needed) |
 | `database.name` | Naming pattern for the worktree's database — `{template}_{worktree}` — with `{template}` `{worktree}` `{project}` tokens. Mints `{database.name}` (alias `{database}`). Reads the older `database.pattern` key and migrates it in place |
-| `database.extra` | Auxiliary databases (e.g. a Rails test DB), either a map of `name: pattern` entries — each minting `{database.extra.<name>}` — or a list of patterns, each minting `{database_N}` by position. Same tokens as `database.name` plus `{database.name}` (alias `{database}`). Treeline names them, tracks them, and drops them on `release --drop-db` (including `_0..N` parallel-test shards), but never creates them |
+| `database.extra` | Auxiliary databases (e.g. a Rails test DB), either a map of `name: pattern` entries — each minting `{database.extra.<name>}` — or a list of patterns, each minting `{database_N}` by position. Same tokens as `database.name` plus `{database.name}` (alias `{database}`) — extras render independently of each other, so one extra cannot reference another. Treeline names them, tracks them, and drops them on `release --drop-db` (including `_0..N` parallel-test shards), but never creates them |
 | `copy_files` | Files copied from main repo to worktree |
 | `env` | Key-value pairs written to the env file, with token interpolation |
 | `commands.setup` | Shell commands run in the worktree after setup |

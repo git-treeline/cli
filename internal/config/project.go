@@ -194,42 +194,80 @@ func (pc *ProjectConfig) validateDatabaseExtra() error {
 // a value to pass through untouched.
 var dottedDatabaseRe = regexp.MustCompile(`\{database\.[^}]*\}`)
 
-// validateDottedReferences rejects dotted database tokens that name a field
-// the config does not define. Only fields the user authors mint dotted tokens,
-// so the set of valid paths is known at Validate() time.
+// validateDottedReferences rejects dotted database tokens a site cannot
+// resolve. Only fields the user authors mint dotted tokens, so both the set of
+// defined paths and the set each site may reach are known at Validate() time.
+//
+// What a site may reference is narrower than what exists. Database names
+// render independently of one another — the primary first, then every extra
+// against that primary, in sorted-key order — so an extra can only reach
+// {database.name}, and the primary can reach no database at all. env values
+// render last, against the finished names, and may reference anything.
 func (pc *ProjectConfig) validateDottedReferences() error {
-	known := map[string]bool{"{database.name}": true}
+	defined := map[string]bool{"{database.name}": true}
 	for _, e := range pc.DatabaseExtras() {
 		if e.Key != "" {
-			known["{database.extra."+e.Key+"}"] = true
+			defined["{database.extra."+e.Key+"}"] = true
 		}
 	}
 
-	sites := make([][2]string, 0, 8)
+	type site struct {
+		where   string
+		value   string
+		allowed map[string]bool
+		// why explains the narrower set, for the error a rejection produces.
+		why string
+	}
+
+	// The primary is rendered before any extra exists; database.name's own
+	// {database} / {database.name} self-reference is caught in Validate.
+	sites := []site{{
+		where:   "database.name",
+		value:   stringAt(pc.Data, "database", "name"),
+		allowed: map[string]bool{},
+		why:     "database.name is rendered before the extras, so it cannot reference one",
+	}}
+	primaryOnly := map[string]bool{"{database.name}": true}
 	for _, e := range pc.DatabaseExtras() {
 		where := "database.extra"
 		if e.Key != "" {
 			where = "database.extra." + e.Key
 		}
-		sites = append(sites, [2]string{where, e.Pattern})
+		sites = append(sites, site{
+			where:   where,
+			value:   e.Pattern,
+			allowed: primaryOnly,
+			why:     "each extra renders independently against the primary database, so only {database.name} may be referenced from an extra pattern",
+		})
 	}
 	env, _ := pc.Data["env"].(map[string]any)
 	for _, key := range sortedKeys(env) {
 		if s, ok := env[key].(string); ok {
-			sites = append(sites, [2]string{"env." + key, s})
+			sites = append(sites, site{where: "env." + key, value: s, allowed: defined})
 		}
 	}
 
-	for _, site := range sites {
-		for _, token := range dottedDatabaseRe.FindAllString(site[1], -1) {
-			if known[token] {
+	for _, s := range sites {
+		for _, token := range dottedDatabaseRe.FindAllString(s.value, -1) {
+			if s.allowed[token] {
 				continue
 			}
-			return fmt.Errorf("%s in %s references %s, which names no field in this file; valid database references are %s",
-				site[0], ProjectConfigFile, token, strings.Join(sortedKeys(known), ", "))
+			if !defined[token] {
+				return fmt.Errorf("%s in %s references %s, which names no field in this file; valid database references are %s",
+					s.where, ProjectConfigFile, token, strings.Join(sortedKeys(defined), ", "))
+			}
+			return fmt.Errorf("%s in %s references %s, which it cannot resolve: %s",
+				s.where, ProjectConfigFile, token, s.why)
 		}
 	}
 	return nil
+}
+
+// stringAt returns the string at a config path, or "" when it is absent or
+// another type — the callers that need the distinction check it themselves.
+func stringAt(data map[string]any, path ...string) string {
+	s, _ := Dig(data, path...).(string)
+	return s
 }
 
 // sortedKeys returns a map's keys in sorted order, so validation errors and

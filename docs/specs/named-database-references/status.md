@@ -47,6 +47,19 @@ ready-for-review
 
 ## Corrections
 
+- **Caught by adversarial review:** the first cut of `validateDottedReferences`
+  allowed any defined dotted token at any site, so an extra could reference
+  another extra (`shard: "{database.extra.test}_0"`) and `database.name` could
+  reference an extra. Neither resolves at render time — `renderExtraNames`
+  substitutes only `{database}` / `{database.name}` / `{template}` /
+  `{worktree}` / `{project}`, so the chained token survived into
+  `sanitizeIdentifier` and was persisted as a mangled name like
+  `database_extra_test_0`. Fixed by narrowing the allowed set per site:
+  `database.name` may reference no database, an extra may reference only
+  `{database.name}`, `env.*` may reference anything. Chained substitution was
+  rejected as the fix — it would contradict the sorted-by-key,
+  independently-rendered ordering contract.
+
 - Unknown-dotted-token validation is scoped to the `database.` namespace
   rather than every `{a.b}` token. Nothing else mints dotted tokens today
   (§Non-goals), and rejecting arbitrary dotted braces would break existing
