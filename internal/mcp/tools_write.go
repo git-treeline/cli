@@ -162,7 +162,7 @@ func handleSetup(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToo
 
 	alloc, err := s.Run()
 	if err != nil {
-		return mcplib.NewToolResultError(fmt.Sprintf("Setup failed: %v", err)), nil
+		return setupErrorResult("Setup failed", err, s), nil
 	}
 
 	result := map[string]any{
@@ -180,6 +180,17 @@ func handleSetup(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToo
 	addDBDegradation(result, s)
 
 	return jsonResult(result)
+}
+
+// setupErrorResult builds an error tool result, appending the database
+// degradation when setup recorded one — an empty database is very likely why
+// the setup commands failed, and this is the agent's only channel to learn it.
+func setupErrorResult(prefix string, err error, s *setup.Setup) *mcplib.CallToolResult {
+	msg := fmt.Sprintf("%s: %v", prefix, err)
+	if s.DBDegradation != nil {
+		msg += " | " + s.DBDegradation.Message()
+	}
+	return mcplib.NewToolResultError(msg)
 }
 
 // addDBDegradation surfaces a degraded database outcome in a tool result —
@@ -249,7 +260,7 @@ func handleNew(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolR
 			s := setup.New(existingWT, mainRepo, uc)
 			s.Log = io.Discard
 			if _, err := s.Run(); err != nil {
-				return mcplib.NewToolResultError(fmt.Sprintf("Setup failed for existing worktree: %v", err)), nil
+				return setupErrorResult("Setup failed for existing worktree", err, s), nil
 			}
 			addDBDegradation(result, s)
 			reg = newRegistry()
@@ -308,7 +319,7 @@ func handleNew(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolR
 	s.Log = io.Discard
 	alloc, err := s.Run()
 	if err != nil {
-		return mcplib.NewToolResultError(fmt.Sprintf("Setup failed: %v", err)), nil
+		return setupErrorResult("Setup failed", err, s), nil
 	}
 
 	result := map[string]any{

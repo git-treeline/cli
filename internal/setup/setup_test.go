@@ -1557,7 +1557,11 @@ func (f *fakeAdapter) Create(name string) error {
 	return nil
 }
 
-func (f *fakeAdapter) Drop(target string) error              { return nil }
+func (f *fakeAdapter) Drop(target string) error {
+	f.calls = append(f.calls, "drop:"+target)
+	delete(f.existing, target)
+	return nil
+}
 func (f *fakeAdapter) Rename(oldName, newName string) error  { return nil }
 func (f *fakeAdapter) Restore(target, dumpFile string) error { return nil }
 
@@ -1598,10 +1602,24 @@ database:
 			wantCloned: true,
 		},
 		{
-			name:      "missing template, no provision config — empty template provisioned, clone degrades to empty",
-			yaml:      base,
-			adapter:   newFakeAdapter(),
-			wantState: "empty",
+			// No provision: section = no opt-in to gtl creating the template.
+			// The template must NOT be created (it would clone cleanly and
+			// silently on every later run); only the worktree DB is created.
+			name:       "missing template, no provision config — template untouched, worktree DB empty fallback",
+			yaml:       base,
+			adapter:    newFakeAdapter(),
+			wantState:  "empty",
+			wantReason: "no provision: section",
+			wantCalls:  []string{"create:myapp_feature"},
+		},
+		{
+			name: "missing template, provision opted in with empty mode — template provisioned, degrades to empty",
+			yaml: base + `
+provision:
+  database: {}
+`,
+			adapter:    newFakeAdapter(),
+			wantState:  "empty",
 			wantReason: "created empty",
 			wantCalls:  []string{"create:myapp_template", "clone:myapp_template->myapp_feature"},
 			wantCloned: true,
@@ -1627,7 +1645,7 @@ provision:
 			adapter:    newFakeAdapter(),
 			wantState:  "empty",
 			wantReason: "hydrate command failed",
-			wantCalls:  []string{"create:myapp_template", "create:myapp_feature"},
+			wantCalls:  []string{"create:myapp_template", "drop:myapp_template", "create:myapp_feature"},
 		},
 		{
 			name: "missing template, source mode without auto — no hydration, empty fallback",
@@ -1709,6 +1727,19 @@ provision:
 			strict:  true,
 			wantErr: true,
 		},
+		{
+			// Strict would reject an empty clone anyway, so the template must
+			// not be created as a side effect of a run that is about to fail.
+			name: "strict: empty-mode provision fails hard without creating the template",
+			yaml: base + `
+provision:
+  database: {}
+`,
+			adapter:   newFakeAdapter(),
+			strict:    true,
+			wantErr:   true,
+			wantCalls: nil,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1733,6 +1764,7 @@ provision:
 			}
 
 			alloc := ladderAlloc()
+			hadTemplate := tt.adapter.existing["myapp_template"]
 			err := s.cloneDatabaseWith(tt.adapter, "postgresql", alloc)
 
 			if tt.wantErr {
@@ -1741,6 +1773,9 @@ provision:
 				}
 				if s.DBDegradation != nil {
 					t.Errorf("strict failure must not record a degradation, got %+v", s.DBDegradation)
+				}
+				if !hadTemplate && tt.adapter.existing["myapp_template"] {
+					t.Error("strict failure must not leave a created template behind")
 				}
 				return
 			}
@@ -1806,9 +1841,64 @@ database:
 func TestDBDegradation_MessageNamesRecovery(t *testing.T) {
 	d := &DBDegradation{Database: "myapp_feature", State: "empty", Reason: "template missing"}
 	msg := d.Message()
-	for _, want := range []string{"myapp_feature", "gtl provision", "gtl db reset", "not self-heal"} {
+	for _, want := range []string{"myapp_feature", "gtl db reset", "not self-heal"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("message %q missing %q", msg, want)
 		}
+	}
+}
+
+func TestRun_DegradationWarningSurvivesSetupCommandFailure(t *testing.T) {
+	// The empty DB is very likely WHY the setup commands failed; the warning
+	// must print on the SetupCommandError path, not only on success.
+	s, _, _ := testSetup(t, `
+project: myapp
+env_file:
+  target: .env
+database:
+  adapter: sqlite
+  template: db/development.sqlite3
+  pattern: "db/{worktree}.sqlite3"
+commands:
+  setup:
+    - "false"
+env:
+  PORT: "{port}"
+`)
+	// No template file created — the ladder degrades to an empty file.
+	_, err := s.Run()
+	var sce *SetupCommandError
+	if !errors.As(err, &sce) {
+		t.Fatalf("expected SetupCommandError, got %v", err)
+	}
+	out := ansiRE.ReplaceAllString(s.Log.(*bytes.Buffer).String(), "")
+	if !strings.Contains(out, "will not self-heal") {
+		t.Errorf("degradation warning missing from output on setup-command failure:\n%s", out)
+	}
+}
+
+func TestRun_DegradationWarningPrintsAfterSummary(t *testing.T) {
+	s, _, _ := testSetup(t, `
+project: myapp
+env_file:
+  target: .env
+database:
+  adapter: sqlite
+  template: db/development.sqlite3
+  pattern: "db/{worktree}.sqlite3"
+env:
+  PORT: "{port}"
+`)
+	if _, err := s.Run(); err != nil {
+		t.Fatal(err)
+	}
+	out := ansiRE.ReplaceAllString(s.Log.(*bytes.Buffer).String(), "")
+	done := strings.Index(out, "Done!")
+	warn := strings.Index(out, "will not self-heal")
+	if done == -1 || warn == -1 {
+		t.Fatalf("expected both summary and warning in output:\n%s", out)
+	}
+	if warn < done {
+		t.Errorf("degradation warning printed before the success summary — it must be the last block:\n%s", out)
 	}
 }

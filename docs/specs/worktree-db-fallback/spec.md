@@ -48,10 +48,16 @@ and cheap, empty otherwise) with a prominent recovery warning, exiting 0;
 
 ## Behavior
 
-1. **Missing template, provision mode `empty` or `hydrate`:** `gtl new`
-   runs the provision database step automatically (the same idempotent step
-   `gtl provision` runs), then clones. Progress is logged like any other
-   setup step.
+1. **Missing template, provision mode `empty` or `hydrate` (requires an
+   explicit `provision:` section):** `gtl new` runs the provision database
+   step automatically (the same idempotent step `gtl provision` runs), then
+   clones. Progress is logged like any other setup step. Without a
+   `provision:` section the template is never created — auto-creating it
+   would make it clone cleanly (and silently) on every later run — and
+   setup goes straight to the empty-DB fallback (Behavior 4). If the
+   provision step fails after creating the template (e.g. a failed hydrate
+   command or interrupted restore), the partial template is dropped so
+   later runs degrade loudly instead of cloning broken state.
 2. **Missing template, provision mode `source`, no opt-in:** the remote pull
    is NOT run. Setup falls through to the empty-DB fallback (Behavior 4)
    and the warning names `gtl provision` as the way to hydrate.
@@ -67,13 +73,19 @@ and cheap, empty otherwise) with a prominent recovery warning, exiting 0;
    still run (their failures classify as `SetupCommandError`, as today), and
    the run ends with the degradation warning.
 6. **The degradation warning** is a single prominent block at the end of
-   `gtl new` output stating: what state the database is in (empty or
-   absent), why, and the recovery sequence — `gtl provision` (root repo),
-   then `gtl db reset` (in the worktree). It must be explicit that the
-   database will NOT self-heal on later runs.
+   `gtl new` output — after the success summary, and also printed when
+   setup commands fail (an empty DB is the likely cause of that failure) —
+   stating: what state the database is in (empty or absent), why (with the
+   branch-specific remedy: `gtl provision`, a config key, or manual
+   creation), and that once the template exists, `gtl db reset` in the
+   worktree re-clones from it. It must be explicit that the database will
+   NOT self-heal on later runs.
 7. **`gtl new --strict`:** any degradation in 1–5 (including a provision
    attempt that fails) aborts with a non-zero exit and today's error
    behavior. For scripts that treat exit 0 as "environment fully ready."
+   Strict never mutates the host on its way to failing: an empty-mode
+   provision (which could only produce a degraded clone) is rejected
+   before the template is created.
 8. **MCP surface:** the worktree-creation MCP tool reports the same
    degradation warning in its result payload, so agents see it without
    parsing CLI output.

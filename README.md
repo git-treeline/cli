@@ -766,12 +766,13 @@ gtl provision             # apply it
 
 Run it once when you first put a repo on a new host — after cloning, before
 `gtl setup`. `gtl setup` and `gtl new` do **not** invoke the full plan
-automatically. One exception: when the template database is missing at
-worktree-creation time, the database step runs on its own (for `source`
-hydration only with `provision.database.auto: true`). If the template still
-can't be produced, the worktree is created anyway with an empty database and
-a warning telling you to run `gtl provision` then `gtl db reset` — pass
-`--strict` to `gtl new` to fail hard instead.
+automatically. One exception: in repos with a `provision:` section, when the
+template database is missing at worktree-creation time, the database step
+runs on its own (for `source` hydration only with
+`provision.database.auto: true`). If the template can't be produced — or the
+repo has no `provision:` section — the worktree is created anyway with an
+empty database and a warning explaining how to recover; pass `--strict` to
+`gtl new` to fail hard instead.
 
 ## Database cloning (optional)
 

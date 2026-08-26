@@ -74,13 +74,15 @@ type DBDegradation struct {
 
 // Message renders the one-paragraph warning shared by the CLI block and the
 // MCP result payload: state, cause, recovery, and the no-self-heal notice.
+// The recovery line is deliberately generic — the reason names the specific
+// remedy (gtl provision, a config key, manual creation) per ladder branch.
 func (d *DBDegradation) Message() string {
 	state := "was created empty (no schema, no data)"
 	if d.State == "absent" {
 		state = "could not be created"
 	}
 	return fmt.Sprintf(
-		"Database %s %s: %s. This will not self-heal on later runs. To fix: run 'gtl provision' in the root repo to create the template database, then 'gtl db reset' in this worktree to re-clone from it.",
+		"Database %s %s: %s. This will not self-heal on later runs. Once the template database exists, run 'gtl db reset' in this worktree to re-clone from it.",
 		d.Database, state, d.Reason)
 }
 
@@ -191,6 +193,12 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 		if errors.As(err, &sce) {
 			// Setup commands failed but allocation + worktree are intact.
 			// Populate the alloc reference for the caller and skip release.
+			// A degraded database is very likely WHY the commands failed
+			// (migrations against an empty DB), so the warning must not be
+			// lost on this path.
+			if s.DBDegradation != nil {
+				s.printDBDegradation()
+			}
 			sce.Alloc = alloc
 			return nil, sce
 		}
@@ -218,6 +226,12 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 		_, _ = fmt.Fprintln(s.Log, style.Dimf("  Router:   %s", routerURL))
 	}
 	_, _ = fmt.Fprintln(s.Log, style.Dimf("  Dir:      %s", s.WorktreePath))
+
+	// After the summary, so "Database: x" in the block above is never the
+	// last word on a database that is actually empty or absent.
+	if s.DBDegradation != nil {
+		s.printDBDegradation()
+	}
 
 	return alloc, nil
 }
@@ -262,10 +276,6 @@ func (s *Setup) runPostAllocation(alloc *allocator.Allocation, redisURL string) 
 
 	if err := s.runHooks("post_setup"); err != nil {
 		s.warn("post_setup hook failed: %s", err)
-	}
-
-	if s.DBDegradation != nil {
-		s.printDBDegradation()
 	}
 
 	return nil
@@ -675,10 +685,16 @@ func (s *Setup) provisionTemplate(adapter database.Adapter, adapterName, templat
 	if adapterName != "postgresql" {
 		// Provision's database step drives pg tooling only (see gtl provision's
 		// adapter guard); for SQLite a missing template file has no auto path.
-		return "", fmt.Errorf("template database %s does not exist", template)
+		return "", fmt.Errorf("template database %s does not exist", templateName)
 	}
 
 	cfg := s.ProjectConfig.Provision()
+	if !cfg.Present {
+		// No provision: section — the repo never opted into gtl creating the
+		// template. Creating it empty here would poison every later run: the
+		// template would exist, clone cleanly, and no run would warn again.
+		return "", fmt.Errorf("template database %s does not exist and no provision: section is configured (create it manually or add provision.database to .treeline.yml)", templateName)
+	}
 	if cfg.Database.Template != templateName {
 		// provision: creates a different database than the one we clone from;
 		// running it wouldn't help.
@@ -697,14 +713,27 @@ func (s *Setup) provisionTemplate(adapter database.Adapter, adapterName, templat
 	if action == nil {
 		return "", fmt.Errorf("template database %s does not exist", templateName)
 	}
+	if s.Options.StrictDB && action.DBMode == provision.DBModeEmpty {
+		// Provisioning could only produce an empty template, which strict mode
+		// rejects anyway — fail before mutating the host.
+		return "", fmt.Errorf("template database %s does not exist and provisioning would only create it empty", templateName)
+	}
 
 	// Same per-template serialization as Clone: a concurrent `gtl new` waits
-	// here, then the step's own exists-probe sees the template and skips.
+	// here, then the re-probe below sees the template and skips.
 	unlock, err := database.LockTemplate(templateName)
 	if err != nil {
 		return "", fmt.Errorf("template database %s does not exist (locking it failed: %v)", templateName, err)
 	}
 	defer unlock()
+
+	// Re-probe under the lock: a concurrent run (or a manual createdb+migrate)
+	// may have produced the template since the caller's check. Reporting the
+	// planned mode for a template we didn't create would warn "created empty"
+	// about a perfectly good database.
+	if exists, err := adapter.Exists(templateName); err == nil && exists {
+		return "", nil
+	}
 
 	s.log("Template database %s does not exist — provisioning", templateName)
 	deps := provision.Deps{
@@ -714,8 +743,8 @@ func (s *Setup) provisionTemplate(adapter database.Adapter, adapterName, templat
 		RunInDir: func(dir, command string) error {
 			cmd := exec.Command("sh", "-c", command)
 			cmd.Dir = dir
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
+			cmd.Stdout = s.Log
+			cmd.Stderr = s.Log
 			return cmd.Run()
 		},
 		HydrateFromSource: func(t, env string) error {
@@ -725,6 +754,18 @@ func (s *Setup) provisionTemplate(adapter database.Adapter, adapterName, templat
 		Warn: s.warn,
 	}
 	if err := provision.Run([]provision.Action{*action}, s.MainRepo, deps); err != nil {
+		// The step may have created the template before failing (hydrate runs
+		// after createdb; a source restore can die halfway). We know it did
+		// not exist when we took the lock, so drop the partial remains —
+		// leaving them would make every later run clone a broken template
+		// without a warning.
+		if exists, probeErr := adapter.Exists(templateName); probeErr == nil && exists {
+			if dropErr := adapter.Drop(templateName); dropErr != nil {
+				s.warn("could not remove partially provisioned template %s: %v", templateName, dropErr)
+			} else {
+				s.log("Removed partially provisioned template %s", templateName)
+			}
+		}
 		return "", fmt.Errorf("provisioning template database %s failed: %v", templateName, err)
 	}
 	return action.DBMode, nil
@@ -756,10 +797,15 @@ func (s *Setup) fallbackEmptyDatabase(adapter database.Adapter, primary, target,
 }
 
 // degradeDatabase records a degraded database outcome and lets setup continue,
-// or fails outright under StrictDB.
+// or fails outright under StrictDB. An earlier recorded cause (e.g. "template
+// created empty" before a failed clone) is kept, not overwritten — the first
+// cause is usually the actionable one.
 func (s *Setup) degradeDatabase(primary, state, reason string) error {
 	if s.Options.StrictDB {
 		return fmt.Errorf("database not cloned (--strict): %s", reason)
+	}
+	if prev := s.DBDegradation; prev != nil && prev.Database == primary {
+		reason = prev.Reason + "; " + reason
 	}
 	s.DBDegradation = &DBDegradation{Database: primary, State: state, Reason: reason}
 	return nil
@@ -776,7 +822,7 @@ func (s *Setup) printDBDegradation() {
 		s.warn("Database %s was created EMPTY (no schema, no data) — %s", d.Database, d.Reason)
 	}
 	s.warn("This will not self-heal on later runs.")
-	s.warn("To fix: run 'gtl provision' in the root repo, then 'gtl db reset' in this worktree.")
+	s.warn("Once the template database exists, run 'gtl db reset' in this worktree to re-clone from it.")
 }
 
 func (s *Setup) runHooks(name string) error {
