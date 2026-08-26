@@ -61,7 +61,7 @@ var ProjectDefaults = map[string]any{
 	"database": map[string]any{
 		"adapter":  "postgresql",
 		"template": nil,
-		"pattern":  "{template}_{worktree}",
+		"name":     "{template}_{worktree}",
 	},
 	"copy_files":   []any{},
 	"env":          map[string]any{},
@@ -76,11 +76,15 @@ type ProjectConfig struct {
 	ProjectRoot string
 	Data        map[string]any
 	loadErr     error
+	// sawPatternKey records that the file on disk still spells the primary
+	// database key as `pattern`, so migrateDatabaseName knows to rewrite it.
+	sawPatternKey bool
 }
 
 func LoadProjectConfig(projectRoot string) *ProjectConfig {
 	pc := &ProjectConfig{ProjectRoot: projectRoot}
 	pc.Data = pc.load()
+	pc.migrateDatabaseName()
 	pc.migrateDefaultBranch()
 	pc.migrateCommands()
 	pc.migrateEnvFile()
@@ -117,25 +121,44 @@ func (pc *ProjectConfig) Validate() error {
 				t, ProjectConfigFile, adapter, SanitizeIdentifier(t))
 		}
 	}
-	if raw := Dig(pc.Data, "database", "pattern"); raw != nil {
+	if raw := Dig(pc.Data, "database", "name"); raw != nil {
 		p, ok := raw.(string)
 		if !ok {
-			return fmt.Errorf("database.pattern in %s must be a single database name pattern, not a list; declare auxiliary databases as a list under `database.extra`",
+			return fmt.Errorf("database.name in %s must be a single database name pattern, not a list; declare auxiliary databases under `database.extra`",
 				ProjectConfigFile)
 		}
 		if p == "" {
-			return fmt.Errorf("database.pattern in %s is empty; it must name the worktree's database", ProjectConfigFile)
+			return fmt.Errorf("database.name in %s is empty; it must name the worktree's database", ProjectConfigFile)
 		}
-		if strings.Contains(p, "{database}") {
-			return fmt.Errorf("database.pattern in %s uses {database}, but pattern names the primary database that {database} refers to; the token is only valid in database.extra entries",
+		if strings.Contains(p, "{database}") || strings.Contains(p, "{database.name}") {
+			return fmt.Errorf("database.name in %s uses {database}, but database.name is the field that mints it; the token is only valid in database.extra entries and env values",
 				ProjectConfigFile)
 		}
 	}
-	if raw := Dig(pc.Data, "database", "extra"); raw != nil {
-		entries, ok := raw.([]any)
-		if !ok {
-			return fmt.Errorf("database.extra in %s must be a list of database name patterns", ProjectConfigFile)
-		}
+	if err := pc.validateDatabaseExtra(); err != nil {
+		return err
+	}
+	return pc.validateDottedReferences()
+}
+
+// extraKeyRe matches a valid database.extra map key: a lowercase identifier,
+// the same shape treeline requires of every name it mints tokens from.
+var extraKeyRe = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+
+// IsValidExtraKey reports whether s can name a database.extra map entry.
+func IsValidExtraKey(s string) bool {
+	return extraKeyRe.MatchString(s)
+}
+
+// validateDatabaseExtra checks both accepted shapes of database.extra: the
+// positional list and the named map. Anything else is a config error.
+func (pc *ProjectConfig) validateDatabaseExtra() error {
+	raw := Dig(pc.Data, "database", "extra")
+	if raw == nil {
+		return nil
+	}
+	switch entries := raw.(type) {
+	case []any:
 		for i, item := range entries {
 			s, ok := item.(string)
 			if !ok {
@@ -145,8 +168,117 @@ func (pc *ProjectConfig) Validate() error {
 				return fmt.Errorf("database.extra entry %d in %s is empty; every entry must name a database", i+1, ProjectConfigFile)
 			}
 		}
+	case map[string]any:
+		for _, key := range sortedKeys(entries) {
+			if !IsValidExtraKey(key) {
+				return fmt.Errorf("database.extra key %q in %s is not a valid name; must match [a-z][a-z0-9_]* (suggested: %s)",
+					key, ProjectConfigFile, strings.ToLower(SanitizeIdentifier(key)))
+			}
+			s, ok := entries[key].(string)
+			if !ok {
+				return fmt.Errorf("database.extra.%s in %s must be a database name pattern string", key, ProjectConfigFile)
+			}
+			if s == "" {
+				return fmt.Errorf("database.extra.%s in %s is empty; every entry must name a database", key, ProjectConfigFile)
+			}
+		}
+	default:
+		return fmt.Errorf("database.extra in %s must be a list of database name patterns or a map of name: pattern entries", ProjectConfigFile)
 	}
 	return nil
+}
+
+// dottedDatabaseRe matches a dotted self-reference into the database block,
+// e.g. {database.name} or {database.extra.test}. A dotted token is a path to
+// a field in .treeline.yml, so an unresolvable one is a config bug rather than
+// a value to pass through untouched.
+var dottedDatabaseRe = regexp.MustCompile(`\{database\.[^}]*\}`)
+
+// validateDottedReferences rejects dotted database tokens a site cannot
+// resolve. Only fields the user authors mint dotted tokens, so both the set of
+// defined paths and the set each site may reach are known at Validate() time.
+//
+// What a site may reference is narrower than what exists. Database names
+// render independently of one another — the primary first, then every extra
+// against that primary, in sorted-key order — so an extra can only reach
+// {database.name}, and the primary can reach no database at all. env values
+// render last, against the finished names, and may reference anything.
+func (pc *ProjectConfig) validateDottedReferences() error {
+	defined := map[string]bool{"{database.name}": true}
+	for _, e := range pc.DatabaseExtras() {
+		if e.Key != "" {
+			defined["{database.extra."+e.Key+"}"] = true
+		}
+	}
+
+	type site struct {
+		where   string
+		value   string
+		allowed map[string]bool
+		// why explains the narrower set, for the error a rejection produces.
+		why string
+	}
+
+	// The primary is rendered before any extra exists; database.name's own
+	// {database} / {database.name} self-reference is caught in Validate.
+	sites := []site{{
+		where:   "database.name",
+		value:   stringAt(pc.Data, "database", "name"),
+		allowed: map[string]bool{},
+		why:     "database.name is rendered before the extras, so it cannot reference one",
+	}}
+	primaryOnly := map[string]bool{"{database.name}": true}
+	for _, e := range pc.DatabaseExtras() {
+		where := "database.extra"
+		if e.Key != "" {
+			where = "database.extra." + e.Key
+		}
+		sites = append(sites, site{
+			where:   where,
+			value:   e.Pattern,
+			allowed: primaryOnly,
+			why:     "each extra renders independently against the primary database, so only {database.name} may be referenced from an extra pattern",
+		})
+	}
+	env, _ := pc.Data["env"].(map[string]any)
+	for _, key := range sortedKeys(env) {
+		if s, ok := env[key].(string); ok {
+			sites = append(sites, site{where: "env." + key, value: s, allowed: defined})
+		}
+	}
+
+	for _, s := range sites {
+		for _, token := range dottedDatabaseRe.FindAllString(s.value, -1) {
+			if s.allowed[token] {
+				continue
+			}
+			if !defined[token] {
+				return fmt.Errorf("%s in %s references %s, which names no field in this file; valid database references are %s",
+					s.where, ProjectConfigFile, token, strings.Join(sortedKeys(defined), ", "))
+			}
+			return fmt.Errorf("%s in %s references %s, which it cannot resolve: %s",
+				s.where, ProjectConfigFile, token, s.why)
+		}
+	}
+	return nil
+}
+
+// stringAt returns the string at a config path, or "" when it is absent or
+// another type — the callers that need the distinction check it themselves.
+func stringAt(data map[string]any, path ...string) string {
+	s, _ := Dig(data, path...).(string)
+	return s
+}
+
+// sortedKeys returns a map's keys in sorted order, so validation errors and
+// generated orderings never depend on Go's map iteration order.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func (pc *ProjectConfig) PortsNeeded() int {
@@ -204,26 +336,81 @@ func (pc *ProjectConfig) DatabaseConnArgs() []string {
 	return args
 }
 
+// DatabaseExtra is one auxiliary database declared under database.extra. Key
+// is the map-form name that mints {database.extra.<key>}; it is empty for
+// list-form entries, which are addressed positionally as {database_N}.
+type DatabaseExtra struct {
+	Key     string
+	Pattern string
+}
+
+// DatabaseExtras returns the auxiliary database declarations in the order
+// their names are allocated: declaration order for the list form, sorted by
+// key for the map form (YAML map order is not preserved, so sorted-by-key is
+// the ordering contract the registry and drop paths rely on).
+func (pc *ProjectConfig) DatabaseExtras() []DatabaseExtra {
+	switch raw := Dig(pc.Data, "database", "extra").(type) {
+	case []any:
+		out := make([]DatabaseExtra, 0, len(raw))
+		for _, item := range raw {
+			// Empty strings are kept so they can't shift the {database_N}
+			// tokens of the entries after them; non-string entries are skipped
+			// here but Validate rejects both before any production path
+			// reaches this.
+			if s, ok := item.(string); ok {
+				out = append(out, DatabaseExtra{Pattern: s})
+			}
+		}
+		return out
+	case map[string]any:
+		out := make([]DatabaseExtra, 0, len(raw))
+		for _, key := range sortedKeys(raw) {
+			if s, ok := raw[key].(string); ok {
+				out = append(out, DatabaseExtra{Key: key, Pattern: s})
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// DatabaseExtraKeys returns the map-form extra keys in allocation order, or
+// nil for a list-form (or absent) database.extra.
+func (pc *ProjectConfig) DatabaseExtraKeys() []string {
+	extras := pc.DatabaseExtras()
+	keys := make([]string, 0, len(extras))
+	for _, e := range extras {
+		if e.Key == "" {
+			return nil
+		}
+		keys = append(keys, e.Key)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	return keys
+}
+
 // DatabasePatterns returns the primary database naming pattern from
-// database.pattern followed by the database.extra patterns, in declaration
-// order. The primary is cloned from database.template; the extras name
-// auxiliary databases that treeline allocates, tracks, and drops but never
-// creates. Validate rejects the malformed entries this getter tolerates.
+// database.name followed by the database.extra patterns, in allocation order.
+// The primary is cloned from database.template; the extras name auxiliary
+// databases that treeline allocates, tracks, and drops but never creates.
+// Validate rejects the malformed entries this getter tolerates.
 func (pc *ProjectConfig) DatabasePatterns() []string {
 	primary := "{template}_{worktree}"
-	if v, ok := Dig(pc.Data, "database", "pattern").(string); ok {
+	if v, ok := Dig(pc.Data, "database", "name").(string); ok {
+		primary = v
+	} else if v, ok := Dig(pc.Data, "database", "pattern").(string); ok {
+		// A config whose pattern → name migration could not write the file
+		// still resolves through the legacy key.
 		primary = v
 	}
 
-	patterns := []string{primary}
-	extra, _ := Dig(pc.Data, "database", "extra").([]any)
-	for _, item := range extra {
-		// Empty strings are kept so they can't shift the {database_N} tokens
-		// of the entries after them; non-string entries are skipped here but
-		// Validate rejects both before any production path reaches this.
-		if s, ok := item.(string); ok {
-			patterns = append(patterns, s)
-		}
+	extras := pc.DatabaseExtras()
+	patterns := make([]string, 0, len(extras)+1)
+	patterns = append(patterns, primary)
+	for _, e := range extras {
+		patterns = append(patterns, e.Pattern)
 	}
 	return patterns
 }
@@ -733,6 +920,85 @@ func (pc *ProjectConfig) SetProject(name string) error {
 	return platform.AtomicWriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
 }
 
+// foldDatabasePatternKey moves database.pattern to database.name in a freshly
+// parsed YAML tree, reporting whether the old key was present. An explicit
+// `name` wins; the stale `pattern` is dropped either way so exactly one key
+// names the primary database. Pure so the fold can be tested without a file.
+func foldDatabasePatternKey(data map[string]any) bool {
+	db, ok := data["database"].(map[string]any)
+	if !ok {
+		return false
+	}
+	old, hasOld := db["pattern"]
+	if !hasOld {
+		return false
+	}
+	if _, hasNew := db["name"]; !hasNew {
+		db["name"] = old
+	}
+	delete(db, "pattern")
+	return true
+}
+
+// migrateDatabaseName rewrites database.pattern → database.name in the YAML
+// file when the old key is present. The in-memory fold already happened in
+// load(); this only brings the file up to date. Idempotent: a config already
+// using `name` never reaches the rewrite.
+func (pc *ProjectConfig) migrateDatabaseName() {
+	if !pc.sawPatternKey {
+		return
+	}
+	pc.sawPatternKey = false
+
+	path := pc.configPath()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	content := rewriteDatabasePatternKey(string(raw))
+	if content == string(raw) {
+		return
+	}
+	_ = platform.AtomicWriteFile(path, []byte(content), 0o644)
+}
+
+// rewriteDatabasePatternKey renames the `pattern:` key nested under the
+// top-level `database:` block to `name:`, leaving any other `pattern:` key
+// (e.g. inside an unrelated block) alone.
+func rewriteDatabasePatternKey(content string) string {
+	lines := strings.Split(content, "\n")
+	inDatabase := false
+	blockIndent := ""
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if line[0] != ' ' && line[0] != '\t' {
+			inDatabase = strings.HasPrefix(line, "database:")
+			blockIndent = ""
+			continue
+		}
+		if !inDatabase {
+			continue
+		}
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		if blockIndent == "" {
+			blockIndent = indent
+		}
+		// Only the database block's own keys are renamed, never a key of a
+		// nested block such as database.sources.<env>.
+		if indent != blockIndent {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "pattern:") {
+			lines[i] = indent + "name:" + strings.TrimPrefix(trimmed, "pattern:")
+			break
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // migrateDefaultBranch rewrites default_branch → merge_target in the YAML
 // file if the old key is present. Runs once per load, idempotent.
 func (pc *ProjectConfig) migrateDefaultBranch() {
@@ -1017,6 +1283,11 @@ func (pc *ProjectConfig) load() map[string]any {
 	}
 
 	WarnUnknownKeys(yamlData, projectKnownKeys, ProjectConfigFile)
+
+	// Fold the legacy `pattern` key into `name` before the defaults are merged
+	// in: the defaults supply `name`, so a post-merge fold could not tell a
+	// user-authored name from the default one.
+	pc.sawPatternKey = foldDatabasePatternKey(yamlData)
 
 	return DeepMerge(ProjectDefaults, yamlData)
 }

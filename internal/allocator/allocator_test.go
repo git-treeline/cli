@@ -1387,7 +1387,7 @@ func TestAllocateMain_Concurrent(t *testing.T) {
 	}
 }
 
-// withDatabases sets the allocator's primary database.pattern and its
+// withDatabases sets the allocator's primary database.name and its
 // database.extra list, the form testAllocator's yaml fixture can't express.
 func withDatabases(t *testing.T, al *Allocator, primary string, extra ...string) {
 	t.Helper()
@@ -1395,7 +1395,7 @@ func withDatabases(t *testing.T, al *Allocator, primary string, extra ...string)
 	if db == nil {
 		t.Fatal("expected a database config block")
 	}
-	db["pattern"] = primary
+	db["name"] = primary
 	list := make([]any, len(extra))
 	for i, p := range extra {
 		list[i] = p
@@ -1495,5 +1495,90 @@ func TestAllocateMain_MarksMainWorktreeEntry(t *testing.T) {
 	}
 	if entry["main_worktree"] != true {
 		t.Errorf("expected main_worktree flag on the main entry, got %v", entry["main_worktree"])
+	}
+}
+
+// withNamedDatabases sets the allocator's primary database.name and a
+// map-form database.extra, whose keys mint {database.extra.<key>}.
+func withNamedDatabases(t *testing.T, al *Allocator, primary string, extra map[string]string) {
+	t.Helper()
+	db, _ := al.ProjectConfig.Data["database"].(map[string]any)
+	if db == nil {
+		t.Fatal("expected a database config block")
+	}
+	db["name"] = primary
+	named := make(map[string]any, len(extra))
+	for k, v := range extra {
+		named[k] = v
+	}
+	db["extra"] = named
+}
+
+func TestAllocate_NamedDatabaseExtras(t *testing.T) {
+	al, reg := testAllocator(t, 1, "")
+	withNamedDatabases(t, al, "{template}_{worktree}", map[string]string{
+		"test":      "{database.name}_test",
+		"analytics": "{database}_analytics",
+	})
+
+	alloc, err := al.Allocate("/wt/feature-branch", "feature-branch", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sorted by key after the primary: YAML map order is not preserved, so
+	// the registry array's order has to come from the keys themselves.
+	want := []string{
+		"test_dev_feature_branch",
+		"test_dev_feature_branch_analytics",
+		"test_dev_feature_branch_test",
+	}
+	if !slices.Equal(alloc.Databases, want) {
+		t.Errorf("expected databases %v, got %v", want, alloc.Databases)
+	}
+	if got := alloc.ExtraKeys; !slices.Equal(got, []string{"analytics", "test"}) {
+		t.Errorf("expected extra keys [analytics test], got %v", got)
+	}
+
+	entry := reg.Find("/wt/feature-branch")
+	if entry == nil {
+		t.Fatal("expected registry entry")
+	}
+	// Legacy fields stay authoritative for older binaries sharing the registry.
+	if got := registry.GetString(entry, "database"); got != want[0] {
+		t.Errorf("expected legacy database field %q, got %q", want[0], got)
+	}
+	if got := registry.ExtractDatabases(entry); !slices.Equal(got, want) {
+		t.Errorf("expected registry databases %v, got %v", want, got)
+	}
+	named := registry.ExtractExtraDatabases(entry)
+	if named["test"] != want[2] || named["analytics"] != want[1] {
+		t.Errorf("expected named extras to match the array, got %v", named)
+	}
+
+	reused, err := al.Allocate("/wt/feature-branch", "feature-branch", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reused.Reused || !slices.Equal(reused.ExtraKeys, []string{"analytics", "test"}) {
+		t.Errorf("expected the reuse path to round-trip the extra keys, got %v (reused=%v)", reused.ExtraKeys, reused.Reused)
+	}
+	if got := reused.ToInterpolationMap()["database_extra"]; got == nil {
+		t.Error("expected a reused allocation to still resolve {database.extra.<key>}")
+	}
+}
+
+func TestAllocate_ListFormExtrasStayUnnamed(t *testing.T) {
+	al, reg := testAllocator(t, 1, "")
+	withDatabases(t, al, "{template}_{worktree}", "{database}_test")
+
+	alloc, err := al.Allocate("/wt/feature-branch", "feature-branch", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alloc.ExtraKeys != nil {
+		t.Errorf("expected no extra keys for a positional list, got %v", alloc.ExtraKeys)
+	}
+	if entry := reg.Find("/wt/feature-branch"); entry["database_extra"] != nil {
+		t.Errorf("expected no database_extra in the registry for a positional list, got %v", entry["database_extra"])
 	}
 }

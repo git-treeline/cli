@@ -57,8 +57,12 @@ type Allocation struct {
 	WorktreeName    string
 	Branch          string
 	Port            int
-	Ports           []int
-	Databases       []string
+	Ports     []int
+	Databases []string
+	// ExtraKeys names the auxiliary databases of a map-form database.extra,
+	// aligned with Databases[1:]. Empty for the positional list form, whose
+	// extras are addressed as {database_N} instead.
+	ExtraKeys       []string
 	DatabaseAdapter string
 	RedisDB         int
 	RedisPrefix     string
@@ -76,6 +80,21 @@ func (a *Allocation) PrimaryDatabase() string {
 		return ""
 	}
 	return a.Databases[0]
+}
+
+// ExtraDatabases pairs each named auxiliary database with its rendered name.
+// Returns nil when the project uses the positional list form, or when the
+// keys and rendered names have fallen out of alignment (a config edit between
+// allocation and read), in which case the positional list stays authoritative.
+func (a *Allocation) ExtraDatabases() map[string]string {
+	if len(a.ExtraKeys) == 0 || len(a.Databases) != len(a.ExtraKeys)+1 {
+		return nil
+	}
+	out := make(map[string]string, len(a.ExtraKeys))
+	for i, key := range a.ExtraKeys {
+		out[key] = a.Databases[i+1]
+	}
+	return out
 }
 
 func (a *Allocation) ToRegistryEntry() registry.Allocation {
@@ -102,6 +121,16 @@ func (a *Allocation) ToRegistryEntry() registry.Allocation {
 			dbs[i] = name
 		}
 		entry["databases"] = dbs
+	}
+
+	// The named form is written alongside `databases`, never instead of it:
+	// older gtl binaries sharing this registry only know the ordered array.
+	if extras := a.ExtraDatabases(); extras != nil {
+		named := make(map[string]any, len(extras))
+		for k, v := range extras {
+			named[k] = v
+		}
+		entry["database_extra"] = named
 	}
 
 	if a.MainWorktree {
@@ -135,6 +164,9 @@ func (a *Allocation) ToInterpolationMap() interpolation.Allocation {
 	}
 	if len(a.Databases) > 0 {
 		m["databases"] = a.Databases
+	}
+	if extras := a.ExtraDatabases(); extras != nil {
+		m["database_extra"] = extras
 	}
 	for i, p := range a.Ports {
 		m[fmt.Sprintf("port_%d", i+1)] = p
@@ -202,6 +234,7 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string, mainWorktr
 		Port:            ports[0],
 		Ports:           ports,
 		Databases:       registry.ExtractDatabases(entry),
+		ExtraKeys:       registry.ExtractExtraDatabaseKeys(entry),
 		DatabaseAdapter: registry.GetString(entry, "database_adapter"),
 		MainWorktree:    entry["main_worktree"] == true,
 		Reused:          true,
@@ -317,6 +350,7 @@ func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*A
 			Port:            ports[0],
 			Ports:           ports,
 			Databases:       mainDatabases,
+			ExtraKeys:       al.extraKeysFor(mainDatabases),
 			DatabaseAdapter: al.ProjectConfig.DatabaseAdapter(),
 			MainWorktree:    true,
 		}, nil
@@ -387,6 +421,7 @@ func (al *Allocator) allocateNew(worktreePath, worktreeName, branch string) (*Al
 			Ports:           ports,
 			Branch:          branch,
 			Databases:       databases,
+			ExtraKeys:       al.extraKeysFor(databases),
 			DatabaseAdapter: adapter,
 			RedisDB:         redisDB,
 			RedisPrefix:     redisPrefix,
@@ -674,6 +709,17 @@ func (al *Allocator) buildDatabaseNames(worktreeName string) []string {
 	return append([]string{primary}, al.renderExtraNames(primary, worktree)...)
 }
 
+// extraKeysFor returns the map-form extra keys when they line up with the
+// names just rendered. A mismatch means the project uses the list form (or
+// rendered no databases at all), where extras are positional and unnamed.
+func (al *Allocator) extraKeysFor(databases []string) []string {
+	keys := al.ProjectConfig.DatabaseExtraKeys()
+	if len(keys) == 0 || len(databases) != len(keys)+1 {
+		return nil
+	}
+	return keys
+}
+
 // renderExtraNames renders the database.extra patterns against an
 // already-final primary name. worktree must already be sanitized.
 func (al *Allocator) renderExtraNames(primary, worktree string) []string {
@@ -684,6 +730,7 @@ func (al *Allocator) renderExtraNames(primary, worktree string) []string {
 
 	replacer := strings.NewReplacer(
 		"{database}", primary,
+		"{database.name}", primary,
 		"{template}", al.ProjectConfig.DatabaseTemplate(),
 		"{worktree}", worktree,
 		"{project}", al.ProjectConfig.Project(),

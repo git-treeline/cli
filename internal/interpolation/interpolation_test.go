@@ -245,3 +245,55 @@ func TestInterpolate_DatabaseTokenLegacyFallback(t *testing.T) {
 		t.Errorf("expected legacy fallback salt_x, got %s", got)
 	}
 }
+
+func TestInterpolate_DottedDatabaseTokens(t *testing.T) {
+	// map[string]string is a fresh allocation; map[string]any is what a
+	// registry entry decodes into.
+	cases := []struct {
+		name  string
+		alloc Allocation
+	}{
+		{"native_map", Allocation{
+			"database":       "salt_x",
+			"databases":      []string{"salt_x", "salt_x_analytics", "salt_x_test"},
+			"database_extra": map[string]string{"analytics": "salt_x_analytics", "test": "salt_x_test"},
+		}},
+		{"decoded_map", Allocation{
+			"database":       "salt_x",
+			"databases":      []any{"salt_x", "salt_x_analytics", "salt_x_test"},
+			"database_extra": map[string]any{"analytics": "salt_x_analytics", "test": "salt_x_test"},
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tests := map[string]string{
+				"{database}":                 "salt_x",
+				"{database.name}":            "salt_x",
+				"{database_1}":               "salt_x",
+				"{database.extra.test}":      "salt_x_test",
+				"{database.extra.analytics}": "salt_x_analytics",
+				// Named extras are never numbered: a map-form config expresses
+				// no ordering, so {database_2} stays unresolved.
+				"{database_2}": "{database_2}",
+			}
+			for pattern, want := range tests {
+				if got := Interpolate(pattern, c.alloc, "", "salt"); got != want {
+					t.Errorf("Interpolate(%q) = %q, want %q", pattern, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestInterpolate_DottedNameIsAliasOfBareDatabase(t *testing.T) {
+	alloc := Allocation{"database": "salt_x", "databases": []string{"salt_x", "salt_x_test"}}
+	bare := Interpolate("postgresql://localhost/{database}", alloc, "", "salt")
+	dotted := Interpolate("postgresql://localhost/{database.name}", alloc, "", "salt")
+	if bare != dotted {
+		t.Errorf("{database} = %q but {database.name} = %q; they must be aliases", bare, dotted)
+	}
+	// List-form extras keep their positional tokens untouched.
+	if got := Interpolate("{database_2}", alloc, "", "salt"); got != "salt_x_test" {
+		t.Errorf("{database_2} = %q, want salt_x_test", got)
+	}
+}

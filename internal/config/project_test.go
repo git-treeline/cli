@@ -1178,6 +1178,234 @@ func TestDatabasePatterns_ExtraWithoutPatternUsesDefaultPrimary(t *testing.T) {
 	}
 }
 
+func TestDatabaseExtras_MapFormOrdersByKey(t *testing.T) {
+	dir := t.TempDir()
+	yml := `project: myapp
+database:
+  adapter: postgresql
+  template: myapp_development
+  name: "myapp_{worktree}"
+  extra:
+    test: "{database.name}_test"
+    analytics: "{database.name}_analytics"
+    queue: "{database.name}_queue"
+`
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+	pc := LoadProjectConfig(dir)
+
+	wantKeys := []string{"analytics", "queue", "test"}
+	if got := pc.DatabaseExtraKeys(); !slices.Equal(got, wantKeys) {
+		t.Errorf("extra keys = %v, want %v (sorted, since YAML map order is not preserved)", got, wantKeys)
+	}
+	wantPatterns := []string{
+		"myapp_{worktree}",
+		"{database.name}_analytics",
+		"{database.name}_queue",
+		"{database.name}_test",
+	}
+	if got := pc.DatabasePatterns(); !slices.Equal(got, wantPatterns) {
+		t.Errorf("patterns = %v, want %v", got, wantPatterns)
+	}
+}
+
+func TestDatabaseExtraKeys_ListFormHasNone(t *testing.T) {
+	dir := t.TempDir()
+	yml := "project: myapp\ndatabase:\n  template: myapp_development\n  extra:\n    - \"{database}_test\"\n"
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+
+	if got := LoadProjectConfig(dir).DatabaseExtraKeys(); got != nil {
+		t.Errorf("expected no keys for a positional extra list, got %v", got)
+	}
+}
+
+func TestValidate_DatabaseExtraMapAndDottedReferences(t *testing.T) {
+	cases := []struct {
+		name, db string
+		wantErr  bool
+	}{
+		{"map_form", "  name: \"myapp_{worktree}\"\n  extra:\n    test: \"{database.name}_test\"\n", false},
+		{"map_form_bare_alias", "  name: \"myapp_{worktree}\"\n  extra:\n    test: \"{database}_test\"\n", false},
+		{"uppercase_key", "  name: \"myapp_{worktree}\"\n  extra:\n    Test: \"{database.name}_test\"\n", true},
+		{"hyphenated_key", "  name: \"myapp_{worktree}\"\n  extra:\n    my-test: \"{database.name}_t\"\n", true},
+		{"digit_leading_key", "  name: \"myapp_{worktree}\"\n  extra:\n    2test: \"{database.name}_t\"\n", true},
+		{"empty_map_pattern", "  name: \"myapp_{worktree}\"\n  extra:\n    test: \"\"\n", true},
+		{"non_string_map_pattern", "  name: \"myapp_{worktree}\"\n  extra:\n    test: 42\n", true},
+		{"dotted_name_in_extra", "  name: \"myapp_{worktree}\"\n  extra:\n    test: \"{database.name}_test\"\n", false},
+		{"unknown_dotted_key", "  name: \"myapp_{worktree}\"\n  extra:\n    test: \"{database.extra.nope}_x\"\n", true},
+		{"unknown_dotted_field", "  name: \"myapp_{worktree}\"\n  extra:\n    test: \"{database.template}_x\"\n", true},
+		{"dotted_extra_in_list_form", "  name: \"myapp_{worktree}\"\n  extra:\n    - \"{database.extra.test}_x\"\n", true},
+		{"dotted_name_in_primary", "  name: \"{database.name}_x\"\n", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			yml := "project: myapp\ndatabase:\n  adapter: postgresql\n  template: myapp_development\n" + c.db
+			_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+
+			err := LoadProjectConfig(dir).Validate()
+			if c.wantErr && err == nil {
+				t.Error("expected validation error, got nil")
+			}
+			if !c.wantErr && err != nil {
+				t.Errorf("expected valid config, got %s", err)
+			}
+		})
+	}
+}
+
+func TestValidate_ExtrasCannotReferenceEachOther(t *testing.T) {
+	// Names render independently — the primary first, then every extra against
+	// that primary — so a chained reference would survive rendering as a
+	// literal token and be sanitized into a garbage database name. Reject it
+	// at Validate() instead of inventing a render order the config can't express.
+	cases := []struct {
+		name, db string
+		wantErr  bool
+	}{
+		{"extra_references_primary", "  name: \"myapp_{worktree}\"\n  extra:\n    test: \"{database.name}_test\"\n", false},
+		{"extra_references_bare_alias", "  name: \"myapp_{worktree}\"\n  extra:\n    test: \"{database}_test\"\n", false},
+		{"extra_chains_to_another_extra", "  name: \"myapp_{worktree}\"\n  extra:\n    test: \"{database.name}_test\"\n    shard: \"{database.extra.test}_0\"\n", true},
+		{"extra_references_itself", "  name: \"myapp_{worktree}\"\n  extra:\n    test: \"{database.extra.test}_x\"\n", true},
+		{"primary_references_existing_extra", "  name: \"{database.extra.test}_x\"\n  extra:\n    test: \"{database.name}_test\"\n", true},
+		{"primary_references_missing_extra", "  name: \"{database.extra.nope}_x\"\n  extra:\n    test: \"{database.name}_test\"\n", true},
+		{"env_references_everything", "  name: \"myapp_{worktree}\"\n  extra:\n    test: \"{database.name}_test\"\n", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			yml := "project: myapp\ndatabase:\n  adapter: postgresql\n  template: myapp_development\n" + c.db
+			if c.name == "env_references_everything" {
+				yml += "env:\n  DB: \"{database.name}\"\n  TEST_DB: \"{database.extra.test}\"\n"
+			}
+			_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+
+			err := LoadProjectConfig(dir).Validate()
+			if c.wantErr && err == nil {
+				t.Error("expected validation error, got nil")
+			}
+			if !c.wantErr && err != nil {
+				t.Errorf("expected valid config, got %s", err)
+			}
+		})
+	}
+}
+
+func TestValidate_ChainedExtraErrorExplainsWhy(t *testing.T) {
+	dir := t.TempDir()
+	yml := `project: myapp
+database:
+  template: myapp_development
+  name: "myapp_{worktree}"
+  extra:
+    test: "{database.name}_test"
+    shard: "{database.extra.test}_0"
+`
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+
+	err := LoadProjectConfig(dir).Validate()
+	if err == nil {
+		t.Fatal("expected an error for an extra referencing another extra")
+	}
+	for _, want := range []string{"database.extra.shard", "{database.extra.test}", "independently", "{database.name}"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
+	}
+}
+
+func TestValidate_UnknownDottedTokenNamesThePath(t *testing.T) {
+	dir := t.TempDir()
+	yml := `project: myapp
+database:
+  template: myapp_development
+  name: "myapp_{worktree}"
+  extra:
+    test: "{database.name}_test"
+env:
+  DATABASE_URL: "postgresql://localhost/{database.extra.queue}"
+`
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+
+	err := LoadProjectConfig(dir).Validate()
+	if err == nil {
+		t.Fatal("expected an error for a dotted token naming no field")
+	}
+	for _, want := range []string{"env.DATABASE_URL", "{database.extra.queue}", "{database.extra.test}"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
+	}
+}
+
+func TestMigrateDatabaseName_RewritesAndIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".treeline.yml")
+	yml := `project: myapp
+database:
+  adapter: postgresql
+  template: myapp_development
+  pattern: "{template}_{worktree}"
+  sources:
+    production:
+      via: fly
+      app: myapp
+`
+	_ = os.WriteFile(path, []byte(yml), 0o644)
+
+	pc := LoadProjectConfig(dir)
+	if got := pc.DatabasePatterns()[0]; got != "{template}_{worktree}" {
+		t.Errorf("primary pattern = %q, want the migrated value of the old pattern key", got)
+	}
+	if db, _ := pc.Data["database"].(map[string]any); db["pattern"] != nil {
+		t.Error("expected the legacy pattern key to be gone from the in-memory config")
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(after), "  name: \"{template}_{worktree}\"") {
+		t.Errorf("expected the file to use database.name, got:\n%s", after)
+	}
+	if strings.Contains(string(after), "pattern:") {
+		t.Errorf("expected the legacy key to be gone from the file, got:\n%s", after)
+	}
+	if !strings.Contains(string(after), "      via: fly") {
+		t.Errorf("expected nested blocks to survive the migration, got:\n%s", after)
+	}
+
+	// Second load must be a no-op: the file already migrated.
+	_ = LoadProjectConfig(dir)
+	again, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(again) != string(after) {
+		t.Errorf("migration is not idempotent:\nfirst:\n%s\nsecond:\n%s", after, again)
+	}
+}
+
+func TestMigrateDatabaseName_ExplicitNameWins(t *testing.T) {
+	dir := t.TempDir()
+	yml := "project: myapp\ndatabase:\n  template: t\n  name: \"chosen_{worktree}\"\n  pattern: \"legacy_{worktree}\"\n"
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
+
+	if got := LoadProjectConfig(dir).DatabasePatterns()[0]; got != "chosen_{worktree}" {
+		t.Errorf("primary pattern = %q, want the explicit name to win over the legacy key", got)
+	}
+}
+
+func TestDatabasePatterns_LegacyPatternKeyStillRead(t *testing.T) {
+	// A config whose migration could not write the file (or a Data map built
+	// by hand) still resolves the primary through the legacy key.
+	pc := &ProjectConfig{Data: map[string]any{
+		"database": map[string]any{"pattern": "legacy_{worktree}"},
+	}}
+	if got := pc.DatabasePatterns()[0]; got != "legacy_{worktree}" {
+		t.Errorf("primary pattern = %q, want legacy_{worktree}", got)
+	}
+}
+
 func TestValidate_DatabasePatternAndExtra(t *testing.T) {
 	cases := []struct {
 		name, db string

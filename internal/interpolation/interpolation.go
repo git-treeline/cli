@@ -2,8 +2,10 @@
 // environment files and configuration values. Supported tokens include
 // {port}, {database}, {redis_url}, {redis_prefix}, {project},
 // {router_url}, {router_host}, {tunnel_url}, {tunnel_host}, and numbered
-// ports like {port_1}, {port_2}. {router_domain} is kept as a deprecated
-// alias for {router_host}.
+// ports like {port_1}, {port_2}. Databases also answer to dotted tokens that
+// name the .treeline.yml field behind them: {database.name} for the primary
+// and {database.extra.<key>} for a named auxiliary database. {router_domain}
+// is kept as a deprecated alias for {router_host}.
 package interpolation
 
 import (
@@ -76,8 +78,12 @@ func InterpolateWithResolver(pattern string, allocation Allocation, redisURL, pr
 
 func buildTokenMap(allocation Allocation, redisURL, project string) map[string]string {
 	tokens := map[string]string{
-		"{port}":         formatValue(allocation, "port"),
-		"{database}":     getString(allocation, "database"),
+		"{port}": formatValue(allocation, "port"),
+		// {database} and {database.name} are permanent aliases: the bare form
+		// is the token treeline mints, the dotted form is a path to the
+		// database.name field in .treeline.yml that mints it.
+		"{database}":      getString(allocation, "database"),
+		"{database.name}": getString(allocation, "database"),
 		"{redis_url}":    redisURL,
 		"{redis_prefix}": getString(allocation, "redis_prefix"),
 		"{project}":      project,
@@ -89,7 +95,15 @@ func buildTokenMap(allocation Allocation, redisURL, project string) map[string]s
 		"{tunnel_host}":   getString(allocation, "tunnel_host"),
 	}
 
-	switch dbs := allocation["databases"].(type) {
+	// Named extras mint {database.extra.<key>} instead of positional tokens:
+	// a map-form config never numbers its auxiliary databases, so numbering
+	// them here would invent an ordering the config doesn't express.
+	extras := extraDatabases(allocation)
+	for key, name := range extras {
+		tokens["{database.extra."+key+"}"] = name
+	}
+
+	switch dbs := databaseList(allocation, len(extras) > 0).(type) {
 	case []any:
 		for i, d := range dbs {
 			if s, ok := d.(string); ok {
@@ -125,6 +139,52 @@ func buildTokenMap(allocation Allocation, redisURL, project string) map[string]s
 	}
 
 	return tokens
+}
+
+// extraDatabases reads the named auxiliary databases an allocation carries,
+// accepting both the in-process map[string]string and the map[string]any a
+// registry entry decodes into. Returns nil for list-form allocations.
+func extraDatabases(a Allocation) map[string]string {
+	switch raw := a["database_extra"].(type) {
+	case map[string]string:
+		if len(raw) == 0 {
+			return nil
+		}
+		return raw
+	case map[string]any:
+		out := make(map[string]string, len(raw))
+		for k, v := range raw {
+			if s, ok := v.(string); ok && s != "" {
+				out[k] = s
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	}
+	return nil
+}
+
+// databaseList returns the slice the {database_N} tokens are minted from.
+// With named extras present only the primary is numbered — {database_1} stays
+// interchangeable with {database}, but the extras are addressed by name.
+func databaseList(a Allocation, named bool) any {
+	dbs := a["databases"]
+	if !named {
+		return dbs
+	}
+	switch list := dbs.(type) {
+	case []any:
+		if len(list) > 0 {
+			return list[:1]
+		}
+	case []string:
+		if len(list) > 0 {
+			return list[:1]
+		}
+	}
+	return dbs
 }
 
 func getString(a Allocation, key string) string {

@@ -1,4 +1,9 @@
+# specline.yml
 canon: 2.8.0
 tier: 1
 deciders: [jonathan]
 merge_target: main
+models:
+  light: claude-haiku
+  standard: claude-sonnet
+  frontier: claude-fable
