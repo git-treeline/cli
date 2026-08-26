@@ -1,8 +1,8 @@
 ---
 slug: named-database-references
 type: feature
-status: building
-stale_after: 2026-09-25
+status: shipped
+acceptance_results: https://github.com/git-treeline/cli/pull/130
 decider: jonathan
 blast_radius: medium
 size: small
@@ -10,6 +10,12 @@ created: 2026-08-26
 ---
 
 # Named database references
+
+> Shipped via PR #130 (v0.57.0). Acceptance: agent-loopable checks green
+> (`go test ./...`, `make ci`) at merge; judgeable items verified by an
+> 8-finder adversarial review (one finding, corrected in `627af41`);
+> human-gate accepted by the decider at merge. Knowledge doc:
+> `docs/knowledge/named-database-references/`.
 
 ## Intent
 
