@@ -3,8 +3,10 @@ package cmd
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,7 +15,199 @@ import (
 	"github.com/git-treeline/cli/internal/detect"
 	"github.com/git-treeline/cli/internal/registry"
 	setupPkg "github.com/git-treeline/cli/internal/setup"
+	"github.com/spf13/cobra"
 )
+
+func isolateInitGlobals(t *testing.T) {
+	t.Helper()
+	project, templateDB, skipAgent := initProject, initTemplateDB, initSkipAgentConfig
+	initProject, initTemplateDB, initSkipAgentConfig = "", "", false
+	t.Cleanup(func() {
+		initProject, initTemplateDB, initSkipAgentConfig = project, templateDB, skipAgent
+	})
+}
+
+func TestResolveRepoRootPreservesOtherProbeErrors(t *testing.T) {
+	cmd := &cobra.Command{}
+	root, err := resolveRepoRoot(cmd, filepath.Join(t.TempDir(), "missing"))
+	if err == nil {
+		t.Fatal("expected repository resolution error")
+	}
+	if root != "" {
+		t.Fatalf("root = %q, want empty", root)
+	}
+	var cliError *CliError
+	if errors.As(err, &cliError) {
+		t.Fatalf("non-repository-probe error was replaced with CliError: %v", err)
+	}
+	if !strings.Contains(err.Error(), "resolving Git repository") {
+		t.Fatalf("error lost repository context: %v", err)
+	}
+	if !cmd.SilenceUsage {
+		t.Fatal("repository probe error should suppress command usage")
+	}
+}
+
+func TestInitCmd_OutsideGitRepoReturnsCliErrorWithoutWrites(t *testing.T) {
+	isolateInitGlobals(t)
+	dir := t.TempDir()
+	t.Chdir(dir)
+	gtlHome := filepath.Join(t.TempDir(), "gtl-home")
+	t.Setenv("GTL_HOME", gtlHome)
+
+	err := initCmd.RunE(initCmd, nil)
+	var cliError *CliError
+	if !errors.As(err, &cliError) {
+		t.Fatalf("expected *CliError, got %T: %v", err, err)
+	}
+	if !strings.Contains(cliError.Message, "Git repository") {
+		t.Errorf("expected not-in-repo message, got %q", cliError.Message)
+	}
+	for _, path := range []string{
+		filepath.Join(dir, config.ProjectConfigFile),
+		filepath.Join(dir, ".git"),
+		gtlHome,
+	} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Errorf("expected no write at %s, stat error = %v", path, statErr)
+		}
+	}
+}
+
+func TestInitCmd_NestedWritesConfigAtRootAndHookAtMainRepo(t *testing.T) {
+	isolateInitGlobals(t)
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	nested := filepath.Join(dir, "apps", "web")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(nested)
+	t.Setenv("GTL_HOME", filepath.Join(t.TempDir(), "gtl-home"))
+	t.Setenv("VISUAL", "")
+	t.Setenv("EDITOR", "")
+
+	if err := initCmd.RunE(initCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, config.ProjectConfigFile)); err != nil {
+		t.Fatalf("expected init to create config at repo root: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(nested, config.ProjectConfigFile)); !os.IsNotExist(err) {
+		t.Errorf("expected no nested config, stat error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "AGENTS.md")); err != nil {
+		t.Fatalf("expected agent context at repo root: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(nested, "AGENTS.md")); !os.IsNotExist(err) {
+		t.Errorf("expected no nested agent context, stat error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git", "hooks", "post-checkout")); err != nil {
+		t.Fatalf("expected hook in main repo: %v", err)
+	}
+}
+
+func TestInitCmd_LinkedWorktreeUsesLinkedRootAndMainHook(t *testing.T) {
+	isolateInitGlobals(t)
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	for _, args := range [][]string{
+		{"-C", dir, "config", "user.name", "test"},
+		{"-C", dir, "config", "user.email", "test@example.com"},
+		{"-C", dir, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	linked := filepath.Join(t.TempDir(), "linked")
+	if out, err := exec.Command("git", "-C", dir, "worktree", "add", "-b", "feature", linked).CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+	t.Chdir(linked)
+	t.Setenv("GTL_HOME", filepath.Join(t.TempDir(), "gtl-home"))
+	t.Setenv("VISUAL", "")
+	t.Setenv("EDITOR", "")
+
+	if err := initCmd.RunE(initCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(linked, config.ProjectConfigFile)); err != nil {
+		t.Fatalf("expected config in linked worktree: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(linked, "AGENTS.md")); err != nil {
+		t.Fatalf("expected context in linked worktree: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git", "hooks", "post-checkout")); err != nil {
+		t.Fatalf("expected hook in main repository: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(linked, ".git", "hooks", "post-checkout")); err == nil {
+		t.Fatal("unexpected hook in linked worktree")
+	}
+}
+
+func TestInstallCmd_OutsideGitRepoReturnsCliErrorWithoutWrites(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	gtlHome := filepath.Join(t.TempDir(), "gtl-home")
+	t.Setenv("GTL_HOME", gtlHome)
+
+	err := installCmd.RunE(installCmd, nil)
+	var cliError *CliError
+	if !errors.As(err, &cliError) {
+		t.Fatalf("expected *CliError, got %T: %v", err, err)
+	}
+	if !strings.Contains(cliError.Message, "Git repository") {
+		t.Errorf("expected not-in-repo message, got %q", cliError.Message)
+	}
+	for _, path := range []string{
+		filepath.Join(dir, config.ProjectConfigFile),
+		filepath.Join(dir, ".git"),
+		gtlHome,
+	} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Errorf("expected no write at %s, stat error = %v", path, statErr)
+		}
+	}
+}
+
+func TestInitCmd_PartialGitHooksOutsideRepoLeavesHookUnchanged(t *testing.T) {
+	isolateInitGlobals(t)
+	dir := t.TempDir()
+	hooksDir := filepath.Join(dir, ".git", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hook := filepath.Join(hooksDir, "post-checkout")
+	original := "#!/bin/sh\necho existing\n"
+	if err := os.WriteFile(hook, []byte(original), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	gtlHome := filepath.Join(t.TempDir(), "gtl-home")
+	t.Setenv("GTL_HOME", gtlHome)
+
+	err := initCmd.RunE(initCmd, nil)
+	var cliError *CliError
+	if !errors.As(err, &cliError) {
+		t.Fatalf("expected *CliError, got %T: %v", err, err)
+	}
+	data, readErr := os.ReadFile(hook)
+	if readErr != nil {
+		t.Fatalf("reading existing hook: %v", readErr)
+	}
+	if string(data) != original {
+		t.Fatalf("existing hook changed: %q", data)
+	}
+	for _, path := range []string{
+		filepath.Join(dir, config.ProjectConfigFile),
+		gtlHome,
+	} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Errorf("expected no write at %s, stat error = %v", path, statErr)
+		}
+	}
+}
 
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()

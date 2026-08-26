@@ -35,7 +35,15 @@ var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Generate a .treeline.yml config file for the current project",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		path := filepath.Join(".", config.ProjectConfigFile)
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("could not resolve current directory: %w", err)
+		}
+		worktreeRoot, err := resolveRepoRoot(cmd, cwd)
+		if err != nil {
+			return err
+		}
+		path := filepath.Join(worktreeRoot, config.ProjectConfigFile)
 		if _, err := os.Stat(path); err == nil {
 			return cliErr(cmd, &CliError{
 				Message: ".treeline.yml already exists.",
@@ -51,12 +59,11 @@ var initCmd = &cobra.Command{
 			fmt.Println(style.Actionf("Created user config at %s", platform.ConfigFile()))
 		}
 
-		cwd, _ := os.Getwd()
-		detection := detect.Detect(cwd)
-		detection.MergeTarget = worktree.DetectDefaultBranch(cwd)
+		detection := detect.Detect(worktreeRoot)
+		detection.MergeTarget = worktree.DetectDefaultBranch(worktreeRoot)
 		project := initProject
 		if project == "" {
-			project = defaultProjectName(cwd)
+			project = defaultProjectName(worktreeRoot)
 		}
 
 		templateDB := initTemplateDB
@@ -92,7 +99,7 @@ var initCmd = &cobra.Command{
 		fmt.Println(style.Actionf("%s", msg))
 
 		if !initSkipAgentConfig {
-			agentPath, err := templates.WriteAgentContext(cwd, project, detection)
+			agentPath, err := templates.WriteAgentContext(worktreeRoot, project, detection)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, style.Warnf("failed to write agent context: %s", err))
 			} else if agentPath != "" {
@@ -111,7 +118,7 @@ var initCmd = &cobra.Command{
 			}
 		}
 
-		hookPath, err := templates.InstallPostCheckoutHook(cwd)
+		hookPath, err := templates.InstallPostCheckoutHook(worktree.DetectMainRepo(worktreeRoot))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, style.Warnf("failed to install hook: %s", err))
 		} else if hookPath != "" {
