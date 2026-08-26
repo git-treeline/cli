@@ -40,7 +40,7 @@ func nextJS(project, templateDB string, det *detect.Result) string {
 		b.WriteString("\n# database:\n")
 		b.WriteString("#   adapter: postgresql\n")
 		fmt.Fprintf(&b, "#   template: %s\n", templateDB)
-		b.WriteString("#   pattern: \"{template}_{worktree}\"\n")
+		b.WriteString("#   name: \"{template}_{worktree}\"\n")
 	}
 
 	emit := shouldEmitEnv(det)
@@ -52,7 +52,7 @@ func nextJS(project, templateDB string, det *detect.Result) string {
 		fmt.Fprintf(&b, "\ndatabase:\n")
 		fmt.Fprintf(&b, "  adapter: postgresql\n")
 		fmt.Fprintf(&b, "  template: %s\n", templateDB)
-		fmt.Fprintf(&b, "  pattern: \"{template}_{worktree}\"\n")
+		fmt.Fprintf(&b, "  name: \"{template}_{worktree}\"\n")
 		fmt.Fprintf(&b, "  host: localhost\n")
 		fmt.Fprintf(&b, "  # port: 5432\n")
 		fmt.Fprintf(&b, "  # user: postgres\n")
@@ -103,10 +103,10 @@ func rails(project, templateDB string, det *detect.Result) string {
 	fmt.Fprintf(&b, "  adapter: %s\n", adapter)
 	if adapter == "sqlite" {
 		fmt.Fprintf(&b, "  template: db/development.sqlite3\n")
-		fmt.Fprintf(&b, "  pattern: \"db/{worktree}.sqlite3\"\n")
+		fmt.Fprintf(&b, "  name: \"db/{worktree}.sqlite3\"\n")
 	} else {
 		fmt.Fprintf(&b, "  template: %s\n", templateDB)
-		fmt.Fprintf(&b, "  pattern: \"{template}_{worktree}\"\n")
+		fmt.Fprintf(&b, "  name: \"{template}_{worktree}\"\n")
 		fmt.Fprintf(&b, "  host: localhost\n")
 		fmt.Fprintf(&b, "  # port: 5432\n")
 		fmt.Fprintf(&b, "  # user: postgres\n")
@@ -172,14 +172,14 @@ func phoenix(project, templateDB string, det *detect.Result) string {
 	fmt.Fprintf(&b, "  adapter: %s\n", adapter)
 	if adapter == "sqlite" {
 		fmt.Fprintf(&b, "  template: %s_dev.db\n", project)
-		fmt.Fprintf(&b, "  pattern: \"%s_{worktree}.db\"\n", project)
+		fmt.Fprintf(&b, "  name: \"%s_{worktree}.db\"\n", project)
 	} else {
 		tdb := templateDB
 		if tdb == "" {
 			tdb = project + "_dev"
 		}
 		fmt.Fprintf(&b, "  template: %s\n", tdb)
-		fmt.Fprintf(&b, "  pattern: \"{template}_{worktree}\"\n")
+		fmt.Fprintf(&b, "  name: \"{template}_{worktree}\"\n")
 		fmt.Fprintf(&b, "  host: localhost\n")
 		fmt.Fprintf(&b, "  # port: 5432\n")
 		fmt.Fprintf(&b, "  # user: postgres\n")

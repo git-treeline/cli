@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -816,6 +817,41 @@ func ExtractDatabases(a Allocation) []string {
 		return []string{db}
 	}
 	return nil
+}
+
+// ExtractExtraDatabases returns the named auxiliary databases of an
+// allocation, or nil for entries written from a positional database.extra.
+func ExtractExtraDatabases(a Allocation) map[string]string {
+	raw, ok := a["database_extra"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := make(map[string]string, len(raw))
+	for k, v := range raw {
+		if s, ok := v.(string); ok && s != "" {
+			out[k] = s
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// ExtractExtraDatabaseKeys returns the names of an allocation's auxiliary
+// databases, sorted — the same order they occupy in the "databases" array
+// after the primary.
+func ExtractExtraDatabaseKeys(a Allocation) []string {
+	extras := ExtractExtraDatabases(a)
+	if len(extras) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(extras))
+	for k := range extras {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // ExtractPorts extracts the port list from an allocation, handling both

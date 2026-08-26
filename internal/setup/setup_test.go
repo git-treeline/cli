@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -1900,5 +1901,92 @@ env:
 	}
 	if warn < done {
 		t.Errorf("degradation warning printed before the success summary — it must be the last block:\n%s", out)
+	}
+}
+
+// renderFixtureEnv allocates a worktree against a .treeline.yml fixture and
+// renders its env block, returning the env file body that setup would write.
+// It exercises the whole chain: config parsing → name rendering → token
+// minting → env interpolation.
+func renderFixtureEnv(t *testing.T, projectYAML string) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	confPath := filepath.Join(dir, "config.json")
+	_ = os.WriteFile(confPath, []byte(`{"port":{"base":3000,"increment":10},"redis":{"strategy":"prefixed","url":"redis://localhost:6379"}}`), 0o644)
+	uc := config.LoadUserConfig(confPath)
+
+	projDir := filepath.Join(dir, "project")
+	_ = os.MkdirAll(projDir, 0o755)
+	_ = os.WriteFile(filepath.Join(projDir, ".treeline.yml"), []byte(projectYAML), 0o644)
+	pc := config.LoadProjectConfig(projDir)
+	if err := pc.Validate(); err != nil {
+		t.Fatalf("fixture config is invalid: %v", err)
+	}
+
+	reg := registry.New(filepath.Join(dir, "registry.json"))
+	alloc, err := allocator.New(uc, pc, reg).Allocate("/wt/feature-x", "feature-x", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	vars := BuildEnvVars(pc, alloc.ToInterpolationMap(), "redis://localhost:6379")
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&b, "%s=%s\n", k, vars[k])
+	}
+	return b.String()
+}
+
+const listFormFixture = `project: myapp
+database:
+  adapter: postgresql
+  template: myapp_development
+  pattern: "{template}_{worktree}"
+  extra:
+    - "{database}_test"
+env:
+  DATABASE_URL: "postgres://localhost/{database}"
+  PRIMARY_DB: "{database_1}"
+  TEST_DATABASE_URL: "postgres://localhost/{database_2}"
+`
+
+// wantFixtureEnv is the env output a list-form config produced before named
+// database references existed. It is a byte-for-byte contract: adding the map
+// form and the dotted tokens must not shift a single character of it.
+const wantFixtureEnv = `DATABASE_URL=postgres://localhost/myapp_development_feature_x
+PRIMARY_DB=myapp_development_feature_x
+TEST_DATABASE_URL=postgres://localhost/myapp_development_feature_x_test
+`
+
+func TestBuildEnvVars_ListFormFixtureIsByteIdentical(t *testing.T) {
+	if got := renderFixtureEnv(t, listFormFixture); got != wantFixtureEnv {
+		t.Errorf("list-form env output changed:\n got:\n%s\nwant:\n%s", got, wantFixtureEnv)
+	}
+}
+
+func TestBuildEnvVars_MapFormMatchesListForm(t *testing.T) {
+	// The same databases, spelled with names instead of positions. The values
+	// must be identical — only the config's readability changes.
+	mapForm := `project: myapp
+database:
+  adapter: postgresql
+  template: myapp_development
+  name: "{template}_{worktree}"
+  extra:
+    test: "{database.name}_test"
+env:
+  DATABASE_URL: "postgres://localhost/{database.name}"
+  PRIMARY_DB: "{database_1}"
+  TEST_DATABASE_URL: "postgres://localhost/{database.extra.test}"
+`
+	if got := renderFixtureEnv(t, mapForm); got != wantFixtureEnv {
+		t.Errorf("map-form env output differs from the list-form equivalent:\n got:\n%s\nwant:\n%s", got, wantFixtureEnv)
 	}
 }

@@ -1,7 +1,8 @@
 ---
 slug: named-database-references
 type: feature
-status: draft
+status: building
+stale_after: 2026-09-25
 decider: jonathan
 blast_radius: medium
 size: small
