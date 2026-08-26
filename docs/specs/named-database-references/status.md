@@ -34,7 +34,7 @@ ready-for-review
 
 ## Last green checkpoint
 
-- `go test ./...` and `make ci` both green at commit `4ad0f6e` (docs) /
+- `go test ./...` and `make ci` both green at commit `144c3ab` (docs) /
   `64f7df8` (implementation).
 
 ## Dead ends
