@@ -25,7 +25,7 @@ ready-for-review — implementation complete, all acceptance commands green, awa
 (none)
 
 ## Last green checkpoint
-branch gtl-new-missing-template-db — `make ci` green; live gtl new degraded run exit 0, --strict exit 1
+870ccd8 — `make ci` green; live gtl new degraded run exit 0, --strict exit 1
 
 ## Dead ends
 (none)

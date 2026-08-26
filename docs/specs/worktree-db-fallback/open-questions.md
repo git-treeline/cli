@@ -2,14 +2,11 @@
 
 None open.
 
-## Resolved
+Resolved 2026-08-26 by jonathan:
 
-### Should a degraded non-strict run exit non-zero?
-Decided 2026-08-26 by jonathan: **exit 0** (option a). Scripts that need a
-readiness guarantee use `--strict`; a non-zero default would break existing
-callers that treat any non-zero as failure.
-
-### Should `.treeline.yml` be able to make strict the default?
-Decided 2026-08-26 by jonathan: **flag only** (option a). A `database.strict`
-config key can be added later if a real repo asks; speculative config is
-scope creep.
+- **Degraded non-strict exit code** → exit 0. Scripts that need a readiness
+  guarantee use `--strict`; a non-zero default would break existing callers
+  that treat any non-zero as failure.
+- **Config key to make strict the default** → flag only. A `database.strict`
+  key can be added later if a real repo asks; speculative config is scope
+  creep.
