@@ -14,6 +14,7 @@ import (
 
 	"github.com/git-treeline/cli/internal/allocator"
 	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/database"
 	"github.com/git-treeline/cli/internal/interpolation"
 	"github.com/git-treeline/cli/internal/registry"
 )
@@ -1508,5 +1509,396 @@ env:
 	plain := ansiRE.ReplaceAllString(s.Log.(*bytes.Buffer).String(), "")
 	if !strings.Contains(plain, "keeping template database") {
 		t.Errorf("expected 'keeping template database' message in log, got: %q", plain)
+	}
+}
+
+// --- database ladder tests ---
+
+// fakeAdapter is an in-memory database.Adapter for exercising the clone
+// ladder without pg tooling.
+type fakeAdapter struct {
+	existing  map[string]bool
+	existsErr error
+	cloneErr  error
+	createErr error
+	calls     []string
+}
+
+func newFakeAdapter(existing ...string) *fakeAdapter {
+	f := &fakeAdapter{existing: map[string]bool{}}
+	for _, name := range existing {
+		f.existing[name] = true
+	}
+	return f
+}
+
+func (f *fakeAdapter) Exists(name string) (bool, error) {
+	if f.existsErr != nil {
+		return false, f.existsErr
+	}
+	return f.existing[name], nil
+}
+
+func (f *fakeAdapter) Clone(template, target string) error {
+	f.calls = append(f.calls, "clone:"+template+"->"+target)
+	if f.cloneErr != nil {
+		return f.cloneErr
+	}
+	f.existing[target] = true
+	return nil
+}
+
+func (f *fakeAdapter) Create(name string) error {
+	f.calls = append(f.calls, "create:"+name)
+	if f.createErr != nil {
+		return f.createErr
+	}
+	f.existing[name] = true
+	return nil
+}
+
+func (f *fakeAdapter) Drop(target string) error {
+	f.calls = append(f.calls, "drop:"+target)
+	delete(f.existing, target)
+	return nil
+}
+func (f *fakeAdapter) Rename(oldName, newName string) error  { return nil }
+func (f *fakeAdapter) Restore(target, dumpFile string) error { return nil }
+
+func ladderSetup(t *testing.T, yaml string) *Setup {
+	t.Helper()
+	t.Setenv("GTL_HOME", t.TempDir()) // keep template lock files out of the real config dir
+	s, _, _ := testSetup(t, yaml)
+	return s
+}
+
+func ladderAlloc() *allocator.Allocation {
+	return &allocator.Allocation{Databases: []string{"myapp_feature"}}
+}
+
+func TestCloneDatabase_Ladder(t *testing.T) {
+	const base = `
+project: myapp
+database:
+  template: myapp_template
+  pattern: "myapp_{worktree}"
+`
+	tests := []struct {
+		name        string
+		yaml        string
+		adapter     *fakeAdapter
+		hydrate     func(*config.ProjectConfig, string, string) error
+		strict      bool
+		wantErr     bool
+		wantState   string // "" = healthy
+		wantReason  string // substring of the degradation reason
+		wantCalls   []string
+		wantCloned  bool
+	}{
+		{
+			name:       "template exists — plain clone, no degradation",
+			yaml:       base,
+			adapter:    newFakeAdapter("myapp_template"),
+			wantCloned: true,
+		},
+		{
+			// No provision: section = no opt-in to gtl creating the template.
+			// The template must NOT be created (it would clone cleanly and
+			// silently on every later run); only the worktree DB is created.
+			name:       "missing template, no provision config — template untouched, worktree DB empty fallback",
+			yaml:       base,
+			adapter:    newFakeAdapter(),
+			wantState:  "empty",
+			wantReason: "no provision: section",
+			wantCalls:  []string{"create:myapp_feature"},
+		},
+		{
+			name: "missing template, provision opted in with empty mode — template provisioned, degrades to empty",
+			yaml: base + `
+provision:
+  database: {}
+`,
+			adapter:    newFakeAdapter(),
+			wantState:  "empty",
+			wantReason: "created empty",
+			wantCalls:  []string{"create:myapp_template", "clone:myapp_template->myapp_feature"},
+			wantCloned: true,
+		},
+		{
+			name: "missing template, hydrate mode — provisioned via hydrate command, healthy",
+			yaml: base + `
+provision:
+  database:
+    hydrate: "true"
+`,
+			adapter:    newFakeAdapter(),
+			wantCalls:  []string{"create:myapp_template", "clone:myapp_template->myapp_feature"},
+			wantCloned: true,
+		},
+		{
+			name: "missing template, hydrate command fails — empty fallback",
+			yaml: base + `
+provision:
+  database:
+    hydrate: "false"
+`,
+			adapter:    newFakeAdapter(),
+			wantState:  "empty",
+			wantReason: "hydrate command failed",
+			wantCalls:  []string{"create:myapp_template", "drop:myapp_template", "create:myapp_feature"},
+		},
+		{
+			name: "missing template, source mode without auto — no hydration, empty fallback",
+			yaml: base + `
+provision:
+  database:
+    source: production
+`,
+			adapter:    newFakeAdapter(),
+			wantState:  "empty",
+			wantReason: "provision.database.auto",
+			wantCalls:  []string{"create:myapp_feature"},
+		},
+		{
+			name: "missing template, source mode with auto — hydrated and cloned, healthy",
+			yaml: base + `
+provision:
+  database:
+    source: production
+    auto: true
+`,
+			adapter:    newFakeAdapter(),
+			hydrate:    nil, // set per-test below via marker
+			wantCalls:  []string{"clone:myapp_template->myapp_feature"},
+			wantCloned: true,
+		},
+		{
+			name: "missing template, source mode with auto but hydration fails — empty fallback",
+			yaml: base + `
+provision:
+  database:
+    source: production
+    auto: true
+`,
+			adapter:    newFakeAdapter(),
+			wantState:  "empty",
+			wantReason: "provisioning template database myapp_template failed",
+			wantCalls:  []string{"create:myapp_feature"},
+		},
+		{
+			name:      "empty fallback also fails — database absent, setup continues",
+			yaml:      base,
+			adapter:   func() *fakeAdapter { f := newFakeAdapter(); f.createErr = errors.New("connection refused"); return f }(),
+			wantState: "absent",
+			wantReason: "also failed",
+		},
+		{
+			name:       "clone fails with template present — empty fallback",
+			yaml:       base,
+			adapter:    func() *fakeAdapter { f := newFakeAdapter("myapp_template"); f.cloneErr = errors.New("createdb: boom"); return f }(),
+			wantState:  "empty",
+			wantReason: "boom",
+			wantCalls:  []string{"clone:myapp_template->myapp_feature", "create:myapp_feature"},
+		},
+		{
+			name:      "server unreachable — degrades to absent without attempting anything",
+			yaml:      base,
+			adapter:   func() *fakeAdapter { f := newFakeAdapter(); f.existsErr = errors.New("connection refused"); return f }(),
+			wantState: "absent",
+			wantReason: "connection refused",
+			wantCalls:  nil,
+		},
+		{
+			name: "strict: missing template with source mode fails hard",
+			yaml: base + `
+provision:
+  database:
+    source: production
+`,
+			adapter:   newFakeAdapter(),
+			strict:    true,
+			wantErr:   true,
+			wantCalls: nil,
+		},
+		{
+			name:    "strict: clone failure fails hard before fallback",
+			yaml:    base,
+			adapter: func() *fakeAdapter { f := newFakeAdapter("myapp_template"); f.cloneErr = errors.New("boom"); return f }(),
+			strict:  true,
+			wantErr: true,
+		},
+		{
+			// Strict would reject an empty clone anyway, so the template must
+			// not be created as a side effect of a run that is about to fail.
+			name: "strict: empty-mode provision fails hard without creating the template",
+			yaml: base + `
+provision:
+  database: {}
+`,
+			adapter:   newFakeAdapter(),
+			strict:    true,
+			wantErr:   true,
+			wantCalls: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := ladderSetup(t, tt.yaml)
+			s.Options.StrictDB = tt.strict
+
+			prev := HydrateTemplateFromSource
+			defer func() { HydrateTemplateFromSource = prev }()
+			switch tt.name {
+			case "missing template, source mode with auto — hydrated and cloned, healthy":
+				HydrateTemplateFromSource = func(pc *config.ProjectConfig, template, env string) error {
+					tt.adapter.existing[template] = true
+					return nil
+				}
+			case "missing template, source mode with auto but hydration fails — empty fallback":
+				HydrateTemplateFromSource = func(pc *config.ProjectConfig, template, env string) error {
+					return errors.New("dump failed")
+				}
+			default:
+				HydrateTemplateFromSource = nil
+			}
+
+			alloc := ladderAlloc()
+			hadTemplate := tt.adapter.existing["myapp_template"]
+			err := s.cloneDatabaseWith(tt.adapter, "postgresql", alloc)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected an error under --strict")
+				}
+				if s.DBDegradation != nil {
+					t.Errorf("strict failure must not record a degradation, got %+v", s.DBDegradation)
+				}
+				if !hadTemplate && tt.adapter.existing["myapp_template"] {
+					t.Error("strict failure must not leave a created template behind")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if tt.wantState == "" {
+				if s.DBDegradation != nil {
+					t.Fatalf("expected healthy run, got degradation %+v", s.DBDegradation)
+				}
+			} else {
+				if s.DBDegradation == nil {
+					t.Fatalf("expected degradation state %q, got none", tt.wantState)
+				}
+				if s.DBDegradation.State != tt.wantState {
+					t.Errorf("state = %q, want %q", s.DBDegradation.State, tt.wantState)
+				}
+				if !strings.Contains(s.DBDegradation.Reason, tt.wantReason) {
+					t.Errorf("reason %q does not contain %q", s.DBDegradation.Reason, tt.wantReason)
+				}
+				if s.DBDegradation.Database != "myapp_feature" {
+					t.Errorf("degradation database = %q, want myapp_feature", s.DBDegradation.Database)
+				}
+			}
+
+			if tt.wantState == "" && tt.adapter.existing["myapp_feature"] != tt.wantCloned {
+				t.Errorf("worktree db existence = %v, want %v", tt.adapter.existing["myapp_feature"], tt.wantCloned)
+			}
+			if tt.wantCalls != nil {
+				got := strings.Join(tt.adapter.calls, ",")
+				want := strings.Join(tt.wantCalls, ",")
+				if got != want {
+					t.Errorf("adapter calls = %s, want %s", got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestCloneDatabase_SQLiteMissingTemplate_FallsBackToEmptyFile(t *testing.T) {
+	s, _, worktreeDir := testSetup(t, `
+project: myapp
+database:
+  adapter: sqlite
+  template: db/development.sqlite3
+  pattern: "db/{worktree}.sqlite3"
+`)
+	// No template file created in mainRepo.
+	alloc := &allocator.Allocation{Databases: []string{"db/feature.sqlite3"}}
+	adapter := &database.SQLite{}
+	if err := s.cloneDatabaseWith(adapter, "sqlite", alloc); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if s.DBDegradation == nil || s.DBDegradation.State != "empty" {
+		t.Fatalf("expected empty degradation, got %+v", s.DBDegradation)
+	}
+	if _, err := os.Stat(filepath.Join(worktreeDir, "db", "feature.sqlite3")); err != nil {
+		t.Fatalf("expected empty fallback database file: %v", err)
+	}
+}
+
+func TestDBDegradation_MessageNamesRecovery(t *testing.T) {
+	d := &DBDegradation{Database: "myapp_feature", State: "empty", Reason: "template missing"}
+	msg := d.Message()
+	for _, want := range []string{"myapp_feature", "gtl db reset", "not self-heal"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q missing %q", msg, want)
+		}
+	}
+}
+
+func TestRun_DegradationWarningSurvivesSetupCommandFailure(t *testing.T) {
+	// The empty DB is very likely WHY the setup commands failed; the warning
+	// must print on the SetupCommandError path, not only on success.
+	s, _, _ := testSetup(t, `
+project: myapp
+env_file:
+  target: .env
+database:
+  adapter: sqlite
+  template: db/development.sqlite3
+  pattern: "db/{worktree}.sqlite3"
+commands:
+  setup:
+    - "false"
+env:
+  PORT: "{port}"
+`)
+	// No template file created — the ladder degrades to an empty file.
+	_, err := s.Run()
+	var sce *SetupCommandError
+	if !errors.As(err, &sce) {
+		t.Fatalf("expected SetupCommandError, got %v", err)
+	}
+	out := ansiRE.ReplaceAllString(s.Log.(*bytes.Buffer).String(), "")
+	if !strings.Contains(out, "will not self-heal") {
+		t.Errorf("degradation warning missing from output on setup-command failure:\n%s", out)
+	}
+}
+
+func TestRun_DegradationWarningPrintsAfterSummary(t *testing.T) {
+	s, _, _ := testSetup(t, `
+project: myapp
+env_file:
+  target: .env
+database:
+  adapter: sqlite
+  template: db/development.sqlite3
+  pattern: "db/{worktree}.sqlite3"
+env:
+  PORT: "{port}"
+`)
+	if _, err := s.Run(); err != nil {
+		t.Fatal(err)
+	}
+	out := ansiRE.ReplaceAllString(s.Log.(*bytes.Buffer).String(), "")
+	done := strings.Index(out, "Done!")
+	warn := strings.Index(out, "will not self-heal")
+	if done == -1 || warn == -1 {
+		t.Fatalf("expected both summary and warning in output:\n%s", out)
+	}
+	if warn < done {
+		t.Errorf("degradation warning printed before the success summary — it must be the last block:\n%s", out)
 	}
 }

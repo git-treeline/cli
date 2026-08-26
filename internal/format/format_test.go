@@ -172,6 +172,7 @@ type fakeListerAdapter struct {
 }
 
 func (f *fakeListerAdapter) Clone(template, target string) error { return nil }
+func (f *fakeListerAdapter) Create(name string) error            { return nil }
 func (f *fakeListerAdapter) Drop(target string) error {
 	f.dropped = append(f.dropped, target)
 	return nil

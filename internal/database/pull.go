@@ -43,6 +43,10 @@ type Puller struct {
 	LocalConnArgs []string
 	// Logf, when set, receives a redacted line for each exec (for --debug).
 	Logf func(format string, a ...any)
+	// Out receives the pg tools' stdout; nil means os.Stdout. Callers whose
+	// stdout is a protocol or capture stream (MCP stdio, `gtl claim`) set it
+	// to keep tool chatter out of that stream.
+	Out io.Writer
 
 	// exec seams; nil falls through to real exec.
 	execRun    func(name string, args ...string) error
@@ -222,7 +226,11 @@ func (p *Puller) runStage(stage string, env []string, name string, args ...strin
 		cmd.Env = append(os.Environ(), env...)
 	}
 	var stderr bytes.Buffer
-	cmd.Stdout = os.Stdout
+	out := p.Out
+	if out == nil {
+		out = os.Stdout
+	}
+	cmd.Stdout = out
 	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
 	if err := cmd.Run(); err != nil {
 		return &ExecError{Stage: stage, Output: strings.TrimSpace(stderr.String()), Err: err}

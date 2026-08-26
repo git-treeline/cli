@@ -9,12 +9,14 @@ import "fmt"
 // Adapter defines the interface for database template cloning and cleanup.
 // Implementations handle database-specific operations:
 //   - Clone creates a new database from a template
+//   - Create creates an empty database with no template
 //   - Drop removes a database
 //   - Exists checks if a database already exists
 //   - Rename renames an existing database in place
 //   - Restore loads a dump file into a database
 type Adapter interface {
 	Clone(template, target string) error
+	Create(name string) error
 	Drop(target string) error
 	Exists(name string) (bool, error)
 	Rename(oldName, newName string) error

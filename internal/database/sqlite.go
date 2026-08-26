@@ -54,6 +54,19 @@ func (s *SQLite) Clone(template, target string) error {
 	return dst.Close()
 }
 
+// Create creates an empty database file — the degraded fallback when the
+// configured template file is missing.
+func (s *SQLite) Create(name string) error {
+	if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+		return fmt.Errorf("creating target directory: %w", err)
+	}
+	f, err := os.Create(name)
+	if err != nil {
+		return fmt.Errorf("creating database %s: %w", name, err)
+	}
+	return f.Close()
+}
+
 func (s *SQLite) Drop(target string) error {
 	if err := removeIfExists(target); err != nil {
 		return err

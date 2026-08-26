@@ -698,6 +698,7 @@ See [Framework examples](#framework-examples) for complete examples. Available f
 | `provision.services` | Service packages to apt-install and `systemctl enable --now` (Linux). Skipped on macOS |
 | `provision.database.source` | A `database.sources.<env>` name to hydrate the template database from (preferred — real data) |
 | `provision.database.hydrate` | Fallback shell command, run in the repo dir, to fill the template when no `source` is set (e.g. `bin/rails db:schema:load db:seed`) |
+| `provision.database.auto` | Allow `gtl new`/`gtl setup` to run `source` hydration automatically when the template DB is missing (default `false` — pulling a remote dump stays opt-in) |
 | `provision.database.template` | Template database name to create (defaults to `database.template` — the DB gtl clones worktree DBs from) |
 
 ### Interpolation tokens
@@ -764,7 +765,14 @@ gtl provision             # apply it
 ```
 
 Run it once when you first put a repo on a new host — after cloning, before
-`gtl setup`. `gtl setup` and `gtl new` do **not** invoke it automatically.
+`gtl setup`. `gtl setup` and `gtl new` do **not** invoke the full plan
+automatically. One exception: in repos with a `provision:` section, when the
+template database is missing at worktree-creation time, the database step
+runs on its own (for `source` hydration only with
+`provision.database.auto: true`). If the template can't be produced — or the
+repo has no `provision:` section — the worktree is created anyway with an
+empty database and a warning explaining how to recover; pass `--strict` to
+`gtl new` to fail hard instead.
 
 ## Database cloning (optional)
 
@@ -852,7 +860,7 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 |---|---|---|
 | `gtl install` | | Set up git-treeline for this project and machine (config, hook, setup, optional HTTPS) |
 | `gtl init` | `--project` `--template-db` `--skip-agent-config` | Generate `.treeline.yml` (auto-detects framework, writes `AGENTS.md` section) |
-| `gtl new <branch>` | `--base` `--path` `--start` `--open` `--no-setup` `--dry-run` `--force`/`-f` | Create worktree + allocate + setup in one step |
+| `gtl new <branch>` | `--base` `--path` `--start` `--open` `--no-setup` `--strict` `--dry-run` `--force`/`-f` | Create worktree + allocate + setup in one step |
 | `gtl claim <branch>` | `--path` `--no-setup` | Fetch a branch and ensure a worktree exists at its latest commit — adopts (never creates) the branch and fast-forwards; idempotent, prints only the worktree path to stdout |
 | `gtl review <PR#>` | `--path` `--start` `--open` `--no-setup` | Check out a GitHub PR into a worktree with full setup (requires `gh`) |
 | `gtl switch <branch-or-PR#>` | `--setup` `--restart` | Switch worktree to a different branch or PR — fetches, checks out, refreshes env |

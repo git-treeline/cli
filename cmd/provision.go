@@ -13,6 +13,7 @@ import (
 	"github.com/git-treeline/cli/internal/database"
 	"github.com/git-treeline/cli/internal/dbsource"
 	"github.com/git-treeline/cli/internal/provision"
+	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/style"
 	"github.com/spf13/cobra"
 )
@@ -22,6 +23,10 @@ var provisionDryRun bool
 func init() {
 	provisionCmd.Flags().BoolVar(&provisionDryRun, "dry-run", false, "Print the provisioning plan without making changes")
 	rootCmd.AddCommand(provisionCmd)
+	// Setup auto-provisions a missing template during worktree creation; the
+	// source-hydration path lives here (it shares gtl db pull's machinery),
+	// so hand it to the setup package as a seam.
+	setup.HydrateTemplateFromSource = hydrateTemplateFromSource
 }
 
 var provisionCmd = &cobra.Command{
@@ -72,6 +77,20 @@ empty as a last resort.`,
 		if len(actions) == 0 {
 			fmt.Println(style.Actionf("Nothing to provision."))
 			return nil
+		}
+
+		// Hold the same per-template lock worktree setup and Clone use, so a
+		// provision rewriting the template can't race a concurrent `gtl new`
+		// cloning it (or a second provision hydrating it).
+		for _, a := range actions {
+			if a.Kind == provision.ActionDatabase {
+				unlock, err := database.LockTemplate(a.DBTemplate)
+				if err != nil {
+					return cliErr(cmd, fmt.Errorf("locking template %s: %w", a.DBTemplate, err))
+				}
+				defer unlock()
+				break
+			}
 		}
 
 		deps := provisionDeps(pc, abs)
@@ -234,7 +253,10 @@ func hydrateTemplateFromSource(pc *config.ProjectConfig, template, env string) e
 	toc := filepath.Join(dir, env+".toc")
 
 	p := database.NewPuller(pc.DatabaseConnArgs())
-	fmt.Printf("==> Dumping %s from %s\n", env, conn.Host)
+	// stderr, not stdout: this path also runs inside `gtl new`/`gtl claim`
+	// (auto-provision), where stdout is a capture stream or MCP transport.
+	p.Out = os.Stderr
+	fmt.Fprintf(os.Stderr, "==> Dumping %s from %s\n", env, conn.Host)
 	if err := p.Dump(toRemoteConn(conn), dump); err != nil {
 		return classifyPullError(err, conn.Host, template)
 	}
@@ -242,7 +264,7 @@ func hydrateTemplateFromSource(pc *config.ProjectConfig, template, env string) e
 		Require: pc.DatabaseExtensionsRequire(),
 		Strip:   pc.DatabaseExtensionsStrip(),
 	}
-	fmt.Printf("==> Restoring into template %s\n", template)
+	fmt.Fprintf(os.Stderr, "==> Restoring into template %s\n", template)
 	if err := p.Refresh(template, dump, toc, exts); err != nil {
 		return classifyPullError(err, conn.Host, template)
 	}

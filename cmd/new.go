@@ -22,6 +22,7 @@ var newOpen bool
 var newDryRun bool
 var newForce bool
 var newNoSetup bool
+var newStrict bool
 
 func init() {
 	newCmd.Flags().StringVar(&newBase, "base", "", "Base branch for the new worktree (default: current branch)")
@@ -31,7 +32,9 @@ func init() {
 	newCmd.Flags().BoolVar(&newDryRun, "dry-run", false, "Print what would happen without making changes")
 	newCmd.Flags().BoolVarP(&newForce, "force", "f", false, "Skip confirmation when creating from inside a worktree")
 	newCmd.Flags().BoolVar(&newNoSetup, "no-setup", false, "Create the worktree only — skip allocation, env, and setup commands (run 'gtl setup' later)")
+	newCmd.Flags().BoolVar(&newStrict, "strict", false, "Fail instead of continuing with a warning when the worktree database cannot be cloned")
 	newCmd.MarkFlagsMutuallyExclusive("no-setup", "start")
+	newCmd.MarkFlagsMutuallyExclusive("no-setup", "strict")
 	newCmd.MarkFlagsMutuallyExclusive("no-setup", "open")
 	newCmd.ValidArgsFunction = completeBranches
 	rootCmd.AddCommand(newCmd)
@@ -107,7 +110,7 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		// and treat the command as resumable.
 		if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
 			fmt.Println(style.Actionf("Branch '%s' already checked out at %s", branch, existingWT))
-			alloc, err := ensureWorktreeAllocation(existingWT, mainRepo, uc, os.Stdout)
+			alloc, err := ensureWorktreeAllocation(existingWT, mainRepo, uc, os.Stdout, newStrict)
 			if err != nil {
 				return cliErr(cmd, err)
 			}
@@ -171,7 +174,7 @@ Otherwise a new branch is created from --base (or the current branch).`,
 			return nil
 		}
 
-		alloc, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stdout)
+		alloc, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stdout, newStrict)
 		if err != nil {
 			return err
 		}

@@ -120,7 +120,7 @@ func (pg *PostgreSQL) Clone(template, target string) error {
 	// per-template lock file (advisory, released on unlock or process exit)
 	// provides cross-process mutual exclusion; an in-process sync.Mutex could
 	// not, since separate gtl invocations don't share memory.
-	unlock, err := lockTemplate(template)
+	unlock, err := LockTemplate(template)
 	if err != nil {
 		return fmt.Errorf("locking template %s: %w", template, err)
 	}
@@ -144,6 +144,19 @@ func (pg *PostgreSQL) Clone(template, target string) error {
 		return fmt.Errorf("failed to clone database %s -> %s: %w", template, target, err)
 	}
 
+	return nil
+}
+
+// Create creates an empty database with no template — the degraded fallback
+// when the configured template can't be cloned. Not serialized by LockTemplate:
+// createdb without --template needs no session exclusivity.
+func (pg *PostgreSQL) Create(name string) error {
+	if !dbIdentifierRe.MatchString(name) {
+		return fmt.Errorf("invalid database identifier: %q", name)
+	}
+	if err := pg.run("createdb", name); err != nil {
+		return fmt.Errorf("failed to create database %s: %w", name, err)
+	}
 	return nil
 }
 
@@ -207,12 +220,17 @@ func isCustomFormat(path string) bool {
 	return n == 5 && string(header) == "PGDMP"
 }
 
-// lockTemplate acquires an exclusive, cross-process advisory lock keyed on the
+// LockTemplate acquires an exclusive, cross-process advisory lock keyed on the
 // template name and returns a release function. The lock file lives under the
 // gtl config dir so every gtl invocation on the host agrees on the same path.
-// template is pre-validated by dbIdentifierRe, so it is safe as a filename
-// component (no path separators or traversal).
-func lockTemplate(template string) (func(), error) {
+// Exported so setup's template auto-provisioning serializes against concurrent
+// clones of the same template. Callers must validate template as an identifier
+// first (dbIdentifierRe), so it is safe as a filename component (no path
+// separators or traversal).
+func LockTemplate(template string) (func(), error) {
+	if !dbIdentifierRe.MatchString(template) {
+		return nil, fmt.Errorf("invalid database identifier: %q", template)
+	}
 	dir := filepath.Join(platform.ConfigDir(), "locks")
 	if err := os.MkdirAll(dir, platform.DirMode); err != nil {
 		return nil, err

@@ -606,11 +606,15 @@ type ProvisionConfig struct {
 // same database gtl clones worktree databases from — so provision creates THAT
 // database rather than a parallel one. Source names a database.sources.<env>
 // to hydrate from (preferred); Hydrate is a fallback shell command run in the
-// repo dir to build+fill the template when no source is configured.
+// repo dir to build+fill the template when no source is configured. Auto opts
+// in to running source hydration automatically during worktree setup when the
+// template is missing — off by default because pulling a remote dump is a
+// surprising side effect of creating a worktree.
 type ProvisionDatabase struct {
 	Template string
 	Source   string
 	Hydrate  string
+	Auto     bool
 }
 
 // Provision returns the parsed provision: section. The returned config's
@@ -637,6 +641,9 @@ func (pc *ProjectConfig) Provision() ProvisionConfig {
 		}
 		if h, ok := db["hydrate"].(string); ok {
 			cfg.Database.Hydrate = h
+		}
+		if b, ok := db["auto"].(bool); ok {
+			cfg.Database.Auto = b
 		}
 	}
 	if cfg.Database.Template == "" {

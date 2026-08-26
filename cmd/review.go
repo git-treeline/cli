@@ -146,7 +146,7 @@ The PR may be given as a bare number or with a leading '#':
 		// and treat the command as resumable rather than a dead end.
 		if existing := worktree.FindWorktreeForBranch(branch); existing != "" {
 			fmt.Printf("==> Branch '%s' already checked out at %s\n", branch, existing)
-			alloc, err := ensureWorktreeAllocation(existing, mainRepo, uc, os.Stdout)
+			alloc, err := ensureWorktreeAllocation(existing, mainRepo, uc, os.Stdout, false)
 			if err != nil {
 				return cliErr(cmd, err)
 			}
@@ -188,7 +188,7 @@ The PR may be given as a bare number or with a leading '#':
 			return nil
 		}
 
-		alloc, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stdout)
+		alloc, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stdout, false)
 		if err != nil {
 			return err
 		}
