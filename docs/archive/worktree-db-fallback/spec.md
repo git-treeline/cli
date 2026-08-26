@@ -1,12 +1,12 @@
 ---
 slug: worktree-db-fallback
 type: feature
-status: building
+status: shipped
+acceptance_results: "make ci green at graduation (2026-08-26, branch gtl-new-missing-template-db); ladder table + Run-level tests in internal/setup/setup_test.go; live gtl new degraded run exit 0 with trailing warning, --strict exit 1 with rollback"
 decider: jonathan
 blast_radius: medium
 size: small
 created: 2026-08-26
-stale_after: 2026-09-25
 ---
 
 # Worktree creation degrades gracefully when the template database is missing
