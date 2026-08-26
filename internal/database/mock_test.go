@@ -24,6 +24,15 @@ func (m *mockAdapter) Clone(template, target string) error {
 	return nil
 }
 
+func (m *mockAdapter) Create(name string) error {
+	m.calls = append(m.calls, fmt.Sprintf("create:%s", name))
+	if m.failOn == "create" {
+		return fmt.Errorf("create failed")
+	}
+	m.existing[name] = true
+	return nil
+}
+
 func (m *mockAdapter) Drop(target string) error {
 	m.calls = append(m.calls, fmt.Sprintf("drop:%s", target))
 	if m.failOn == "drop" {

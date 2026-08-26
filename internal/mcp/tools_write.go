@@ -177,8 +177,20 @@ func handleSetup(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToo
 	if db := alloc.PrimaryDatabase(); db != "" {
 		result["database"] = db
 	}
+	addDBDegradation(result, s)
 
 	return jsonResult(result)
+}
+
+// addDBDegradation surfaces a degraded database outcome in a tool result —
+// setup's log goes to io.Discard here, so the payload is the only place an
+// agent can see that the worktree's database is empty or absent.
+func addDBDegradation(result map[string]any, s *setup.Setup) {
+	if s.DBDegradation == nil {
+		return
+	}
+	result["database_state"] = s.DBDegradation.State
+	result["database_warning"] = s.DBDegradation.Message()
 }
 
 func handleNew(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -226,21 +238,22 @@ func handleNew(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolR
 		reg := newRegistry()
 		alloc := reg.Find(existingWT)
 
+		result := map[string]any{
+			"worktree": existingWT,
+			"branch":   branch,
+			"project":  projectName,
+			"resumed":  true,
+		}
+
 		if alloc == nil && !dryRun {
 			s := setup.New(existingWT, mainRepo, uc)
 			s.Log = io.Discard
 			if _, err := s.Run(); err != nil {
 				return mcplib.NewToolResultError(fmt.Sprintf("Setup failed for existing worktree: %v", err)), nil
 			}
+			addDBDegradation(result, s)
 			reg = newRegistry()
 			alloc = reg.Find(existingWT)
-		}
-
-		result := map[string]any{
-			"worktree": existingWT,
-			"branch":   branch,
-			"project":  projectName,
-			"resumed":  true,
 		}
 		if alloc != nil {
 			fa := format.Allocation(alloc)
@@ -310,6 +323,7 @@ func handleNew(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolR
 	if db := alloc.PrimaryDatabase(); db != "" {
 		result["database"] = db
 	}
+	addDBDegradation(result, s)
 	if wantOpen {
 		if url, ok := result["url"].(string); ok {
 			result["open_url"] = url

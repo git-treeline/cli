@@ -84,3 +84,30 @@ provision:
 		t.Errorf("template = %q, want empty (no top-level template)", cfg.Database.Template)
 	}
 }
+
+func TestProvision_AutoDefaultsFalse(t *testing.T) {
+	cfg := loadProvision(t, `
+database:
+  template: t
+provision:
+  database:
+    source: production
+`)
+	if cfg.Database.Auto {
+		t.Error("expected Auto=false by default")
+	}
+}
+
+func TestProvision_AutoParsed(t *testing.T) {
+	cfg := loadProvision(t, `
+database:
+  template: t
+provision:
+  database:
+    source: production
+    auto: true
+`)
+	if !cfg.Database.Auto {
+		t.Error("expected Auto=true")
+	}
+}

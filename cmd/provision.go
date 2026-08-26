@@ -13,6 +13,7 @@ import (
 	"github.com/git-treeline/cli/internal/database"
 	"github.com/git-treeline/cli/internal/dbsource"
 	"github.com/git-treeline/cli/internal/provision"
+	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/style"
 	"github.com/spf13/cobra"
 )
@@ -22,6 +23,10 @@ var provisionDryRun bool
 func init() {
 	provisionCmd.Flags().BoolVar(&provisionDryRun, "dry-run", false, "Print the provisioning plan without making changes")
 	rootCmd.AddCommand(provisionCmd)
+	// Setup auto-provisions a missing template during worktree creation; the
+	// source-hydration path lives here (it shares gtl db pull's machinery),
+	// so hand it to the setup package as a seam.
+	setup.HydrateTemplateFromSource = hydrateTemplateFromSource
 }
 
 var provisionCmd = &cobra.Command{

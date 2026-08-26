@@ -194,6 +194,7 @@ func newMockDB(names ...string) *mockDB {
 }
 
 func (m *mockDB) Clone(template, target string) error   { return nil }
+func (m *mockDB) Create(name string) error              { return nil }
 func (m *mockDB) Restore(target, dumpFile string) error { return nil }
 func (m *mockDB) Exists(name string) (bool, error)      { return m.existing[name], m.existErr }
 func (m *mockDB) Drop(target string) error {

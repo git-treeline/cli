@@ -62,7 +62,7 @@ safe to capture, e.g.: wt=$(gtl claim agent/some-branch)`,
 		if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
 			fmt.Fprintln(os.Stderr, style.Actionf("Branch '%s' already checked out at %s", branch, existingWT))
 			if pc.Exists() {
-				if _, err := ensureWorktreeAllocation(existingWT, mainRepo, uc, os.Stderr); err != nil {
+				if _, err := ensureWorktreeAllocation(existingWT, mainRepo, uc, os.Stderr, false); err != nil {
 					return cliErr(cmd, err)
 				}
 			}
@@ -90,7 +90,7 @@ safe to capture, e.g.: wt=$(gtl claim agent/some-branch)`,
 		if pc.Exists() && !claimNoSetup {
 			// Same adopt path 'gtl new' uses for an existing branch: run setup,
 			// rolling the worktree back if it fails.
-			if _, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stderr); err != nil {
+			if _, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stderr, false); err != nil {
 				return err
 			}
 		} else {

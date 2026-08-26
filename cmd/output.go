@@ -103,7 +103,7 @@ func maybeStartServer(start bool, pc *config.ProjectConfig, dir string) (handled
 // path new/review/claim share when a branch is already checked out
 // somewhere. progress is where setup's own output goes (os.Stdout for
 // new/review, os.Stderr for claim so its stdout stays script-friendly).
-func ensureWorktreeAllocation(wtPath, mainRepo string, uc *config.UserConfig, progress io.Writer) (registry.Allocation, error) {
+func ensureWorktreeAllocation(wtPath, mainRepo string, uc *config.UserConfig, progress io.Writer, strictDB bool) (registry.Allocation, error) {
 	reg := registry.New("")
 	if alloc := reg.Find(wtPath); alloc != nil {
 		return alloc, nil
@@ -111,6 +111,7 @@ func ensureWorktreeAllocation(wtPath, mainRepo string, uc *config.UserConfig, pr
 	_, _ = fmt.Fprintln(progress, style.Actionf("No allocation found — running setup..."))
 	s := setup.New(wtPath, mainRepo, uc)
 	s.Log = progress
+	s.Options.StrictDB = strictDB
 	if _, err := s.Run(); err != nil {
 		return nil, errSetupFailed(err)
 	}
@@ -123,13 +124,14 @@ func ensureWorktreeAllocation(wtPath, mainRepo string, uc *config.UserConfig, pr
 // so a failed 'new'/'claim' leaves no trace (no orphaned directory,
 // invisible to prune). Shared by 'gtl new' (both the new-branch and
 // existing-branch paths) and 'gtl claim' (its adopt path).
-func runSetupWithRollback(cmd *cobra.Command, wtPath, mainRepo string, uc *config.UserConfig, progress io.Writer) (*allocator.Allocation, error) {
+func runSetupWithRollback(cmd *cobra.Command, wtPath, mainRepo string, uc *config.UserConfig, progress io.Writer, strictDB bool) (*allocator.Allocation, error) {
 	_, _ = fmt.Fprintln(progress, style.Actionf("Worktree created at %s", wtPath))
 	_, _ = fmt.Fprintln(progress, style.Actionf("Running setup..."))
 
 	s := setup.New(wtPath, mainRepo, uc)
 	s.Log = progress
 	s.Options.DryRun = false
+	s.Options.StrictDB = strictDB
 	alloc, err := s.Run()
 	if err != nil {
 		var sce *setup.SetupCommandError
