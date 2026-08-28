@@ -38,6 +38,10 @@ type healthDeps struct {
 	checkPortForward          func(routerPort int) PortForwardStatus
 	dialTimeout               func(network, address string, timeout time.Duration) (net.Conn, error)
 	httpProbe                 func(url string, timeout time.Duration) (int, error)
+	httpProbeBody             func(url string, timeout time.Duration) (int, string, error)
+	// usesPf selects macOS pf wording (and pfctl advice) in packet-filter
+	// diagnoses; Linux forwards via iptables where pfctl commands are noise.
+	usesPf bool
 	executable                func() (string, error)
 	processOnPort             func(port int) processInfo
 	isPfReloadDaemonInstalled func() bool
@@ -61,6 +65,8 @@ func defaultHealthDeps() healthDeps {
 		checkPortForward:                  CheckPortForward,
 		dialTimeout:                       net.DialTimeout,
 		httpProbe:                         httpProbe,
+		httpProbeBody:                     httpProbeBody,
+		usesPf:                            runtime.GOOS == "darwin",
 		executable:                        os.Executable,
 		processOnPort:                     processOnPort,
 		isPfReloadDaemonInstalled:         IsPfReloadDaemonInstalled,
@@ -276,6 +282,35 @@ func checkRouterListening(d healthDeps, port int) HealthCheck {
 	conn, err := d.dialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
 		if d.isRunning() {
+			// A failed dial doesn't always mean nothing is listening: macOS
+			// pf has been seen dropping direct SYNs to the rdr target port
+			// while the listener is up and rdr'd :443 traffic flows (Tahoe
+			// 26.6.2 build 25G83, 2026-08-28 — recheck on later macOS
+			// releases). lsof still sees the socket in that state. The same
+			// signature also fits a wedged router (accept loop hung, backlog
+			// full), where a restart IS the fix — the :443 forward answering
+			// is what discriminates: only a live router can serve it.
+			listener := d.processOnPort(port)
+			if registered := d.runningPID(); registered > 0 && listener.PID == registered {
+				if forwardAnswers(d) {
+					fix := "not a router fault: an OS-level firewall is dropping direct connections to the router port; 'gtl serve restart' won't help"
+					if d.usesPf {
+						fix = "not a router fault: the OS (pf) is dropping direct connections to the router port; 'gtl serve restart' won't help"
+					}
+					return HealthCheck{
+						Name:   "router_port",
+						Status: "warn",
+						Detail: fmt.Sprintf("listener is up on %d (pid %d) but direct connections are not completing — OS packet filter interference", port, listener.PID),
+						Fix:    fix,
+					}
+				}
+				return HealthCheck{
+					Name:   "router_port",
+					Status: "error",
+					Detail: fmt.Sprintf("listener is up on %d (pid %d) but connections are not completing — the router process may be wedged", port, listener.PID),
+					Fix:    "gtl serve restart",
+				}
+			}
 			return HealthCheck{
 				Name:   "router_port",
 				Status: "error",
@@ -351,6 +386,19 @@ func checkRouterListening(d healthDeps, port int) HealthCheck {
 // misreport a healthy router. The health endpoint returns 200, so anything
 // other than 2xx/3xx means something is wrong.
 func checkRouterResponding(d healthDeps, port int) HealthCheck {
+	c, _ := routerResponding(d, port)
+	return c
+}
+
+// routerResponding runs the liveness probe and additionally reports whether
+// the router is demonstrably alive. The two can disagree: when the direct
+// probe fails but the router answers through the :443 forward, the router is
+// alive (bounce flows must not fail) yet the check is a warn — macOS pf has
+// been seen dropping direct SYNs to the rdr target port while translated
+// :443 traffic flows normally (Tahoe 26.6.2 build 25G83, 2026-08-28 —
+// recheck on later macOS releases), and "gtl serve restart" can never fix
+// that.
+func routerResponding(d healthDeps, port int) (HealthCheck, bool) {
 	scheme := "http"
 	if d.routerUsesTLS() {
 		scheme = "https"
@@ -358,12 +406,24 @@ func checkRouterResponding(d healthDeps, port int) HealthCheck {
 	url := fmt.Sprintf("%s://127.0.0.1:%d/_treeline/health", scheme, port)
 	status, err := d.httpProbe(url, 2*time.Second)
 	if err != nil {
+		if port != 443 && forwardAnswers(d) {
+			fix := "routing still works and a restart won't help — an OS-level firewall is dropping direct connections to the router port"
+			if d.usesPf {
+				fix = "routing still works and a restart won't help — this is an OS-level pf fault (verify: probes succeed with 'sudo pfctl -d', then re-enable with 'sudo pfctl -e')"
+			}
+			return HealthCheck{
+				Name:   "router_responding",
+				Status: "warn",
+				Detail: fmt.Sprintf("router is serving (answers via the 443 forward) but direct connections to 127.0.0.1:%d are dropped by the OS packet filter", port),
+				Fix:    fix,
+			}, true
+		}
 		return HealthCheck{
 			Name:   "router_responding",
 			Status: "warn",
 			Detail: fmt.Sprintf("liveness probe failed: %v", err),
 			Fix:    "gtl serve restart",
-		}
+		}, false
 	}
 	if status >= 400 {
 		return HealthCheck{
@@ -371,25 +431,31 @@ func checkRouterResponding(d healthDeps, port int) HealthCheck {
 			Status: "warn",
 			Detail: fmt.Sprintf("router answered %d from /_treeline/health", status),
 			Fix:    "gtl serve restart",
-		}
+		}, false
 	}
 	return HealthCheck{
 		Name:   "router_responding",
 		Status: "ok",
 		Detail: fmt.Sprintf("HTTP %d from /_treeline/health", status),
-	}
+	}, true
 }
 
 // WaitRouterResponding polls the router's health endpoint until it answers,
 // or until `wait` elapses. Used after a restart: launchd/systemd reporting
 // the service as running (and even the version file being rewritten) only
-// proves the process started, not that it is serving requests.
+// proves the process started, not that it is serving requests. A router that
+// only answers through the :443 forward counts as responding — the direct
+// port being dropped is an OS packet-filter fault a bounce can't fix, and
+// failing the bounce over it traps the user in a restart loop.
 func WaitRouterResponding(routerPort int, wait time.Duration) error {
-	d := defaultHealthDeps()
+	return waitRouterRespondingWith(defaultHealthDeps(), routerPort, wait)
+}
+
+func waitRouterRespondingWith(d healthDeps, routerPort int, wait time.Duration) error {
 	deadline := nowFn().Add(wait)
 	for {
-		c := checkRouterResponding(d, routerPort)
-		if c.Status == "ok" {
+		c, alive := routerResponding(d, routerPort)
+		if alive {
 			return nil
 		}
 		if !nowFn().Before(deadline) {
@@ -397,6 +463,25 @@ func WaitRouterResponding(routerPort int, wait time.Duration) error {
 		}
 		sleepFn(200 * time.Millisecond)
 	}
+}
+
+// forwardAnswers reports whether OUR router's health endpoint answers through
+// the :443 port forward. Anything short of the router's documented health
+// contract — 200 with an "ok" body (see proxy router_test: the default
+// response is the exact "ok\n") — is rejected: a status check alone would
+// accept any process squatting on :443 whose catch-all handler returns 2xx,
+// and the on-disk pf marker this is gated on can be true while the kernel
+// rule isn't loaded (see IsPortForwardConfigured).
+func forwardAnswers(d healthDeps) bool {
+	if !d.isPortForwardConfigured() {
+		return false
+	}
+	scheme := "http"
+	if d.routerUsesTLS() {
+		scheme = "https"
+	}
+	status, body, err := d.httpProbeBody(fmt.Sprintf("%s://127.0.0.1:443/_treeline/health", scheme), 2*time.Second)
+	return err == nil && status < 400 && strings.TrimSpace(body) == "ok"
 }
 
 // routerPortReachable reports whether the router's own listener accepts a
@@ -512,6 +597,15 @@ func processOnPort(port int) processInfo {
 // router's per-hostname certs are issued for browser use — trust-store state
 // must not fail the health check.
 func httpProbe(url string, timeout time.Duration) (int, error) {
+	status, _, err := httpProbeBody(url, timeout)
+	return status, err
+}
+
+// httpProbeBody is httpProbe returning the response body as well, for probes
+// that must verify the responder's identity (the health contract body), not
+// just that something answered. The body is capped: a hostile or misbehaving
+// :443 squatter must not make the probe buffer an unbounded response.
+func httpProbeBody(url string, timeout time.Duration) (int, string, error) {
 	client := &http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
@@ -520,9 +614,10 @@ func httpProbe(url string, timeout time.Duration) (int, error) {
 	}
 	resp, err := client.Get(url)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	_, _ = io.Copy(io.Discard, resp.Body)
-	return resp.StatusCode, nil
+	return resp.StatusCode, string(body), nil
 }

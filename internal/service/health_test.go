@@ -27,6 +27,12 @@ func fakeHTTP(status int, err error) func(string, time.Duration) (int, error) {
 	}
 }
 
+func fakeHTTPBody(status int, body string, err error) func(string, time.Duration) (int, string, error) {
+	return func(_ string, _ time.Duration) (int, string, error) {
+		return status, body, err
+	}
+}
+
 func fakePF(configuredOnDisk, loadedInKernel, pfEnabled bool, detail string) func(int) PortForwardStatus {
 	// kernelStateKnown defaults to true for legacy callers — most existing
 	// tests want "we read the kernel and saw [or didn't see] the rule." Use
@@ -76,6 +82,8 @@ func allHealthy() healthDeps {
 		checkPortForward:           fakePF(true, true, true, ""),
 		dialTimeout:                fakeDial(true),
 		httpProbe:                  fakeHTTP(200, nil),
+		httpProbeBody:              fakeHTTPBody(200, "ok\n", nil),
+		usesPf:                     true,
 		executable:                 func() (string, error) { return "/usr/local/bin/gtl", nil },
 		processOnPort:              func(int) processInfo { return processInfo{Name: "git-treeline", PID: 1234} },
 		isPfReloadDaemonInstalled:  func() bool { return true },
@@ -298,9 +306,59 @@ func TestCheckRouterListening_Ok_PIDMatches(t *testing.T) {
 func TestCheckRouterListening_NotListening_ServiceRunning(t *testing.T) {
 	d := allHealthy()
 	d.dialTimeout = fakeDial(false)
+	d.processOnPort = func(int) processInfo { return processInfo{} }
 	c := checkRouterListening(d, 8443)
 	if c.Status != "error" {
 		t.Errorf("expected error, got %s", c.Status)
+	}
+}
+
+// macOS pf has been seen dropping direct SYNs to the rdr target port while
+// the listener is up (lsof still sees the socket) and rdr'd :443 traffic
+// flows. That must not read as "port dead": a restart can't fix it. The pf
+// verdict requires the :443 forward to answer — that is what separates a
+// pf drop from a wedged router (next test).
+func TestCheckRouterListening_DialFailsButForwardAnswers_WarnsPf(t *testing.T) {
+	d := allHealthy()
+	d.dialTimeout = fakeDial(false)
+	c := checkRouterListening(d, 8443)
+	if c.Status != "warn" {
+		t.Errorf("expected warn when lsof sees our listener and 443 answers, got %s (%s)", c.Status, c.Detail)
+	}
+	if !strings.Contains(c.Detail, "packet filter") {
+		t.Errorf("expected detail to name the packet filter, got %q", c.Detail)
+	}
+	if c.Fix == "gtl serve restart" {
+		t.Errorf("restart must not be suggested for an OS-level drop, got %q", c.Fix)
+	}
+}
+
+// Same dial-fails-but-listener-present signature with a dead :443 forward is
+// a wedged router (accept loop hung, backlog full) — there a restart IS the
+// fix and the check must say so, not blame the packet filter.
+func TestCheckRouterListening_DialFailsForwardDead_WedgedError(t *testing.T) {
+	d := allHealthy()
+	d.dialTimeout = fakeDial(false)
+	d.httpProbeBody = fakeHTTPBody(0, "", fmt.Errorf("connection timed out"))
+	c := checkRouterListening(d, 8443)
+	if c.Status != "error" {
+		t.Errorf("expected error for a wedged listener, got %s (%s)", c.Status, c.Detail)
+	}
+	if !strings.Contains(c.Detail, "wedged") {
+		t.Errorf("expected detail to name the wedged process, got %q", c.Detail)
+	}
+	if c.Fix != "gtl serve restart" {
+		t.Errorf("expected restart fix for a wedged router, got %q", c.Fix)
+	}
+}
+
+func TestCheckRouterListening_DialFailsListenerPIDMismatch_Error(t *testing.T) {
+	d := allHealthy()
+	d.dialTimeout = fakeDial(false)
+	d.processOnPort = func(int) processInfo { return processInfo{Name: "nginx", PID: 5678} }
+	c := checkRouterListening(d, 8443)
+	if c.Status != "error" {
+		t.Errorf("expected error when the socket isn't ours, got %s (%s)", c.Status, c.Detail)
 	}
 }
 
@@ -392,6 +450,7 @@ func TestCheckRouterResponding_5xx(t *testing.T) {
 func TestCheckRouterResponding_TransportError(t *testing.T) {
 	d := allHealthy()
 	d.httpProbe = fakeHTTP(0, fmt.Errorf("connection refused"))
+	d.httpProbeBody = fakeHTTPBody(0, "", fmt.Errorf("connection refused"))
 	c := checkRouterResponding(d, 8443)
 	if c.Status != "warn" {
 		t.Errorf("expected warn for transport error, got %s", c.Status)
@@ -410,6 +469,103 @@ func TestCheckRouterResponding_4xxIsWarn(t *testing.T) {
 	c := checkRouterResponding(d, 8443)
 	if c.Status != "warn" {
 		t.Errorf("expected warn for 4xx, got %s (%s)", c.Status, c.Detail)
+	}
+}
+
+// directDropped wires deps for the pf-drop scenario: the direct probe times
+// out and the :443 fallback answers with the given status/body. Every URL
+// probed (by either probe) is appended to probed, in call order.
+func directDropped(d *healthDeps, fbStatus int, fbBody string, fbErr error, probed *[]string) {
+	d.httpProbe = func(url string, _ time.Duration) (int, error) {
+		*probed = append(*probed, url)
+		return 0, fmt.Errorf("connection timed out")
+	}
+	d.httpProbeBody = func(url string, _ time.Duration) (int, string, error) {
+		*probed = append(*probed, url)
+		return fbStatus, fbBody, fbErr
+	}
+}
+
+func TestCheckRouterResponding_DirectDroppedButForwardAnswers(t *testing.T) {
+	d := allHealthy()
+	var probed []string
+	directDropped(&d, 200, "ok\n", nil, &probed)
+	c, alive := routerResponding(d, 8443)
+	if c.Status != "warn" {
+		t.Errorf("expected warn, got %s (%s)", c.Status, c.Detail)
+	}
+	if !alive {
+		t.Error("router answering via the 443 forward must count as alive")
+	}
+	if !strings.Contains(c.Detail, "443") || !strings.Contains(c.Detail, "packet filter") {
+		t.Errorf("expected detail to explain the 443/packet-filter situation, got %q", c.Detail)
+	}
+	if c.Fix == "gtl serve restart" {
+		t.Errorf("restart must not be suggested when the router is serving, got %q", c.Fix)
+	}
+	if len(probed) != 2 || !strings.Contains(probed[0], ":8443/") || !strings.Contains(probed[1], ":443/") {
+		t.Errorf("expected direct probe then :443 fallback, got %v", probed)
+	}
+}
+
+func TestCheckRouterResponding_DirectAndForwardFail(t *testing.T) {
+	d := allHealthy()
+	var probed []string
+	directDropped(&d, 0, "", fmt.Errorf("connection timed out"), &probed)
+	c, alive := routerResponding(d, 8443)
+	if c.Status != "warn" || alive {
+		t.Errorf("expected warn/not-alive, got %s alive=%v", c.Status, alive)
+	}
+	if !strings.Contains(c.Detail, "liveness probe failed") {
+		t.Errorf("expected the plain probe-failure detail, got %q", c.Detail)
+	}
+}
+
+// A squatter on :443 whose catch-all handler answers 200 must not count as
+// our router — only the health contract body ("ok") proves identity.
+func TestCheckRouterResponding_ForwardWrongBody_NotAlive(t *testing.T) {
+	d := allHealthy()
+	var probed []string
+	directDropped(&d, 200, "<html>welcome to some dev server</html>", nil, &probed)
+	c, alive := routerResponding(d, 8443)
+	if alive {
+		t.Error("a non-contract :443 response must not count as alive")
+	}
+	if !strings.Contains(c.Detail, "liveness probe failed") {
+		t.Errorf("expected the plain probe-failure detail, got %q", c.Detail)
+	}
+}
+
+func TestCheckRouterResponding_Forward4xx_NotAlive(t *testing.T) {
+	d := allHealthy()
+	var probed []string
+	directDropped(&d, 404, "ok", nil, &probed)
+	_, alive := routerResponding(d, 8443)
+	if alive {
+		t.Error("a 4xx from :443 must not count as alive")
+	}
+}
+
+func TestCheckRouterResponding_NoForwardConfigured_NoFallbackProbe(t *testing.T) {
+	d := allHealthy()
+	d.isPortForwardConfigured = func() bool { return false }
+	var probed []string
+	directDropped(&d, 200, "ok\n", nil, &probed)
+	_, alive := routerResponding(d, 8443)
+	if alive {
+		t.Error("without a 443 forward there is no fallback evidence of liveness")
+	}
+	if len(probed) != 1 {
+		t.Errorf("expected a single direct probe, got %v", probed)
+	}
+}
+
+func TestWaitRouterResponding_ForwardAliveSucceeds(t *testing.T) {
+	d := allHealthy()
+	var probed []string
+	directDropped(&d, 200, "ok\n", nil, &probed)
+	if err := waitRouterRespondingWith(d, 8443, 100*time.Millisecond); err != nil {
+		t.Errorf("bounce verification must pass when the router answers via 443, got %v", err)
 	}
 }
 
