@@ -275,6 +275,20 @@ func checkRouterVersion(d healthDeps, cliVersion string) HealthCheck {
 func checkRouterListening(d healthDeps, port int) HealthCheck {
 	conn, err := d.dialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
+		// A failed dial doesn't always mean nothing is listening: macOS pf
+		// has been seen dropping direct SYNs to the rdr target port while
+		// the listener is up and rdr'd :443 traffic flows (Tahoe, 2026-08).
+		// lsof still sees the socket in that state, so consult it before
+		// declaring the port dead — a restart cannot fix an OS-level drop.
+		listener := d.processOnPort(port)
+		if registered := d.runningPID(); d.isRunning() && listener.PID != 0 && registered > 0 && listener.PID == registered {
+			return HealthCheck{
+				Name:   "router_port",
+				Status: "warn",
+				Detail: fmt.Sprintf("listener is up on %d (pid %d) but direct connections are not completing — OS packet filter interference", port, listener.PID),
+				Fix:    "not a router fault: the OS (pf) is dropping direct connections to the router port; 'gtl serve restart' won't help",
+			}
+		}
 		if d.isRunning() {
 			return HealthCheck{
 				Name:   "router_port",
@@ -351,6 +365,18 @@ func checkRouterListening(d healthDeps, port int) HealthCheck {
 // misreport a healthy router. The health endpoint returns 200, so anything
 // other than 2xx/3xx means something is wrong.
 func checkRouterResponding(d healthDeps, port int) HealthCheck {
+	c, _ := routerResponding(d, port)
+	return c
+}
+
+// routerResponding runs the liveness probe and additionally reports whether
+// the router is demonstrably alive. The two can disagree: when the direct
+// probe fails but the router answers through the :443 forward, the router is
+// alive (bounce flows must not fail) yet the check is a warn — macOS pf has
+// been seen dropping direct SYNs to the rdr target port while translated
+// :443 traffic flows normally (Tahoe, 2026-08), and "gtl serve restart" can
+// never fix that.
+func routerResponding(d healthDeps, port int) (HealthCheck, bool) {
 	scheme := "http"
 	if d.routerUsesTLS() {
 		scheme = "https"
@@ -358,12 +384,23 @@ func checkRouterResponding(d healthDeps, port int) HealthCheck {
 	url := fmt.Sprintf("%s://127.0.0.1:%d/_treeline/health", scheme, port)
 	status, err := d.httpProbe(url, 2*time.Second)
 	if err != nil {
+		if port != 443 && d.isPortForwardConfigured() {
+			fbStatus, fbErr := d.httpProbe(fmt.Sprintf("%s://127.0.0.1:443/_treeline/health", scheme), 2*time.Second)
+			if fbErr == nil && fbStatus < 400 {
+				return HealthCheck{
+					Name:   "router_responding",
+					Status: "warn",
+					Detail: fmt.Sprintf("router is serving (answers via the 443 forward) but direct connections to 127.0.0.1:%d are dropped by the OS packet filter", port),
+					Fix:    "routing still works and a restart won't help — this is an OS-level pf fault (verify: probes succeed with 'sudo pfctl -d', then re-enable with 'sudo pfctl -e')",
+				}, true
+			}
+		}
 		return HealthCheck{
 			Name:   "router_responding",
 			Status: "warn",
 			Detail: fmt.Sprintf("liveness probe failed: %v", err),
 			Fix:    "gtl serve restart",
-		}
+		}, false
 	}
 	if status >= 400 {
 		return HealthCheck{
@@ -371,25 +408,31 @@ func checkRouterResponding(d healthDeps, port int) HealthCheck {
 			Status: "warn",
 			Detail: fmt.Sprintf("router answered %d from /_treeline/health", status),
 			Fix:    "gtl serve restart",
-		}
+		}, false
 	}
 	return HealthCheck{
 		Name:   "router_responding",
 		Status: "ok",
 		Detail: fmt.Sprintf("HTTP %d from /_treeline/health", status),
-	}
+	}, true
 }
 
 // WaitRouterResponding polls the router's health endpoint until it answers,
 // or until `wait` elapses. Used after a restart: launchd/systemd reporting
 // the service as running (and even the version file being rewritten) only
-// proves the process started, not that it is serving requests.
+// proves the process started, not that it is serving requests. A router that
+// only answers through the :443 forward counts as responding — the direct
+// port being dropped is an OS packet-filter fault a bounce can't fix, and
+// failing the bounce over it traps the user in a restart loop.
 func WaitRouterResponding(routerPort int, wait time.Duration) error {
-	d := defaultHealthDeps()
+	return waitRouterRespondingWith(defaultHealthDeps(), routerPort, wait)
+}
+
+func waitRouterRespondingWith(d healthDeps, routerPort int, wait time.Duration) error {
 	deadline := nowFn().Add(wait)
 	for {
-		c := checkRouterResponding(d, routerPort)
-		if c.Status == "ok" {
+		c, alive := routerResponding(d, routerPort)
+		if alive {
 			return nil
 		}
 		if !nowFn().Before(deadline) {

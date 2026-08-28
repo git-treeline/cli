@@ -298,9 +298,38 @@ func TestCheckRouterListening_Ok_PIDMatches(t *testing.T) {
 func TestCheckRouterListening_NotListening_ServiceRunning(t *testing.T) {
 	d := allHealthy()
 	d.dialTimeout = fakeDial(false)
+	d.processOnPort = func(int) processInfo { return processInfo{} }
 	c := checkRouterListening(d, 8443)
 	if c.Status != "error" {
 		t.Errorf("expected error, got %s", c.Status)
+	}
+}
+
+// macOS pf has been seen dropping direct SYNs to the rdr target port while
+// the listener is up (lsof still sees the socket) and rdr'd :443 traffic
+// flows. That must not read as "port dead": a restart can't fix it.
+func TestCheckRouterListening_DialFailsButListenerPresent_Warns(t *testing.T) {
+	d := allHealthy()
+	d.dialTimeout = fakeDial(false)
+	c := checkRouterListening(d, 8443)
+	if c.Status != "warn" {
+		t.Errorf("expected warn when lsof sees our listener, got %s (%s)", c.Status, c.Detail)
+	}
+	if !strings.Contains(c.Detail, "packet filter") {
+		t.Errorf("expected detail to name the packet filter, got %q", c.Detail)
+	}
+	if c.Fix == "gtl serve restart" {
+		t.Errorf("restart must not be suggested for an OS-level drop, got %q", c.Fix)
+	}
+}
+
+func TestCheckRouterListening_DialFailsListenerPIDMismatch_Error(t *testing.T) {
+	d := allHealthy()
+	d.dialTimeout = fakeDial(false)
+	d.processOnPort = func(int) processInfo { return processInfo{Name: "nginx", PID: 5678} }
+	c := checkRouterListening(d, 8443)
+	if c.Status != "error" {
+		t.Errorf("expected error when the socket isn't ours, got %s (%s)", c.Status, c.Detail)
 	}
 }
 
@@ -410,6 +439,75 @@ func TestCheckRouterResponding_4xxIsWarn(t *testing.T) {
 	c := checkRouterResponding(d, 8443)
 	if c.Status != "warn" {
 		t.Errorf("expected warn for 4xx, got %s (%s)", c.Status, c.Detail)
+	}
+}
+
+// probeByURL fails the direct-port probe and answers the given status on the
+// :443 fallback, recording every URL probed.
+func probeByURL(fallbackStatus int, probed *[]string) func(string, time.Duration) (int, error) {
+	return func(url string, _ time.Duration) (int, error) {
+		*probed = append(*probed, url)
+		if strings.Contains(url, ":443/") {
+			return fallbackStatus, nil
+		}
+		return 0, fmt.Errorf("connection timed out")
+	}
+}
+
+func TestCheckRouterResponding_DirectDroppedButForwardAnswers(t *testing.T) {
+	d := allHealthy()
+	var probed []string
+	d.httpProbe = probeByURL(200, &probed)
+	c, alive := routerResponding(d, 8443)
+	if c.Status != "warn" {
+		t.Errorf("expected warn, got %s (%s)", c.Status, c.Detail)
+	}
+	if !alive {
+		t.Error("router answering via the 443 forward must count as alive")
+	}
+	if !strings.Contains(c.Detail, "443") || !strings.Contains(c.Detail, "packet filter") {
+		t.Errorf("expected detail to explain the 443/packet-filter situation, got %q", c.Detail)
+	}
+	if c.Fix == "gtl serve restart" {
+		t.Errorf("restart must not be suggested when the router is serving, got %q", c.Fix)
+	}
+	if len(probed) != 2 || !strings.Contains(probed[1], ":443/") {
+		t.Errorf("expected direct probe then :443 fallback, got %v", probed)
+	}
+}
+
+func TestCheckRouterResponding_DirectAndForwardFail(t *testing.T) {
+	d := allHealthy()
+	d.httpProbe = fakeHTTP(0, fmt.Errorf("connection timed out"))
+	c, alive := routerResponding(d, 8443)
+	if c.Status != "warn" || alive {
+		t.Errorf("expected warn/not-alive, got %s alive=%v", c.Status, alive)
+	}
+	if !strings.Contains(c.Detail, "liveness probe failed") {
+		t.Errorf("expected the plain probe-failure detail, got %q", c.Detail)
+	}
+}
+
+func TestCheckRouterResponding_NoForwardConfigured_NoFallbackProbe(t *testing.T) {
+	d := allHealthy()
+	d.isPortForwardConfigured = func() bool { return false }
+	var probed []string
+	d.httpProbe = probeByURL(200, &probed)
+	_, alive := routerResponding(d, 8443)
+	if alive {
+		t.Error("without a 443 forward there is no fallback evidence of liveness")
+	}
+	if len(probed) != 1 {
+		t.Errorf("expected a single direct probe, got %v", probed)
+	}
+}
+
+func TestWaitRouterResponding_ForwardAliveSucceeds(t *testing.T) {
+	d := allHealthy()
+	var probed []string
+	d.httpProbe = probeByURL(200, &probed)
+	if err := waitRouterRespondingWith(d, 8443, 100*time.Millisecond); err != nil {
+		t.Errorf("bounce verification must pass when the router answers via 443, got %v", err)
 	}
 }
 
