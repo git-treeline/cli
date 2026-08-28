@@ -68,3 +68,53 @@ func TestDetectInstallMethod(t *testing.T) {
 		})
 	}
 }
+
+func TestParseVersionOutput(t *testing.T) {
+	tests := []struct {
+		name string
+		out  string
+		want string
+	}{
+		{"normal output", "git-treeline v0.57.0\n", "v0.57.0"},
+		{"dev build", "git-treeline dev\n", "dev"},
+		{"empty output", "", ""},
+		{"unexpected binary name", "other-tool v1.0.0\n", ""},
+		{"extra fields", "git-treeline v0.57.0 extra\n", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseVersionOutput(tt.out); got != tt.want {
+				t.Errorf("parseVersionOutput(%q) = %q, want %q", tt.out, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShouldCheckForUpdate(t *testing.T) {
+	tests := []struct {
+		name        string
+		rootCmd     string
+		cliVersion  string
+		suppressEnv string
+		isTTY       bool
+		want        bool
+	}{
+		{"normal command on release build", "status", "v0.56.2", "", true, true},
+		{"suppressed by env", "status", "v0.56.2", "1", true, false},
+		{"not a tty", "status", "v0.56.2", "", false, false},
+		{"dev build", "status", "dev", "", true, false},
+		{"empty version", "status", "", "", true, false},
+		{"update command itself", "update", "v0.56.2", "", true, false},
+		{"version command", "version", "v0.56.2", "", true, false},
+		{"completion handler", "__complete", "v0.56.2", "", true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldCheckForUpdate(tt.rootCmd, tt.cliVersion, tt.suppressEnv, tt.isTTY)
+			if got != tt.want {
+				t.Errorf("shouldCheckForUpdate(%q, %q, %q, %v) = %v, want %v",
+					tt.rootCmd, tt.cliVersion, tt.suppressEnv, tt.isTTY, got, tt.want)
+			}
+		})
+	}
+}

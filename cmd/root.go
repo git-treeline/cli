@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/git-treeline/cli/internal/platform"
+	"github.com/git-treeline/cli/internal/selfupdate"
 	"github.com/git-treeline/cli/internal/service"
 	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/style"
@@ -20,6 +22,10 @@ var rootCmd = &cobra.Command{
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		_ = platform.EnsureConfigDir()
 		maybeWarnStaleRouter(cmd)
+		maybeCheckForUpdate(cmd)
+	},
+	PersistentPostRun: func(cmd *cobra.Command, args []string) {
+		printUpdateNotice()
 	},
 }
 
@@ -67,6 +73,67 @@ func shouldWarnStaleRouter(rootCmd, cliVersion, runningVersion, suppressEnv stri
 		return false
 	}
 	return true
+}
+
+// updateNoticeVersion, when non-empty, is the newer release the post-run
+// notice should mention. Set during PersistentPreRun from the check cache
+// only — never from a live network call.
+var updateNoticeVersion string
+
+// maybeCheckForUpdate drives the passive update notice. It only ever reads
+// the on-disk check cache in-band; when the cache is stale it refreshes in a
+// background goroutine that lossily writes the cache for a future invocation
+// (short-lived commands may exit first — gh's tradeoff, accepted here too).
+func maybeCheckForUpdate(cmd *cobra.Command) {
+	if !shouldCheckForUpdate(rootCommandName(cmd), Version,
+		os.Getenv("GTL_NO_UPDATE_NOTIFY"), stderrIsTTY()) {
+		return
+	}
+	if state, ok := selfupdate.ReadState(); ok && state.Fresh(time.Now()) {
+		if selfupdate.IsNewer(Version, state.Latest) {
+			updateNoticeVersion = state.Latest
+		}
+		return
+	}
+	go func() {
+		if latest, err := selfupdate.FetchLatestVersion(3 * time.Second); err == nil {
+			_ = selfupdate.WriteState(latest, time.Now())
+		}
+	}()
+}
+
+// shouldCheckForUpdate is the pure decision logic, exposed for testing.
+// Reuses commandsThatSelfRepair as the suppression set: those are exactly
+// the commands where an extra stderr line is noise (help, completion,
+// version) or where the user is already mid-repair (install, update, serve).
+func shouldCheckForUpdate(rootCmd, cliVersion, suppressEnv string, isTTY bool) bool {
+	if suppressEnv != "" || !isTTY {
+		return false
+	}
+	if cliVersion == "" || cliVersion == "dev" {
+		return false
+	}
+	return !commandsThatSelfRepair[rootCmd]
+}
+
+// printUpdateNotice runs from PersistentPostRun so the nudge lands after the
+// command's own output, not interleaved with it. PostRun is skipped when
+// RunE errors — a failing command shouldn't end on an upsell.
+func printUpdateNotice() {
+	if updateNoticeVersion == "" {
+		return
+	}
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, style.Dimf("A new version of git-treeline is available (%s → %s). Run 'gtl update'.",
+		Version, updateNoticeVersion))
+}
+
+func stderrIsTTY() bool {
+	fi, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
 // rootCommandName returns the top-level subcommand name used to invoke this
