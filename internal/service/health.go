@@ -277,7 +277,8 @@ func checkRouterListening(d healthDeps, port int) HealthCheck {
 	if err != nil {
 		// A failed dial doesn't always mean nothing is listening: macOS pf
 		// has been seen dropping direct SYNs to the rdr target port while
-		// the listener is up and rdr'd :443 traffic flows (Tahoe, 2026-08).
+		// the listener is up and rdr'd :443 traffic flows (Tahoe 26.6.2
+		// build 25G83, 2026-08-28 — recheck on later macOS releases).
 		// lsof still sees the socket in that state, so consult it before
 		// declaring the port dead — a restart cannot fix an OS-level drop.
 		listener := d.processOnPort(port)
@@ -374,8 +375,9 @@ func checkRouterResponding(d healthDeps, port int) HealthCheck {
 // probe fails but the router answers through the :443 forward, the router is
 // alive (bounce flows must not fail) yet the check is a warn — macOS pf has
 // been seen dropping direct SYNs to the rdr target port while translated
-// :443 traffic flows normally (Tahoe, 2026-08), and "gtl serve restart" can
-// never fix that.
+// :443 traffic flows normally (Tahoe 26.6.2 build 25G83, 2026-08-28 —
+// recheck on later macOS releases), and "gtl serve restart" can never fix
+// that.
 func routerResponding(d healthDeps, port int) (HealthCheck, bool) {
 	scheme := "http"
 	if d.routerUsesTLS() {
