@@ -251,7 +251,9 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 }
 
 func (s *Setup) runPostAllocation(alloc *allocator.Allocation, redisURL string) error {
-	s.copyFiles()
+	if err := s.copyFiles(); err != nil {
+		return fmt.Errorf("copying configured files: %w", err)
+	}
 
 	interpMap := alloc.ToInterpolationMap()
 	envVars, err := s.buildEnvVars(interpMap, redisURL)
@@ -325,21 +327,33 @@ func (s *Setup) printDryRun(alloc *allocator.Allocation, redisURL string) error 
 	return nil
 }
 
-func (s *Setup) copyFiles() {
+func (s *Setup) copyFiles() error {
 	for _, file := range s.ProjectConfig.CopyFiles() {
 		src := filepath.Join(s.MainRepo, file)
 		dest := filepath.Join(s.WorktreePath, file)
-		if _, err := os.Stat(src); err != nil {
+		info, err := os.Stat(src)
+		if os.IsNotExist(err) {
 			continue
 		}
-		_ = os.MkdirAll(filepath.Dir(dest), 0o755)
+		if err != nil {
+			return fmt.Errorf("statting %s: %w", file, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("copy source %s is not a regular file", file)
+		}
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return fmt.Errorf("creating destination directory for %s: %w", file, err)
+		}
 		data, err := os.ReadFile(src)
 		if err != nil {
-			continue
+			return fmt.Errorf("reading %s: %w", file, err)
 		}
-		_ = os.WriteFile(dest, data, 0o644)
+		if err := platform.AtomicWriteFile(dest, data, info.Mode().Perm()); err != nil {
+			return fmt.Errorf("writing %s: %w", file, err)
+		}
 		s.log("Copied %s", file)
 	}
+	return nil
 }
 
 func (s *Setup) buildEnvVars(alloc interpolation.Allocation, redisURL string) (map[string]string, error) {
@@ -432,7 +446,7 @@ func (s *Setup) writeEnvFile(vars map[string]string) error {
 			source = filepath.Join(s.MainRepo, ".env")
 		}
 		if data, err := os.ReadFile(source); err == nil {
-			if err := platform.AtomicWriteFile(envPath, data, 0o644); err != nil {
+			if err := platform.AtomicWriteFile(envPath, data, platform.PrivateFileMode); err != nil {
 				return fmt.Errorf("seeding env file: %w", err)
 			}
 		}

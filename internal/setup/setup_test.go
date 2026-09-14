@@ -125,6 +125,99 @@ func TestWriteManagedEnv_CreatesFileIfMissing(t *testing.T) {
 	if !strings.Contains(string(data), `PORT="3010"`) {
 		t.Errorf("expected PORT=\"3010\" in new file, got:\n%s", string(data))
 	}
+	assertFileMode(t, f, 0o600)
+}
+
+func TestWriteManagedEnvTightensExistingFileWithoutContentChange(t *testing.T) {
+	isolateEnvOwnership(t)
+	f := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(f, []byte("PORT=\"3010\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeManagedEnv(f, map[string]string{"PORT": "3010"}); err != nil {
+		t.Fatal(err)
+	}
+
+	assertFileMode(t, f, 0o600)
+	after, err := os.Stat(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, after) {
+		t.Error("expected broad env file to be atomically replaced")
+	}
+}
+
+func TestWriteManagedEnvLeavesUnchangedPrivateFileUntouched(t *testing.T) {
+	isolateEnvOwnership(t)
+	f := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(f, []byte("PORT=\"3010\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeManagedEnv(f, map[string]string{"PORT": "3010"}); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := os.Stat(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Error("unchanged private env file was replaced")
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Errorf("unchanged private env file modtime changed: before=%s after=%s", before.ModTime(), after.ModTime())
+	}
+}
+
+func TestWriteManagedEnvKeepsPrivateModeWhenUpdating(t *testing.T) {
+	isolateEnvOwnership(t)
+	f := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(f, []byte("PORT=3000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeManagedEnv(f, map[string]string{"PORT": "3010"}); err != nil {
+		t.Fatal(err)
+	}
+
+	assertFileMode(t, f, 0o600)
+}
+
+func TestWriteManagedEnvRejectsSymlinkDestination(t *testing.T) {
+	isolateEnvOwnership(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.env")
+	envPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(target, []byte("TARGET=untouched\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, envPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeManagedEnv(envPath, map[string]string{"PORT": "3010"}); err == nil {
+		t.Fatal("expected symlink destination to be rejected")
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "TARGET=untouched\n" {
+		t.Errorf("symlink target changed: %q", got)
+	}
+	assertFileMode(t, target, 0o644)
 }
 
 // --- RegenerateEnvFile tests ---
@@ -203,6 +296,7 @@ env:
 	if !strings.Contains(content, `PORT="3010"`) {
 		t.Errorf("expected interpolated PORT, got:\n%s", content)
 	}
+	assertFileMode(t, filepath.Join(worktree, ".env.local"), 0o600)
 }
 
 func TestWriteEnvFile_PreservesUserEditsOnRerun(t *testing.T) {
@@ -279,7 +373,9 @@ copy_files:
 `)
 	_ = os.WriteFile(filepath.Join(mainRepo, "secret.key"), []byte("supersecret"), 0o644)
 
-	s.copyFiles()
+	if err := s.copyFiles(); err != nil {
+		t.Fatal(err)
+	}
 
 	data, err := os.ReadFile(filepath.Join(worktree, "secret.key"))
 	if err != nil {
@@ -297,7 +393,9 @@ copy_files:
   - does_not_exist.key
 `)
 
-	s.copyFiles()
+	if err := s.copyFiles(); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := os.Stat(filepath.Join(worktree, "does_not_exist.key")); err == nil {
 		t.Error("expected missing source file to be skipped")
@@ -313,7 +411,9 @@ copy_files:
 	_ = os.MkdirAll(filepath.Join(mainRepo, "config"), 0o755)
 	_ = os.WriteFile(filepath.Join(mainRepo, "config", "master.key"), []byte("key"), 0o644)
 
-	s.copyFiles()
+	if err := s.copyFiles(); err != nil {
+		t.Fatal(err)
+	}
 
 	data, err := os.ReadFile(filepath.Join(worktree, "config", "master.key"))
 	if err != nil {
@@ -321,6 +421,113 @@ copy_files:
 	}
 	if string(data) != "key" {
 		t.Errorf("expected 'key', got %q", string(data))
+	}
+}
+
+func TestCopyFilesPreservesSourcePermissions(t *testing.T) {
+	s, mainRepo, worktree := testSetup(t, `
+project: test
+copy_files:
+  - config/master.key
+  - bin/setup
+`)
+	if err := os.MkdirAll(filepath.Join(mainRepo, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(mainRepo, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	masterKey := filepath.Join(mainRepo, "config", "master.key")
+	setupScript := filepath.Join(mainRepo, "bin", "setup")
+	if err := os.WriteFile(masterKey, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(setupScript, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktree, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "config", "master.key"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.copyFiles(); err != nil {
+		t.Fatal(err)
+	}
+
+	assertFileMode(t, filepath.Join(worktree, "config", "master.key"), 0o600)
+	assertFileMode(t, filepath.Join(worktree, "bin", "setup"), 0o755)
+}
+
+func TestCopyFilesReplacesSymlinkDestinationWithoutTouchingTarget(t *testing.T) {
+	s, mainRepo, worktree := testSetup(t, `
+project: test
+copy_files:
+  - config/master.key
+`)
+	if err := os.MkdirAll(filepath.Join(mainRepo, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mainRepo, "config", "master.key"), []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktree, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "outside-worktree")
+	if err := os.WriteFile(target, []byte("untouched"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(worktree, "config", "master.key")
+	if err := os.Symlink(target, dest); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.copyFiles(); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "untouched" {
+		t.Errorf("symlink target changed: %q", got)
+	}
+	info, err := os.Lstat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Error("copy destination remained a symlink")
+	}
+	assertFileMode(t, dest, 0o600)
+}
+
+func TestCopyFilesReturnsSourceErrors(t *testing.T) {
+	s, mainRepo, _ := testSetup(t, `
+project: test
+copy_files:
+  - config
+`)
+	if err := os.MkdirAll(filepath.Join(mainRepo, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.copyFiles(); err == nil {
+		t.Fatal("expected non-file copy source error")
+	}
+}
+
+func assertFileMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Errorf("%s mode = %o, want %o", path, got, want)
 	}
 }
 
