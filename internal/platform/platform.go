@@ -39,7 +39,7 @@ func EnsureConfigDir() error {
 // IsDevMode returns true when GTL_HOME is set, indicating this instance
 // should use an isolated state directory.
 func IsDevMode() bool {
-	return os.Getenv("GTL_HOME") != "" 
+	return os.Getenv("GTL_HOME") != ""
 }
 
 // DevSuffix returns ".dev" when GTL_HOME is set, empty string otherwise.

@@ -841,15 +841,15 @@ func TestRouterWebSocketBlockedWithoutForwardedHost(t *testing.T) {
 
 func TestBuildRouterURL(t *testing.T) {
 	tests := []struct {
-		name        string
-		port        int
-		project     string
-		branch      string
-		domain      string
-		routerPort  int
-		svcRunning  bool
+		name         string
+		port         int
+		project      string
+		branch       string
+		domain       string
+		routerPort   int
+		svcRunning   bool
 		pfConfigured bool
-		want        string
+		want         string
 	}{
 		{
 			name: "router with port forward",

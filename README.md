@@ -35,8 +35,10 @@ This installs both `git-treeline` and the `gtl` shorthand alias.
 ### From source (requires Go 1.26+)
 
 ```bash
-go install github.com/git-treeline/cli@latest
+go install github.com/git-treeline/cli/cmd/git-treeline@latest
 ```
+
+This installs `git-treeline`. Running `make install` from a source checkout also creates the `gtl` alias.
 
 ### From release binary
 
@@ -122,7 +124,7 @@ gtl restart    # bounces the server in one step — logs keep flowing
 
 `stop` + `start` lets agents pause the server, do work (run migrations, install packages), and bring it back — all in your terminal. `restart` is a single-step bounce. Ctrl+C in the terminal exits the supervisor entirely.
 
-The supervisor communicates over a Unix socket. No background processes, no log files, no PID management. Your terminal owns the process; the socket is just a remote control.
+The supervisor communicates over a Unix socket. With ordinary `gtl start`, your terminal owns the process and displays its logs. A fresh `gtl start --await` starts a background supervisor, prints its private log path, and returns once the server is ready. `gtl stop`, `gtl start`, and `gtl restart` can then control that supervisor; `gtl stop --kill` shuts it down. If startup times out or is interrupted, Treeline cleans up the supervisor it just launched.
 
 For agents and scripts that need to wait for the server:
 
@@ -197,7 +199,7 @@ gtl clone git@github.com:org/repo.git
 gtl clone git@github.com:org/repo.git -- --depth 1
 ```
 
-Clones the repo, auto-detects the framework, generates `.treeline.yml` if absent, and runs `gtl setup`. All flags after the URL are passed through to `git clone`. Does not auto-start the server — cloning a foreign repo and running arbitrary shell commands is a trust boundary.
+Clones the repo, auto-detects the framework, generates `.treeline.yml` if absent, and runs `gtl setup`. All flags after the URL are passed through to `git clone`. Setup executes the repository's configured shell commands, so clone repositories whose setup commands you trust. The server starts only when you subsequently run `gtl start`.
 
 ### 6. Switch branches in a worktree
 
@@ -272,6 +274,8 @@ gtl env --template        # show unresolved interpolation tokens
 ```
 
 Prints the current worktree's env file contents. Keys that Treeline manages (defined in the `env:` block of `.treeline.yml`) are annotated with `[treeline]`. Use `--template` to see the raw tokens before interpolation.
+
+Env synchronization records the assignments Treeline writes. Removing a configured key removes its old env-file assignment if it is still unchanged; unrelated entries and manual edits to removed keys are preserved. Assignments from older installations become tracked when next synchronized, so keys deleted before that first sync need manual cleanup.
 
 ### 13. Release when done
 

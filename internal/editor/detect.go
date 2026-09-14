@@ -14,22 +14,22 @@ type EditorInfo struct {
 }
 
 var knownEditors = map[string]EditorInfo{
-	"cursor":    {Name: "cursor", Display: "Cursor", CLI: "cursor"},
-	"vscode":    {Name: "vscode", Display: "VS Code", CLI: "code"},
-	"zed":       {Name: "zed", Display: "Zed", CLI: "zed"},
-	"goland":    {Name: "goland", Display: "GoLand", CLI: "goland"},
-	"webstorm":  {Name: "webstorm", Display: "WebStorm", CLI: "webstorm"},
-	"rubymine":  {Name: "rubymine", Display: "RubyMine", CLI: "rubymine"},
-	"idea":      {Name: "idea", Display: "IntelliJ IDEA", CLI: "idea"},
-	"pycharm":   {Name: "pycharm", Display: "PyCharm", CLI: "pycharm"},
-	"phpstorm":  {Name: "phpstorm", Display: "PhpStorm", CLI: "phpstorm"},
-	"rider":     {Name: "rider", Display: "Rider", CLI: "rider"},
-	"fleet":     {Name: "fleet", Display: "Fleet", CLI: "fleet"},
-	"sublime":   {Name: "sublime", Display: "Sublime Text", CLI: "subl"},
-	"neovim":    {Name: "neovim", Display: "Neovim", CLI: "nvim"},
-	"vim":       {Name: "vim", Display: "Vim", CLI: "vim"},
-	"emacs":     {Name: "emacs", Display: "Emacs", CLI: "emacs"},
-	"windsurf":  {Name: "windsurf", Display: "Windsurf", CLI: "windsurf"},
+	"cursor":   {Name: "cursor", Display: "Cursor", CLI: "cursor"},
+	"vscode":   {Name: "vscode", Display: "VS Code", CLI: "code"},
+	"zed":      {Name: "zed", Display: "Zed", CLI: "zed"},
+	"goland":   {Name: "goland", Display: "GoLand", CLI: "goland"},
+	"webstorm": {Name: "webstorm", Display: "WebStorm", CLI: "webstorm"},
+	"rubymine": {Name: "rubymine", Display: "RubyMine", CLI: "rubymine"},
+	"idea":     {Name: "idea", Display: "IntelliJ IDEA", CLI: "idea"},
+	"pycharm":  {Name: "pycharm", Display: "PyCharm", CLI: "pycharm"},
+	"phpstorm": {Name: "phpstorm", Display: "PhpStorm", CLI: "phpstorm"},
+	"rider":    {Name: "rider", Display: "Rider", CLI: "rider"},
+	"fleet":    {Name: "fleet", Display: "Fleet", CLI: "fleet"},
+	"sublime":  {Name: "sublime", Display: "Sublime Text", CLI: "subl"},
+	"neovim":   {Name: "neovim", Display: "Neovim", CLI: "nvim"},
+	"vim":      {Name: "vim", Display: "Vim", CLI: "vim"},
+	"emacs":    {Name: "emacs", Display: "Emacs", CLI: "emacs"},
+	"windsurf": {Name: "windsurf", Display: "Windsurf", CLI: "windsurf"},
 }
 
 // LookupEditor returns info for a known editor name, or nil if unknown.

@@ -52,17 +52,17 @@
 //
 // ## What is NOT parallelized (and why)
 //
-// - Setup commands run sequentially. They may have ordering dependencies
-//   (e.g. `bundle install` before `rails db:create`). Parallel execution
-//   would require explicit dependency declaration in .treeline.yml.
+//   - Setup commands run sequentially. They may have ordering dependencies
+//     (e.g. `bundle install` before `rails db:create`). Parallel execution
+//     would require explicit dependency declaration in .treeline.yml.
 //
-// - Port allocation is serialized via the registry file lock. The
-//   allocator reads all used ports, finds a free block, and writes back
-//   atomically. Parallel allocation would require a compare-and-swap
-//   protocol that adds complexity for minimal gain (allocation is fast).
+//   - Port allocation is serialized via the registry file lock. The
+//     allocator reads all used ports, finds a free block, and writes back
+//     atomically. Parallel allocation would require a compare-and-swap
+//     protocol that adds complexity for minimal gain (allocation is fast).
 //
-// - `gtl status` runs health checks with a WaitGroup for parallelism
-//   but does not limit concurrency. For typical setups (<20 worktrees)
-//   this is fine. If worktree counts grow significantly, a semaphore
-//   (like golang.org/x/sync/semaphore) would prevent fd exhaustion.
+//   - `gtl status` runs health checks with a WaitGroup for parallelism
+//     but does not limit concurrency. For typical setups (<20 worktrees)
+//     this is fine. If worktree counts grow significantly, a semaphore
+//     (like golang.org/x/sync/semaphore) would prevent fd exhaustion.
 package internal

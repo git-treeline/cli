@@ -30,18 +30,18 @@ type processInfo struct {
 }
 
 type healthDeps struct {
-	isRunning                 func() bool
-	installedBinaryPath       func() string
-	runningRouterVersion      func() string
-	runningPID                func() int
-	isPortForwardConfigured   func() bool
-	checkPortForward          func(routerPort int) PortForwardStatus
-	dialTimeout               func(network, address string, timeout time.Duration) (net.Conn, error)
-	httpProbe                 func(url string, timeout time.Duration) (int, error)
-	httpProbeBody             func(url string, timeout time.Duration) (int, string, error)
+	isRunning               func() bool
+	installedBinaryPath     func() string
+	runningRouterVersion    func() string
+	runningPID              func() int
+	isPortForwardConfigured func() bool
+	checkPortForward        func(routerPort int) PortForwardStatus
+	dialTimeout             func(network, address string, timeout time.Duration) (net.Conn, error)
+	httpProbe               func(url string, timeout time.Duration) (int, error)
+	httpProbeBody           func(url string, timeout time.Duration) (int, string, error)
 	// usesPf selects macOS pf wording (and pfctl advice) in packet-filter
 	// diagnoses; Linux forwards via iptables where pfctl commands are noise.
-	usesPf bool
+	usesPf                    bool
 	executable                func() (string, error)
 	processOnPort             func(port int) processInfo
 	isPfReloadDaemonInstalled func() bool

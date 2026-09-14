@@ -32,8 +32,5 @@ held by one person.
 
 ## Known follow-ups (not blocking)
 
-- The repo is not gofmt-clean on `main` (pre-existing field-alignment padding in
-  several files). A one-time `gofmt -w ./...` plus a CI gofmt gate would fix it,
-  but it's a large, noisy diff kept separate from behavioral changes.
 - `cmd/` test coverage is the thinnest of the large packages; the highest-value
   targets are `server.go`, `doctor.go`, and `tunnel.go`.

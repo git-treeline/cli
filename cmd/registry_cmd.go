@@ -223,4 +223,3 @@ func shouldUseRegistryRepair() bool {
 	}
 	return false
 }
-

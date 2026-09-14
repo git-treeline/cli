@@ -52,13 +52,13 @@ func (al *Allocator) hasLiveSupervisor(worktreePath string) bool {
 // ports, database name, and Redis configuration. Reused is true when
 // an existing allocation was found rather than creating a new one.
 type Allocation struct {
-	Project         string
-	Worktree        string
-	WorktreeName    string
-	Branch          string
-	Port            int
-	Ports     []int
-	Databases []string
+	Project      string
+	Worktree     string
+	WorktreeName string
+	Branch       string
+	Port         int
+	Ports        []int
+	Databases    []string
 	// ExtraKeys names the auxiliary databases of a map-form database.extra,
 	// aligned with Databases[1:]. Empty for the positional list form, whose
 	// extras are addressed as {database_N} instead.
@@ -563,7 +563,6 @@ var browserBlockedPorts = map[int]bool{
 	6000: true, 6566: true, 6665: true, 6666: true, 6667: true, 6668: true,
 	6669: true, 6679: true, 6697: true, 10080: true,
 }
-
 
 // nextAvailablePortsFromUsed scans for a free contiguous port block starting at
 // start, treating usedPorts as already claimed. It keeps the live IsPortFree

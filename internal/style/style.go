@@ -11,8 +11,8 @@ import (
 )
 
 var (
-	Bold   = lipgloss.NewStyle().Bold(true)                 // standalone headings ("Next steps:")
-	Action = lipgloss.NewStyle().Bold(true)                 // ==> action prefix (same visual, distinct semantic)
+	Bold    = lipgloss.NewStyle().Bold(true) // standalone headings ("Next steps:")
+	Action  = lipgloss.NewStyle().Bold(true) // ==> action prefix (same visual, distinct semantic)
 	Command = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("14"))
 	Warn    = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 	Err     = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))

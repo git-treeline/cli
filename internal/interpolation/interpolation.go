@@ -84,10 +84,10 @@ func buildTokenMap(allocation Allocation, redisURL, project string) map[string]s
 		// database.name field in .treeline.yml that mints it.
 		"{database}":      getString(allocation, "database"),
 		"{database.name}": getString(allocation, "database"),
-		"{redis_url}":    redisURL,
-		"{redis_prefix}": getString(allocation, "redis_prefix"),
-		"{project}":      project,
-		"{worktree}":     getString(allocation, "worktree_name"),
+		"{redis_url}":     redisURL,
+		"{redis_prefix}":  getString(allocation, "redis_prefix"),
+		"{project}":       project,
+		"{worktree}":      getString(allocation, "worktree_name"),
 		"{router_url}":    getString(allocation, "router_url"),
 		"{router_host}":   getString(allocation, "router_host"),
 		"{router_domain}": getString(allocation, "router_domain"), // deprecated alias for {router_host}

@@ -74,22 +74,22 @@ func fakePFAll(configuredOnDisk, loadedInKernel, pfEnabled, pfStateKnown, kernel
 // router answers the liveness probe with 200.
 func allHealthy() healthDeps {
 	return healthDeps{
-		isRunning:                  func() bool { return true },
-		installedBinaryPath:        func() string { return "/usr/local/bin/gtl" },
-		runningRouterVersion:       func() string { return "1.0.0" },
-		runningPID:                 func() int { return 1234 },
-		isPortForwardConfigured:    func() bool { return true },
-		checkPortForward:           fakePF(true, true, true, ""),
-		dialTimeout:                fakeDial(true),
-		httpProbe:                  fakeHTTP(200, nil),
-		httpProbeBody:              fakeHTTPBody(200, "ok\n", nil),
-		usesPf:                     true,
-		executable:                 func() (string, error) { return "/usr/local/bin/gtl", nil },
-		processOnPort:              func(int) processInfo { return processInfo{Name: "git-treeline", PID: 1234} },
-		isPfReloadDaemonInstalled:  func() bool { return true },
-		pfReloadDaemonSupported:    true,
-		routerUsesTLS:              func() bool { return false },
-		loopbackListen:             net.Listen,
+		isRunning:                 func() bool { return true },
+		installedBinaryPath:       func() string { return "/usr/local/bin/gtl" },
+		runningRouterVersion:      func() string { return "1.0.0" },
+		runningPID:                func() int { return 1234 },
+		isPortForwardConfigured:   func() bool { return true },
+		checkPortForward:          fakePF(true, true, true, ""),
+		dialTimeout:               fakeDial(true),
+		httpProbe:                 fakeHTTP(200, nil),
+		httpProbeBody:             fakeHTTPBody(200, "ok\n", nil),
+		usesPf:                    true,
+		executable:                func() (string, error) { return "/usr/local/bin/gtl", nil },
+		processOnPort:             func(int) processInfo { return processInfo{Name: "git-treeline", PID: 1234} },
+		isPfReloadDaemonInstalled: func() bool { return true },
+		pfReloadDaemonSupported:   true,
+		routerUsesTLS:             func() bool { return false },
+		loopbackListen:            net.Listen,
 	}
 }
 
@@ -121,20 +121,20 @@ func TestCheckHealthWith_NoPfReloadDaemonOnLinux(t *testing.T) {
 
 func TestCheckHealthWith_AllBroken(t *testing.T) {
 	d := healthDeps{
-		isRunning:                  func() bool { return false },
-		installedBinaryPath:        func() string { return "" },
-		runningRouterVersion:       func() string { return "" },
-		runningPID:                 func() int { return 0 },
-		isPortForwardConfigured:    func() bool { return false },
-		checkPortForward:           fakePF(false, false, false, "not configured"),
-		dialTimeout:                fakeDial(false),
-		httpProbe:                  fakeHTTP(0, fmt.Errorf("connection refused")),
-		executable:                 func() (string, error) { return "/usr/local/bin/gtl", nil },
-		processOnPort:              func(int) processInfo { return processInfo{} },
-		isPfReloadDaemonInstalled:  func() bool { return false },
-		pfReloadDaemonSupported:    true,
-		routerUsesTLS:              func() bool { return false },
-		loopbackListen:             net.Listen,
+		isRunning:                 func() bool { return false },
+		installedBinaryPath:       func() string { return "" },
+		runningRouterVersion:      func() string { return "" },
+		runningPID:                func() int { return 0 },
+		isPortForwardConfigured:   func() bool { return false },
+		checkPortForward:          fakePF(false, false, false, "not configured"),
+		dialTimeout:               fakeDial(false),
+		httpProbe:                 fakeHTTP(0, fmt.Errorf("connection refused")),
+		executable:                func() (string, error) { return "/usr/local/bin/gtl", nil },
+		processOnPort:             func(int) processInfo { return processInfo{} },
+		isPfReloadDaemonInstalled: func() bool { return false },
+		pfReloadDaemonSupported:   true,
+		routerUsesTLS:             func() bool { return false },
+		loopbackListen:            net.Listen,
 	}
 
 	checks := checkHealthWith(d, 8443, "1.0.0")
