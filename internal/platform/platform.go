@@ -39,7 +39,7 @@ func EnsureConfigDir() error {
 // IsDevMode returns true when GTL_HOME is set, indicating this instance
 // should use an isolated state directory.
 func IsDevMode() bool {
-	return os.Getenv("GTL_HOME") != "" 
+	return os.Getenv("GTL_HOME") != ""
 }
 
 // DevSuffix returns ".dev" when GTL_HOME is set, empty string otherwise.
@@ -99,20 +99,21 @@ func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	tmpPath := tmp.Name()
-	_ = tmp.Chmod(perm)
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
 
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		_ = os.Remove(tmpPath)
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpPath)
 		return err
 	}
 	return os.Rename(tmpPath, path)

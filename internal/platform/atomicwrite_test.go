@@ -68,3 +68,21 @@ func TestAtomicWriteFile_MissingDirErrors(t *testing.T) {
 		t.Errorf("expected ErrNotExist, got %v", err)
 	}
 }
+
+func TestAtomicWriteFile_FailedRenameCleansPrivateTemp(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "existing-directory")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := AtomicWriteFile(target, []byte("dummy-secret"), 0600); err == nil {
+		t.Fatal("expected rename over directory to fail")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "existing-directory" {
+		t.Fatalf("failed write left temporary data behind: %v", entries)
+	}
+}

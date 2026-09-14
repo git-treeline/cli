@@ -57,6 +57,11 @@ func (f *fakeSys) deps(goos string) Deps {
 			f.dbs[name] = true
 			return nil
 		},
+		DropDB: func(name string) error {
+			f.calls = append(f.calls, "dropdb:"+name)
+			delete(f.dbs, name)
+			return nil
+		},
 		HydrateFromSource: func(template, env string) error {
 			f.calls = append(f.calls, "hydrate-source:"+template+"<-"+env)
 			f.dbs[template] = true
@@ -251,6 +256,67 @@ func TestRun_Database_EmptyMode_CreatesEmpty(t *testing.T) {
 	}
 	if !f.called("createdb:app_dev") {
 		t.Errorf("expected createdb, calls=%v", f.calls)
+	}
+}
+
+func TestRun_Database_HydrateFailureRemovesCreatedTemplateAndCanRetry(t *testing.T) {
+	f := newFakeSys()
+	actions := []Action{{Kind: ActionDatabase, DBTemplate: "app_dev", DBMode: DBModeHydrate, DBHydrate: "bin/hydrate"}}
+	d := f.deps("linux")
+	d.RunInDir = func(string, string) error {
+		f.calls = append(f.calls, "run:bin/hydrate")
+		return errors.New("hydrate failed")
+	}
+	if err := Run(actions, "/repo", d); err == nil {
+		t.Fatal("expected hydrate failure")
+	}
+	if f.dbs["app_dev"] || !f.called("dropdb:app_dev") {
+		t.Errorf("failed hydration left template behind: dbs=%v calls=%v", f.dbs, f.calls)
+	}
+
+	if err := Run(actions, "/repo", f.deps("linux")); err != nil {
+		t.Fatalf("retry failed: %v", err)
+	}
+	if !f.dbs["app_dev"] || count(f.calls, "run:bin/hydrate") != 2 {
+		t.Errorf("retry did not recreate and hydrate template: dbs=%v calls=%v", f.dbs, f.calls)
+	}
+}
+
+func TestRun_Database_SourceFailureRemovesOnlyNewTemplateAndReportsCleanupError(t *testing.T) {
+	f := newFakeSys()
+	actions := []Action{{Kind: ActionDatabase, DBTemplate: "app_dev", DBMode: DBModeSource, DBSource: "production"}}
+	d := f.deps("linux")
+	d.HydrateFromSource = func(template, env string) error {
+		f.dbs[template] = true
+		return errors.New("restore failed")
+	}
+	if err := Run(actions, "/repo", d); err == nil {
+		t.Fatal("expected source hydration failure")
+	}
+	if f.dbs["app_dev"] || !f.called("dropdb:app_dev") {
+		t.Errorf("failed source hydration left template behind: dbs=%v calls=%v", f.dbs, f.calls)
+	}
+
+	f.dbs["app_dev"] = true
+	d = f.deps("linux")
+	d.HydrateFromSource = func(string, string) error { return errors.New("should not run") }
+	if err := Run(actions, "/repo", d); err != nil {
+		t.Fatal(err)
+	}
+	if count(f.calls, "dropdb:app_dev") != 1 {
+		t.Errorf("preexisting template was cleaned up: calls=%v", f.calls)
+	}
+
+	f = newFakeSys()
+	d = f.deps("linux")
+	d.HydrateFromSource = func(template, env string) error {
+		f.dbs[template] = true
+		return errors.New("restore failed")
+	}
+	d.DropDB = func(string) error { return errors.New("drop failed") }
+	err := Run(actions, "/repo", d)
+	if err == nil || !strings.Contains(err.Error(), "removing incomplete template") || !strings.Contains(err.Error(), "drop failed") {
+		t.Errorf("cleanup error was not visible: %v", err)
 	}
 }
 

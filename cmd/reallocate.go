@@ -13,9 +13,9 @@ import (
 )
 
 var (
-	reallocateFrom    string
-	reallocateApply   bool
-	reallocateAllReg  bool
+	reallocateFrom   string
+	reallocateApply  bool
+	reallocateAllReg bool
 )
 
 func init() {

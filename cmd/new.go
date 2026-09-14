@@ -58,7 +58,12 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		}
 		absPath, _ := filepath.Abs(cwd)
 		mainRepo := worktree.DetectMainRepo(absPath)
-		pc := config.LoadProjectConfig(mainRepo)
+		var pc *config.ProjectConfig
+		if newDryRun {
+			pc = config.LoadProjectConfigReadOnly(mainRepo)
+		} else {
+			pc = config.LoadProjectConfig(mainRepo)
+		}
 		uc := config.LoadUserConfig("")
 
 		if isInWorktree(absPath, mainRepo) && !newForce && !newDryRun {
@@ -76,6 +81,9 @@ Otherwise a new branch is created from --base (or the current branch).`,
 
 		// Zero-config: if no .treeline.yml, check if this is a server project
 		if !pc.Exists() {
+			if newDryRun {
+				return printNewDryRun(branch, mainRepo, pc, uc, true)
+			}
 			det := detect.Detect(mainRepo)
 			if det.IsServerFramework() {
 				fmt.Printf("Detected: %s application\n", det.Framework)
@@ -101,6 +109,10 @@ Otherwise a new branch is created from --base (or the current branch).`,
 
 		projectName := pc.Project()
 		wtPath := resolveWorktreePath(newPath, mainRepo, projectName, branch, uc)
+
+		if newDryRun {
+			return printNewDryRun(branch, mainRepo, pc, uc, false)
+		}
 
 		if err := ensureGitignored(mainRepo, wtPath, os.Stdout); err != nil {
 			return err
@@ -134,24 +146,6 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		}
 
 		existing := worktree.BranchExists(branch)
-
-		if newDryRun {
-			if existing {
-				fmt.Printf("[dry-run] Would check out existing branch '%s'\n", branch)
-			} else {
-				fmt.Printf("[dry-run] Would create new branch '%s' from %s\n", branch, resolveBase(pc))
-			}
-			fmt.Printf("[dry-run] Worktree path: %s\n", wtPath)
-			if newNoSetup {
-				fmt.Println("[dry-run] --no-setup: would skip gtl setup")
-			} else {
-				fmt.Println("[dry-run] Would run: gtl setup")
-				if newStart && pc.StartCommand() != "" {
-					fmt.Printf("[dry-run] Would run: %s\n", pc.StartCommand())
-				}
-			}
-			return nil
-		}
 
 		if existing {
 			_ = worktree.Fetch("origin", branch) // non-fatal: branch may only exist locally
@@ -187,6 +181,32 @@ Otherwise a new branch is created from --base (or the current branch).`,
 
 		return nil
 	},
+}
+
+func printNewDryRun(branch, mainRepo string, pc *config.ProjectConfig, uc *config.UserConfig, noConfig bool) error {
+	wtPath := resolveWorktreePath(newPath, mainRepo, pc.Project(), branch, uc)
+	if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
+		wtPath = existingWT
+		fmt.Printf("[dry-run] Would reuse worktree for branch '%s'\n", branch)
+	} else if worktree.BranchExists(branch) {
+		fmt.Printf("[dry-run] Would check out existing branch '%s'\n", branch)
+	} else {
+		fmt.Printf("[dry-run] Would create new branch '%s' from %s\n", branch, resolveBase(pc))
+	}
+	fmt.Printf("[dry-run] Worktree path: %s\n", wtPath)
+	if noConfig || newNoSetup {
+		if noConfig {
+			fmt.Println("[dry-run] No allocation (no .treeline.yml)")
+		} else {
+			fmt.Println("[dry-run] --no-setup: would skip gtl setup")
+		}
+		return nil
+	}
+	fmt.Println("[dry-run] Would run: gtl setup")
+	if newStart && pc.StartCommand() != "" {
+		fmt.Printf("[dry-run] Would run: %s\n", pc.StartCommand())
+	}
+	return nil
 }
 
 // resolveBase picks the base branch for a new worktree: an explicit --base
@@ -225,6 +245,9 @@ func completeBranches(cmd *cobra.Command, args []string, toComplete string) ([]s
 // Used for non-server projects or when user declines full setup.
 func createWorktreeOnly(mainRepo, branch string, uc *config.UserConfig, pc *config.ProjectConfig) error {
 	wtPath := resolveWorktreePath(newPath, mainRepo, pc.Project(), branch, uc)
+	if newDryRun {
+		return printNewDryRun(branch, mainRepo, pc, uc, true)
+	}
 
 	if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
 		fmt.Println(style.Actionf("Branch '%s' already checked out at %s", branch, existingWT))
@@ -238,17 +261,6 @@ func createWorktreeOnly(mainRepo, branch string, uc *config.UserConfig, pc *conf
 	}
 
 	existing := worktree.BranchExists(branch)
-
-	if newDryRun {
-		if existing {
-			fmt.Printf("[dry-run] Would check out existing branch '%s'\n", branch)
-		} else {
-			fmt.Printf("[dry-run] Would create new branch '%s' from %s\n", branch, resolveBase(pc))
-		}
-		fmt.Printf("[dry-run] Worktree path: %s\n", wtPath)
-		fmt.Println("[dry-run] No allocation (non-server project)")
-		return nil
-	}
 
 	if existing {
 		_ = worktree.Fetch("origin", branch)

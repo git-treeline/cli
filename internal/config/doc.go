@@ -33,8 +33,8 @@
 // When does .treeline.yml env: get written to the env file (.env.local)?
 //
 //   - gtl start — syncs env file + editor settings before starting the server
-//   - gtl restart — syncs env file + pushes updated env to the supervisor's
-//     in-memory env map (update-env socket command), then restarts
+//   - gtl restart — syncs the env file and atomically replaces the supervisor's
+//     managed environment and port before restarting
 //   - gtl env sync — explicit manual sync for users who don't use gtl start
 //   - gtl setup — full provisioning: copies source template then writes managed keys
 //
@@ -49,14 +49,17 @@
 //
 //	pc := config.LoadProjectConfig(absPath) // absPath = worktree directory
 //
-// The setup package provides one constructor:
+// The setup package provides these constructors:
 //
 //   - setup.New(worktreePath, mainRepo, uc) — loads config from worktree.
 //     mainRepo is only used for copy_files source and SQLite template paths.
 //     The cmd layer handles pre-creation config reads (e.g. gtl new reads
 //     mainRepo for project name before the worktree exists).
 //
-// setup.RegenerateEnvFile does incremental env sync (updateOrAppend on each
-// managed key) without copying the source template. Returns nil gracefully
-// if no allocation exists.
+//   - setup.NewWithOptions(worktreePath, mainRepo, uc, options) — use DryRun
+//     before construction to keep legacy config migrations read-only.
+//
+// setup.RegenerateEnvFile synchronizes managed assignments without copying the
+// source template. It removes obsolete, unchanged assignments with recorded
+// ownership and preserves unrelated entries. No allocation is a no-op.
 package config

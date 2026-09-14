@@ -159,6 +159,31 @@ func TestProjectConfig_MigrateDefaultBranch(t *testing.T) {
 	}
 }
 
+func TestLoadProjectConfigReadOnly_MigratesInMemoryWithoutWriting(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ProjectConfigFile)
+	original := []byte("project: myapp\ndefault_branch: staging\nsetup_commands:\n  - bin/setup\nstart_command: bin/dev\nenv_file:\n  target: .env.local\n  source: .env.example\neditor:\n  vscode_title: My App\nports_needed: 3\ndatabase:\n  pattern: \"{template}_{worktree}\"\n")
+	if err := os.WriteFile(path, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pc := LoadProjectConfigReadOnly(dir)
+	if pc.MergeTarget() != "staging" || pc.StartCommand() != "bin/dev" || pc.EnvFileTarget() != ".env.local" || pc.EditorTitle() != "My App" || pc.PortsNeeded() != 3 {
+		t.Fatalf("legacy values were not migrated in memory: %#v", pc.Data)
+	}
+	if got := pc.DatabasePatterns()[0]; got != "{template}_{worktree}" {
+		t.Errorf("database pattern = %q", got)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(original) {
+		t.Errorf("read-only load changed config:\n%s", after)
+	}
+}
+
 func TestProjectConfig_MigrateDefaultBranch_NoClobber(t *testing.T) {
 	dir := t.TempDir()
 	yml := "project: myapp\ndefault_branch: staging\nmerge_target: production\n"

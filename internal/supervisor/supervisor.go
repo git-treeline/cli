@@ -6,6 +6,8 @@ package supervisor
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,12 +29,116 @@ import (
 // than believing an "ok" that started nothing.
 var errStopInProgress = errors.New("stop in progress")
 
-// SocketPath returns a short, deterministic socket path under /tmp to avoid
-// the ~104 byte macOS limit on Unix socket paths. The hash ensures uniqueness
-// per worktree without depending on path length.
+var errSupervisorShuttingDown = errors.New("supervisor is shutting down")
+
+// SocketPath returns a short, deterministic socket path in a private,
+// per-user directory under /tmp. It does not create that directory.
 func SocketPath(worktreePath string) string {
+	worktreePath = canonicalWorktreePath(worktreePath)
+	h := sha256.Sum256([]byte(worktreePath))
+	return fmt.Sprintf("/tmp/gtl-%d/gtl-%x.sock", os.Geteuid(), h[:8])
+}
+
+func canonicalWorktreePath(worktreePath string) string {
+	if absolute, err := filepath.Abs(worktreePath); err == nil {
+		worktreePath = filepath.Clean(absolute)
+	}
+	if resolved, err := filepath.EvalSymlinks(worktreePath); err == nil {
+		return resolved
+	}
+	return worktreePath
+}
+
+// LegacySocketPath returns the pre-private-directory socket name. It is only
+// for detecting and shutting down a previously started supervisor.
+func LegacySocketPath(worktreePath string) string {
 	h := sha256.Sum256([]byte(worktreePath))
 	return fmt.Sprintf("/tmp/gtl-%x.sock", h[:8])
+}
+
+// LegacyPresent reports whether a valid legacy socket exists. It never dials
+// the socket or reads environment/configuration through it.
+func LegacyPresent(worktreePath string) (bool, error) {
+	for _, socketPath := range legacySocketPaths(worktreePath) {
+		err := validateLegacySocket(socketPath)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// ShutdownLegacy asks a validated legacy supervisor to exit. The legacy path
+// is deliberately not accepted by Send, which requires a private directory.
+func ShutdownLegacy(worktreePath string) error {
+	found := false
+	for _, socketPath := range legacySocketPaths(worktreePath) {
+		info, err := legacySocketInfo(socketPath)
+		if os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		found = true
+		if err := shutdownLegacySocket(socketPath, info); err != nil {
+			return err
+		}
+	}
+	if !found {
+		return os.ErrNotExist
+	}
+	return nil
+}
+
+func legacySocketPaths(worktreePath string) []string {
+	raw := LegacySocketPath(worktreePath)
+	canonical := LegacySocketPath(canonicalWorktreePath(worktreePath))
+	if canonical == raw {
+		return []string{raw}
+	}
+	return []string{raw, canonical}
+}
+
+func shutdownLegacySocket(socketPath string, expected os.FileInfo) error {
+	response, err := sendRawWithTimeout(socketPath, "shutdown", 5*time.Second)
+	if err != nil {
+		// A refused Unix connection means the socket inode has no listener. It
+		// is the one failed-dial result that proves this validated legacy socket
+		// is stale; timeouts and other failures may still have a live owner.
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			current, revalidateErr := legacySocketInfo(socketPath)
+			if os.IsNotExist(revalidateErr) {
+				return nil
+			} else if revalidateErr != nil {
+				return revalidateErr
+			}
+			if !os.SameFile(expected, current) {
+				return fmt.Errorf("legacy supervisor socket changed while shutting down: %s", socketPath)
+			}
+			if removeErr := os.Remove(socketPath); removeErr != nil && !os.IsNotExist(removeErr) {
+				return fmt.Errorf("removing stale legacy supervisor socket: %w", removeErr)
+			}
+			return nil
+		}
+		return err
+	}
+	if strings.TrimSpace(response) != "ok" {
+		return fmt.Errorf("legacy supervisor rejected shutdown: %s", strings.TrimSpace(response))
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Lstat(socketPath); os.IsNotExist(err) {
+			return nil
+		} else if err != nil {
+			return fmt.Errorf("checking legacy supervisor shutdown: %w", err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return fmt.Errorf("legacy supervisor socket did not close: %s", socketPath)
 }
 
 // PidPath returns the supervisor PID file path corresponding to a socket path.
@@ -48,12 +155,16 @@ func ChildPidPath(socketPath string) string {
 }
 
 type Supervisor struct {
-	Command    string
-	Dir        string
-	SocketPath string
-	Port       int
-	Env        map[string]string // extra env vars injected into the child process
-	Log        func(format string, args ...any)
+	// Command is the active, interpolated command. CommandTemplate retains the
+	// original config value so a port reallocation can refresh {port} tokens
+	// without silently adopting a later commands.start edit.
+	Command         string
+	CommandTemplate string
+	Dir             string
+	SocketPath      string
+	Port            int
+	Env             map[string]string // extra env vars injected into the child process
+	Log             func(format string, args ...any)
 	// ConnWriteDeadline caps how long handleConn waits to write a response.
 	// Defaults to 15s. Override in tests to avoid slow-test hangs.
 	ConnWriteDeadline time.Duration
@@ -64,14 +175,74 @@ type Supervisor struct {
 	// the test binary's stdout pipe open and `go test` stalls waiting for EOF.
 	ChildStdout io.Writer
 	ChildStderr io.Writer
+	// StopTimeout and KillTimeout bound graceful and forced process-group
+	// teardown. Tests shorten them; production uses the defaults below.
+	StopTimeout time.Duration
+	KillTimeout time.Duration
 
 	mu           sync.Mutex
+	opMu         sync.Mutex // serializes lifecycle/configure operations
 	child        *exec.Cmd
 	childDone    chan struct{} // closed when current child's Wait() completes
+	childPGID    int           // retained until the entire child group is gone
 	stopping     bool          // true while stopChildLocked has released s.mu to wait
+	terminal     bool          // shutdown has claimed exclusive lifecycle ownership
 	listener     net.Listener
 	done         chan struct{}
 	shutdownOnce sync.Once
+}
+
+// configureRequest is deliberately a complete replacement, not a patch: a
+// deleted environment key must disappear from the next child just as a changed
+// value does. It is base64 encoded on the simple line-oriented socket protocol
+// so values cannot be confused with command delimiters.
+type configureRequest struct {
+	Action string            `json:"action"`
+	Env    map[string]string `json:"env"`
+	Port   int               `json:"port"`
+}
+
+// ConfigureAndSend atomically replaces the supervisor environment and port,
+// then performs action ("restart" or "start"). The complete map is accepted
+// even when empty, which is how callers remove all managed variables.
+func ConfigureAndSend(socketPath, action string, env map[string]string, port int) (string, error) {
+	if env == nil {
+		env = map[string]string{}
+	}
+	payload, err := json.Marshal(configureRequest{Action: action, Env: env, Port: port})
+	if err != nil {
+		return "", fmt.Errorf("encoding runtime configuration: %w", err)
+	}
+	resp, err := Send(socketPath, "configure-action:"+base64.RawStdEncoding.EncodeToString(payload))
+	if err != nil {
+		return "", err
+	}
+	resp = strings.TrimSpace(resp)
+	if resp == "ok" || (action == "start" && resp == "already running") {
+		return resp, nil
+	}
+	if strings.HasPrefix(resp, "unknown command: configure-action") {
+		return "", errors.New("supervisor uses an older protocol; run gtl stop --kill then gtl start")
+	}
+	if strings.HasPrefix(resp, "error:") {
+		return "", fmt.Errorf("supervisor returned runtime configuration error: %s", strings.TrimSpace(strings.TrimPrefix(resp, "error:")))
+	}
+	return "", fmt.Errorf("unexpected supervisor response to runtime configuration: %q", resp)
+}
+
+// InterpolateCommand expands the allocated port tokens used in commands.start.
+// It lives with Supervisor because the raw command must be retained and
+// refreshed when a running allocation receives a new port.
+func InterpolateCommand(command string, port int) string {
+	if !strings.Contains(command, "{port") {
+		return command
+	}
+	command = strings.ReplaceAll(command, "{port}", strconv.Itoa(port))
+	for i := 2; i <= 10; i++ {
+		token := fmt.Sprintf("{port_%d}", i)
+		command = strings.ReplaceAll(command, token, strconv.Itoa(port+i-1))
+	}
+	return command
 }
 
 // orWriter returns w, or fallback when w is nil. A nil cmd.Stdout means
@@ -87,21 +258,58 @@ func orWriter(w, fallback io.Writer) io.Writer {
 func New(command, dir, socketPath string) *Supervisor {
 	return &Supervisor{
 		Command:           command,
+		CommandTemplate:   command,
 		Dir:               dir,
 		SocketPath:        socketPath,
 		Log:               func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) },
 		ConnWriteDeadline: 15 * time.Second,
 		ChildStdout:       os.Stdout,
 		ChildStderr:       os.Stderr,
+		StopTimeout:       10 * time.Second,
+		KillTimeout:       5 * time.Second,
 		done:              make(chan struct{}),
 	}
 }
 
 func (s *Supervisor) Run() error {
-	if _, err := os.Stat(s.SocketPath); err == nil {
+	if err := EnsureSocketDir(s.SocketPath); err != nil {
+		return fmt.Errorf("preparing supervisor socket directory: %w", err)
+	}
+	// Hold a lifetime lock before inspecting or unlinking the socket. Two fresh
+	// starts can otherwise both observe a missing socket and one can unlink the
+	// other's newly-bound listener between its check and net.Listen.
+	lockPath := s.SocketPath + ".lock"
+	lock, err := OpenStateLock(lockPath)
+	if err != nil {
+		return fmt.Errorf("opening supervisor lock: %w", err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lock.Close()
+		return fmt.Errorf("supervisor startup already in progress or running")
+	}
+	defer func() {
+		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		_ = lock.Close()
+	}()
+
+	if _, err := os.Lstat(s.SocketPath); err == nil {
+		if err := validateSocketEndpoint(s.SocketPath); err != nil {
+			return err
+		}
 		if resp, dialErr := Send(s.SocketPath, "status"); dialErr == nil {
 			return fmt.Errorf("supervisor already running (status: %s) on %s", resp, s.SocketPath)
 		}
+		// A failed dial does not prove the socket is stale: another fresh
+		// supervisor can have bound it before its accept loop/PID file is ready.
+		// Only unlink when a recorded owner is definitely dead.
+		data, readErr := ReadStateFile(PidPath(s.SocketPath))
+		pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
+		if readErr != nil || parseErr != nil || pid <= 1 || syscall.Kill(pid, 0) == nil || syscall.Kill(pid, 0) == syscall.EPERM {
+			return fmt.Errorf("supervisor socket exists but is not reachable: %s", s.SocketPath)
+		}
+		_ = os.Remove(PidPath(s.SocketPath))
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspecting supervisor socket: %w", err)
 	}
 	_ = os.Remove(s.SocketPath)
 
@@ -109,20 +317,37 @@ func (s *Supervisor) Run() error {
 	if err != nil {
 		return fmt.Errorf("listening on socket: %w", err)
 	}
-	_ = os.Chmod(s.SocketPath, 0600)
+	if err := os.Chmod(s.SocketPath, privateFileMode); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(s.SocketPath)
+		return fmt.Errorf("securing supervisor socket: %w", err)
+	}
 	s.listener = ln
+	defer s.shutdownOnce.Do(func() { close(s.done) })
 
 	pidPath := PidPath(s.SocketPath)
-	_ = os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0600)
+	if err := WriteStateFile(pidPath, []byte(strconv.Itoa(os.Getpid()))); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(s.SocketPath)
+		return fmt.Errorf("writing supervisor PID: %w", err)
+	}
 	defer func() {
 		_ = ln.Close()
 		_ = os.Remove(s.SocketPath)
 		_ = os.Remove(pidPath)
-		_ = os.Remove(ChildPidPath(s.SocketPath))
+		s.mu.Lock()
+		pgid := s.childPGID
+		s.mu.Unlock()
+		// Do not discard the only recovery handle if a process group survived a
+		// failed shutdown. A later force-kill can still reap it.
+		if pgid <= 1 || !processGroupAlive(pgid) {
+			_ = os.Remove(ChildPidPath(s.SocketPath))
+		}
 	}()
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigs)
 
 	go s.acceptLoop()
 
@@ -136,8 +361,7 @@ func (s *Supervisor) Run() error {
 			return nil
 		case sig := <-sigs:
 			s.Log("\n==> Received %s, shutting down...", sig)
-			s.stopChild()
-			return nil
+			return s.shutdown()
 		}
 	}
 }
@@ -152,7 +376,14 @@ func (s *Supervisor) startChildLocked() error {
 		s.Log("==> Ignoring start: a stop is in progress")
 		return errStopInProgress
 	}
+	if s.terminal {
+		return errSupervisorShuttingDown
+	}
+	if s.childPGID > 1 && processGroupAlive(s.childPGID) {
+		return fmt.Errorf("child process group %d is still running", s.childPGID)
+	}
 
+	s.refreshCommandLocked()
 	s.Log("==> Starting: %s", s.Command)
 	cmd := exec.Command("sh", "-c", s.Command)
 	cmd.Dir = s.Dir
@@ -172,13 +403,21 @@ func (s *Supervisor) startChildLocked() error {
 		return fmt.Errorf("starting command: %w", err)
 	}
 	s.child = cmd
+	s.childPGID = cmd.Process.Pid
 	done := make(chan struct{})
 	s.childDone = done
 
 	// Persist the child's pgid (== child pid because Setpgid gives it a fresh
 	// group) so a force-kill can reap the whole group even if this process is
 	// gone. Removed when the child exits, on stop, and on supervisor shutdown.
-	_ = os.WriteFile(ChildPidPath(s.SocketPath), []byte(strconv.Itoa(cmd.Process.Pid)), 0600)
+	if err := WriteStateFile(ChildPidPath(s.SocketPath), []byte(strconv.Itoa(cmd.Process.Pid))); err != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = cmd.Wait()
+		s.child = nil
+		s.childPGID = 0
+		s.childDone = nil
+		return fmt.Errorf("writing child PID: %w", err)
+	}
 
 	go func() {
 		_ = cmd.Wait()
@@ -186,7 +425,14 @@ func (s *Supervisor) startChildLocked() error {
 		s.mu.Lock()
 		if s.child == cmd {
 			s.child = nil
-			_ = os.Remove(ChildPidPath(s.SocketPath))
+			// A shell leader can exit while a background descendant continues
+			// serving. Keep the group id until the complete group is gone.
+			if !processGroupAlive(cmd.Process.Pid) {
+				s.childPGID = 0
+				_ = os.Remove(ChildPidPath(s.SocketPath))
+			} else {
+				go s.clearExitedProcessGroup(cmd.Process.Pid)
+			}
 		}
 		s.mu.Unlock()
 	}()
@@ -194,68 +440,155 @@ func (s *Supervisor) startChildLocked() error {
 	return nil
 }
 
+func (s *Supervisor) clearExitedProcessGroup(pgid int) {
+	for processGroupAlive(pgid) {
+		select {
+		case <-s.done:
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.childPGID == pgid {
+		s.childPGID = 0
+		_ = os.Remove(ChildPidPath(s.SocketPath))
+	}
+}
+
+func (s *Supervisor) refreshCommandLocked() {
+	if s.CommandTemplate != "" {
+		s.Command = InterpolateCommand(s.CommandTemplate, s.Port)
+	}
+}
+
+func (s *Supervisor) stopTimeout() time.Duration {
+	if s.StopTimeout > 0 {
+		return s.StopTimeout
+	}
+	return 10 * time.Second
+}
+
+func (s *Supervisor) killTimeout() time.Duration {
+	if s.KillTimeout > 0 {
+		return s.KillTimeout
+	}
+	return 5 * time.Second
+}
+
+func processGroupAlive(pgid int) bool {
+	if pgid <= 1 {
+		return false
+	}
+	err := syscall.Kill(-pgid, 0)
+	return err == nil || err == syscall.EPERM
+}
+
+func waitForProcessGroupExit(pgid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for processGroupAlive(pgid) {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return true
+}
+
 func (s *Supervisor) startChild() error {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.startChildLocked()
 }
 
-// stopChildLocked sends SIGTERM to the child process group and waits.
+// shutdown marks the supervisor terminal before stopping its child and closing
+// done, all while opMu is held. Requests already accepted by the listener can
+// therefore never start a replacement child after shutdown begins.
+func (s *Supervisor) shutdown() error {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	s.mu.Lock()
+	if s.terminal {
+		s.mu.Unlock()
+		return errSupervisorShuttingDown
+	}
+	s.terminal = true
+	err := s.stopChildLocked()
+	s.shutdownOnce.Do(func() { close(s.done) })
+	s.mu.Unlock()
+	return err
+}
+
+// stopChildLocked sends SIGTERM to the child process group and waits for the
+// *group*, rather than just its shell leader. Caller must hold s.mu.
 // Caller must hold s.mu; the lock is released during the wait to avoid
 // blocking status queries.
-func (s *Supervisor) stopChildLocked() {
+func (s *Supervisor) stopChildLocked() error {
 	child := s.child
-	waitCh := s.childDone
-	if child == nil || child.Process == nil {
-		return
+	pgid := s.childPGID
+	if pgid <= 1 && child != nil && child.Process != nil {
+		pgid = child.Process.Pid
+	}
+	if pgid <= 1 {
+		return nil
 	}
 	s.child = nil
 	s.childDone = nil
 	s.stopping = true
 	s.mu.Unlock()
 
-	_ = syscall.Kill(-child.Process.Pid, syscall.SIGTERM)
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
 
-	exited := false
-	select {
-	case <-waitCh:
-		exited = true
-	case <-time.After(10 * time.Second):
+	exited := waitForProcessGroupExit(pgid, s.stopTimeout())
+	if !exited {
 		s.Log("==> Process didn't exit in 10s, sending SIGKILL")
-		_ = syscall.Kill(-child.Process.Pid, syscall.SIGKILL)
-		select {
-		case <-waitCh:
-			exited = true
-		case <-time.After(5 * time.Second):
-			s.Log("==> Process did not exit after SIGKILL — proceeding")
-		}
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		exited = waitForProcessGroupExit(pgid, s.killTimeout())
 	}
-	// The wait goroutine only removes the sidecar on a self-exit (s.child ==
-	// cmd); on this path s.child is already nil, so the removal is ours. Skip
-	// it if the child never exited — the pgid is still needed for a later
-	// force-kill.
+	// The leader may have exited well before a descendant. The sidecar remains
+	// valid until the whole group is gone.
+	s.mu.Lock()
 	if exited {
+		s.childPGID = 0
 		_ = os.Remove(ChildPidPath(s.SocketPath))
 	}
-
-	s.mu.Lock()
 	s.stopping = false
+	if !exited {
+		return fmt.Errorf("process group %d did not exit after SIGKILL", pgid)
+	}
+	return nil
 }
 
-func (s *Supervisor) stopChild() {
+func (s *Supervisor) stopChild() error {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 	s.mu.Lock()
-	s.stopChildLocked()
+	if s.terminal {
+		s.mu.Unlock()
+		return errSupervisorShuttingDown
+	}
+	err := s.stopChildLocked()
 	s.mu.Unlock()
+	return err
 }
 
 // restart atomically stops the current child and starts a new one.
 // Holds the lock for the entire sequence to prevent concurrent restarts
 // from spawning duplicate processes.
 func (s *Supervisor) restart() error {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.terminal {
+		return errSupervisorShuttingDown
+	}
 	s.Log("\n==> Restarting server...")
-	s.stopChildLocked()
+	if err := s.stopChildLocked(); err != nil {
+		return err
+	}
 	return s.startChildLocked()
 }
 
@@ -304,8 +637,15 @@ func (s *Supervisor) handleConn(conn net.Conn) {
 		}
 		_, _ = fmt.Fprint(conn, "ok")
 	case "start":
+		s.opMu.Lock()
+		defer s.opMu.Unlock()
 		s.mu.Lock()
-		if s.child != nil {
+		if s.terminal {
+			s.mu.Unlock()
+			_, _ = fmt.Fprintf(conn, "error: %s", errSupervisorShuttingDown)
+			return
+		}
+		if s.childPGID > 1 && processGroupAlive(s.childPGID) {
 			s.mu.Unlock()
 			_, _ = fmt.Fprint(conn, "already running")
 			return
@@ -326,16 +666,21 @@ func (s *Supervisor) handleConn(conn net.Conn) {
 		_, _ = fmt.Fprint(conn, "ok")
 	case "stop":
 		s.Log("\n==> Server stopped. Supervisor waiting...")
-		s.stopChild()
+		if err := s.stopChild(); err != nil {
+			_, _ = fmt.Fprintf(conn, "error: %s", err)
+			return
+		}
 		_, _ = fmt.Fprint(conn, "ok")
 	case "shutdown":
 		s.Log("\n==> Shutting down supervisor...")
-		s.stopChild()
+		if err := s.shutdown(); err != nil {
+			_, _ = fmt.Fprintf(conn, "error: %s", err)
+			return
+		}
 		_, _ = fmt.Fprint(conn, "ok")
-		s.shutdownOnce.Do(func() { close(s.done) })
 	case "status":
 		s.mu.Lock()
-		running := s.child != nil && s.child.Process != nil
+		running := s.childPGID > 1 && processGroupAlive(s.childPGID)
 		s.mu.Unlock()
 		if running {
 			_, _ = fmt.Fprint(conn, "running")
@@ -343,14 +688,30 @@ func (s *Supervisor) handleConn(conn net.Conn) {
 			_, _ = fmt.Fprint(conn, "stopped")
 		}
 	case "get-command":
-		// s.Command is set at construction and never mutated — no lock needed.
-		_, _ = fmt.Fprint(conn, s.Command)
+		s.mu.Lock()
+		command := s.Command
+		s.mu.Unlock()
+		_, _ = fmt.Fprint(conn, command)
 	case "update-env":
+		s.opMu.Lock()
+		defer s.opMu.Unlock()
 		if len(parts) < 2 || parts[1] == "" {
+			s.mu.Lock()
+			terminal := s.terminal
+			s.mu.Unlock()
+			if terminal {
+				_, _ = fmt.Fprintf(conn, "error: %s", errSupervisorShuttingDown)
+				return
+			}
 			_, _ = fmt.Fprint(conn, "ok")
 			return
 		}
 		s.mu.Lock()
+		if s.terminal {
+			s.mu.Unlock()
+			_, _ = fmt.Fprintf(conn, "error: %s", errSupervisorShuttingDown)
+			return
+		}
 		if s.Env == nil {
 			s.Env = make(map[string]string)
 		}
@@ -362,6 +723,27 @@ func (s *Supervisor) handleConn(conn net.Conn) {
 		}
 		s.mu.Unlock()
 		_, _ = fmt.Fprint(conn, "ok")
+	case "configure-action":
+		if len(parts) < 2 {
+			_, _ = fmt.Fprint(conn, "error: missing runtime configuration")
+			return
+		}
+		payload, err := base64.RawStdEncoding.DecodeString(parts[1])
+		if err != nil {
+			_, _ = fmt.Fprintf(conn, "error: invalid runtime configuration: %s", err)
+			return
+		}
+		var request configureRequest
+		if err := json.Unmarshal(payload, &request); err != nil {
+			_, _ = fmt.Fprintf(conn, "error: invalid runtime configuration: %s", err)
+			return
+		}
+		resp, err := s.configureAndAct(request)
+		if err != nil {
+			_, _ = fmt.Fprintf(conn, "error: %s", err)
+			return
+		}
+		_, _ = fmt.Fprint(conn, resp)
 	case "wait-ready":
 		timeout := 60 * time.Second
 		if len(parts) > 1 {
@@ -375,18 +757,65 @@ func (s *Supervisor) handleConn(conn net.Conn) {
 	}
 }
 
+func (s *Supervisor) configureAndAct(request configureRequest) (string, error) {
+	if request.Action != "restart" && request.Action != "start" {
+		return "", fmt.Errorf("unknown runtime action %q", request.Action)
+	}
+
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.terminal {
+		return "", errSupervisorShuttingDown
+	}
+	// Copy before publishing it so a caller cannot mutate state after the
+	// request was encoded/decoded. A nil JSON map is also an empty replacement.
+	s.Env = make(map[string]string, len(request.Env))
+	for k, v := range request.Env {
+		s.Env[k] = v
+	}
+	s.Port = request.Port
+	s.refreshCommandLocked()
+
+	if request.Action == "start" {
+		if s.childPGID > 1 && processGroupAlive(s.childPGID) {
+			return "already running", nil
+		}
+		if err := s.startChildLocked(); err != nil {
+			return "", err
+		}
+		return "ok", nil
+	}
+
+	s.Log("\n==> Restarting server...")
+	if err := s.stopChildLocked(); err != nil {
+		return "", err
+	}
+	if err := s.startChildLocked(); err != nil {
+		return "", err
+	}
+	return "ok", nil
+}
+
 func (s *Supervisor) handleWaitReady(conn net.Conn, timeout time.Duration) {
-	if s.Port == 0 {
+	s.mu.Lock()
+	port := s.Port
+	s.mu.Unlock()
+	if port == 0 {
 		_, _ = fmt.Fprint(conn, "error: no port configured")
 		return
 	}
 
 	deadline := time.Now().Add(timeout)
-	addr := fmt.Sprintf("127.0.0.1:%d", s.Port)
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
+		s.mu.Lock()
+		port = s.Port
+		s.mu.Unlock()
+		addr := fmt.Sprintf("127.0.0.1:%d", port)
 		c, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
 		if err == nil {
 			_ = c.Close()
@@ -396,18 +825,23 @@ func (s *Supervisor) handleWaitReady(conn net.Conn, timeout time.Duration) {
 
 		s.mu.Lock()
 		childDone := s.childDone
+		running := s.childPGID > 1 && processGroupAlive(s.childPGID)
 		s.mu.Unlock()
 
-		if childDone == nil {
+		if !running {
 			_, _ = fmt.Fprint(conn, "error: server not running")
 			return
 		}
 
-		select {
-		case <-childDone:
-			_, _ = fmt.Fprint(conn, "error: server exited before becoming ready")
-			return
-		case <-ticker.C:
+		if childDone != nil {
+			select {
+			case <-childDone:
+				// A shell can exit before its background server. Recheck the group
+				// on the next loop instead of declaring the surviving child dead.
+			case <-ticker.C:
+			}
+		} else {
+			<-ticker.C
 		}
 
 		if time.Now().After(deadline) {
@@ -426,33 +860,8 @@ func Send(socketPath, command string) (string, error) {
 // SendWithTimeout is like Send but with a caller-specified deadline.
 // Used by --await which may need to wait longer than the default 30s.
 func SendWithTimeout(socketPath, command string, timeout time.Duration) (string, error) {
-	// The dial is bounded too: a wedged supervisor with a full accept backlog
-	// would otherwise block connect() indefinitely, before the deadline applies.
-	conn, err := net.DialTimeout("unix", socketPath, timeout)
-	if err != nil {
-		return "", fmt.Errorf("server not running (no socket at %s)", socketPath)
+	if err := validateSocketEndpoint(socketPath); err != nil {
+		return "", err
 	}
-	defer func() { _ = conn.Close() }()
-
-	_ = conn.SetDeadline(time.Now().Add(timeout))
-	if _, err := conn.Write([]byte(command)); err != nil {
-		return "", fmt.Errorf("sending command: %w", err)
-	}
-
-	// Half-close the write side so the server knows the request is complete and
-	// can read it whole without a fixed-size buffer. This stays compatible with
-	// OLD servers: they single-read the request (short commands are unaffected)
-	// and close the conn after replying, so the ReadAll below still ends at EOF.
-	if uc, ok := conn.(*net.UnixConn); ok {
-		_ = uc.CloseWrite()
-	}
-
-	// Read the full reply until EOF instead of a single 256-byte read, which
-	// truncated long responses (e.g. a get-command over 256B) into false
-	// "command changed" warnings.
-	resp, err := io.ReadAll(conn)
-	if err != nil {
-		return "", fmt.Errorf("reading response: %w", err)
-	}
-	return string(resp), nil
+	return sendRawWithTimeout(socketPath, command, timeout)
 }

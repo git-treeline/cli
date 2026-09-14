@@ -16,11 +16,11 @@ import (
 type BackendState int
 
 const (
-	BackendUnknown      BackendState = iota
-	BackendStarting                  // supervisor + child both up, port not yet listening
-	BackendNotStarted                // allocation exists, supervisor not running
-	BackendStopped                   // supervisor running, no live child (stopped or crashed)
-	BackendUnreachable               // supervisor responded with something unexpected
+	BackendUnknown     BackendState = iota
+	BackendStarting                 // supervisor + child both up, port not yet listening
+	BackendNotStarted               // allocation exists, supervisor not running
+	BackendStopped                  // supervisor running, no live child (stopped or crashed)
+	BackendUnreachable              // supervisor responded with something unexpected
 )
 
 // SupervisorProbe asks the supervisor at socketPath for its status.

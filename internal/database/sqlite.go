@@ -2,10 +2,10 @@ package database
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 type SQLite struct {
@@ -31,27 +31,67 @@ func (s *SQLite) Exists(name string) (bool, error) {
 }
 
 func (s *SQLite) Clone(template, target string) error {
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return fmt.Errorf("creating target directory: %w", err)
-	}
-
-	src, err := os.Open(template)
+	templatePath, err := filepath.Abs(template)
 	if err != nil {
+		return fmt.Errorf("resolving template database %s: %w", template, err)
+	}
+	targetPath, err := filepath.Abs(target)
+	if err != nil {
+		return fmt.Errorf("resolving target database %s: %w", target, err)
+	}
+	if templatePath == targetPath {
+		return fmt.Errorf("template and target database are the same: %s", template)
+	}
+	if _, err := os.Stat(templatePath); err != nil {
 		return fmt.Errorf("opening template database %s: %w", template, err)
 	}
-	defer func() { _ = src.Close() }()
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return fmt.Errorf("creating target directory: %w", err)
+	}
+	for _, sidecar := range []string{targetPath + "-wal", targetPath + "-shm"} {
+		if _, err := os.Stat(sidecar); err == nil {
+			return fmt.Errorf("target database has an active SQLite sidecar: %s", sidecar)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("checking target database sidecar %s: %w", sidecar, err)
+		}
+	}
 
-	dst, err := os.Create(target)
+	backupPath, err := os.CreateTemp(filepath.Dir(targetPath), ".treeline-clone-*")
 	if err != nil {
 		return fmt.Errorf("creating target database %s: %w", target, err)
 	}
-
-	if _, err := io.Copy(dst, src); err != nil {
-		_ = dst.Close()
-		return fmt.Errorf("copying database %s -> %s: %w", template, target, err)
+	backupName := backupPath.Name()
+	if err := backupPath.Close(); err != nil {
+		_ = os.Remove(backupName)
+		return fmt.Errorf("preparing target database %s: %w", target, err)
 	}
+	defer func() { _ = os.Remove(backupName) }()
 
-	return dst.Close()
+	quotedTarget, err := sqliteCommandArg(backupName)
+	if err != nil {
+		return err
+	}
+	cmd := s.command("sqlite3", templatePath, ".backup \""+quotedTarget+"\"")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("cloning database %s -> %s: %w", template, target, err)
+	}
+	if err := os.Rename(backupName, targetPath); err != nil {
+		return fmt.Errorf("installing cloned database %s: %w", target, err)
+	}
+	return nil
+}
+
+// sqliteCommandArg returns a double-quoted sqlite shell argument. The backup
+// filename is interpreted by sqlite3's dot-command parser, not by a shell, so
+// escape its parser's two special characters before embedding it in .backup.
+func sqliteCommandArg(path string) (string, error) {
+	if strings.ContainsAny(path, "\x00\r\n") {
+		return "", fmt.Errorf("SQLite database path contains unsupported control characters: %q", path)
+	}
+	path = strings.ReplaceAll(path, `\`, `\\`)
+	return strings.ReplaceAll(path, `"`, `\"`), nil
 }
 
 // Create creates an empty database file — the degraded fallback when the

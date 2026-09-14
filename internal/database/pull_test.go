@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -28,6 +29,12 @@ func testPuller(t *testing.T, connArgs []string, listOutput, failCmd string) (*P
 		if name == "pg_dump" {
 			for i := 0; i < len(args)-1; i++ {
 				if args[i] == "-f" {
+					info, err := os.Stat(args[i+1])
+					if err != nil {
+						t.Errorf("staging file must exist before pg_dump writes: %v", err)
+					} else if info.Mode().Perm() != 0o600 {
+						t.Errorf("staging mode = %o, want 600", info.Mode().Perm())
+					}
 					_ = os.WriteFile(args[i+1], []byte("PGDMP\x00data"), 0o644)
 				}
 			}
@@ -78,11 +85,16 @@ func TestPuller_Dump_PasswordInEnvNotArgs(t *testing.T) {
 	c := findCall(*calls, "pg_dump")
 	if c == nil {
 		t.Fatal("no pg_dump call recorded")
+		return
 	}
 	// pg_dump writes to a temp path; the verified dump is renamed into place.
-	wantArgs := []string{"-Fc", "-h", "h", "-p", "6432", "-U", "u", "-d", "club", "-f", dumpPath + ".partial"}
-	if strings.Join(c.args, " ") != strings.Join(wantArgs, " ") {
-		t.Errorf("pg_dump args = %v, want %v", c.args, wantArgs)
+	wantArgs := []string{"-Fc", "-h", "h", "-p", "6432", "-U", "u", "-d", "club", "-f"}
+	if strings.Join(c.args[:len(wantArgs)], " ") != strings.Join(wantArgs, " ") {
+		t.Errorf("pg_dump args = %v, want prefix %v", c.args, wantArgs)
+	}
+	tmp := c.args[len(c.args)-1]
+	if filepath.Dir(tmp) != dir || filepath.Base(tmp) == "production.dump.partial" || !strings.HasPrefix(filepath.Base(tmp), ".production.dump.tmp-") {
+		t.Errorf("pg_dump temp path = %q, want unique private path under %q", tmp, dir)
 	}
 	// the load-bearing assertion: password is in env, never in argv
 	for _, a := range c.args {
@@ -99,9 +111,123 @@ func TestPuller_Dump_PasswordInEnvNotArgs(t *testing.T) {
 	// the final, verified dump is in place and the partial is gone
 	if _, err := os.Stat(dumpPath); err != nil {
 		t.Errorf("final dump not renamed into place: %v", err)
+	} else if info, err := os.Stat(dumpPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("final dump mode = %v, want 600", info.Mode())
 	}
 	if _, err := os.Stat(dumpPath + ".partial"); err == nil {
 		t.Error("partial dump should be removed after rename")
+	}
+}
+
+func TestPuller_Dump_ConcurrentStagingPathsAreUnique(t *testing.T) {
+	dir := t.TempDir()
+	var mu sync.Mutex
+	var paths []string
+	p := &Puller{
+		execRunEnv: func(env []string, name string, args ...string) error {
+			for i := 0; i < len(args)-1; i++ {
+				if args[i] == "-f" {
+					info, err := os.Stat(args[i+1])
+					if err != nil || info.Mode().Perm() != 0o600 {
+						t.Errorf("staging file must be private before write: %v, %v", info, err)
+					}
+					mu.Lock()
+					paths = append(paths, args[i+1])
+					mu.Unlock()
+					return os.WriteFile(args[i+1], []byte("PGDMP\x00data"), 0o644)
+				}
+			}
+			return nil
+		},
+		execOutput: func(name string, args ...string) ([]byte, error) { return []byte("toc"), nil },
+	}
+	remote := &RemoteConn{Host: "h", Port: "5432", User: "u", DBName: "db"}
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			path := filepath.Join(dir, "production.dump")
+			if err := p.Dump(remote, path); err != nil {
+				t.Errorf("Dump(%s): %v", path, err)
+			}
+		}()
+	}
+	wg.Wait()
+	if len(paths) != 2 || paths[0] == paths[1] {
+		t.Errorf("staging paths = %v, want two unique paths", paths)
+	}
+}
+
+func TestPuller_Refresh_RejectsDumpSymlink(t *testing.T) {
+	dir := t.TempDir()
+	dumpPath := filepath.Join(dir, "production.dump")
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, dumpPath); err != nil {
+		t.Fatal(err)
+	}
+	p, calls := testPuller(t, nil, "toc", "")
+	if err := p.Refresh("club", dumpPath, filepath.Join(dir, "production.toc"), Extensions{}); err == nil {
+		t.Fatal("expected dump symlink rejection")
+	}
+	if len(*calls) != 0 {
+		t.Errorf("pg tools ran for unsafe dump path: %v", *calls)
+	}
+	if got, err := os.ReadFile(victim); err != nil || string(got) != "keep" {
+		t.Errorf("dump symlink target changed: %q, %v", got, err)
+	}
+}
+
+func TestPuller_Dump_PreplantedPartialIsUntouched(t *testing.T) {
+	dir := t.TempDir()
+	dumpPath := filepath.Join(dir, "production.dump")
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	partial := dumpPath + ".partial"
+	if err := os.Symlink(victim, partial); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := testPuller(t, nil, "toc", "")
+	if err := p.Dump(&RemoteConn{Host: "h", Port: "5432", User: "u", DBName: "db"}, dumpPath); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(partial); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("preplanted partial changed: %v, %v", info, err)
+	}
+	if got, err := os.ReadFile(victim); err != nil || string(got) != "keep" {
+		t.Errorf("partial target changed: %q, %v", got, err)
+	}
+}
+
+func TestPuller_Dump_FailurePreservesExistingSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	dumpPath := filepath.Join(dir, "production.dump")
+	if err := os.WriteFile(dumpPath, []byte("old snapshot"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := &Puller{
+		execRunEnv: func(env []string, name string, args ...string) error {
+			for i := 0; i < len(args)-1; i++ {
+				if args[i] == "-f" {
+					return os.WriteFile(args[i+1], []byte("new snapshot"), 0o644)
+				}
+			}
+			return nil
+		},
+		execOutput: func(name string, args ...string) ([]byte, error) {
+			return nil, errors.New("corrupt archive")
+		},
+	}
+	if err := p.Dump(&RemoteConn{Host: "h", Port: "5432", User: "u", DBName: "db"}, dumpPath); err == nil {
+		t.Fatal("expected validation failure")
+	}
+	if got, err := os.ReadFile(dumpPath); err != nil || string(got) != "old snapshot" {
+		t.Errorf("existing snapshot changed after failure: %q, %v", got, err)
 	}
 }
 
@@ -123,6 +249,28 @@ func TestPuller_Dump_CorruptArchiveNotRetained(t *testing.T) {
 	}
 	if _, err := os.Stat(dumpPath + ".partial"); err == nil {
 		t.Error("partial dump must be cleaned up on validation failure")
+	}
+}
+
+func TestPuller_Refresh_SecuresDumpAndTOC(t *testing.T) {
+	dir := t.TempDir()
+	dumpPath := filepath.Join(dir, "production.dump")
+	listPath := filepath.Join(dir, "production.toc")
+	if err := os.WriteFile(dumpPath, []byte("PGDMP"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(listPath, []byte("old toc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := testPuller(t, nil, sampleTOC, "")
+	if err := p.Refresh("club", dumpPath, listPath, Extensions{Strip: []string{"pgaudit"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{dumpPath, listPath} {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Errorf("%s mode = %v, want 600", path, info)
+		}
 	}
 }
 
@@ -309,4 +457,3 @@ func containsEnv(env []string, want string) bool {
 	}
 	return false
 }
-

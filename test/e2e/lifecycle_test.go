@@ -12,6 +12,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -21,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -30,8 +32,36 @@ import (
 // path. Reproduced here (not imported) so the test asserts against the same
 // on-disk artifact the binary creates, independent of internal packages.
 func socketPath(worktreePath string) string {
+	if resolved, err := filepath.EvalSymlinks(worktreePath); err == nil {
+		worktreePath = resolved
+	}
 	h := sha256.Sum256([]byte(worktreePath))
-	return fmt.Sprintf("/tmp/gtl-%x.sock", h[:8])
+	return fmt.Sprintf("/tmp/gtl-%d/gtl-%x.sock", os.Geteuid(), h[:8])
+}
+
+func supervisorPIDPath(socket string) string {
+	return strings.TrimSuffix(socket, ".sock") + ".pid"
+}
+
+func childPIDPath(socket string) string {
+	return strings.TrimSuffix(socket, ".sock") + ".child.pid"
+}
+
+func supervisorPID(t *testing.T, socket string) string {
+	t.Helper()
+	data, err := os.ReadFile(supervisorPIDPath(socket))
+	if err != nil {
+		t.Fatalf("reading supervisor PID: %v", err)
+	}
+	pid := strings.TrimSpace(string(data))
+	if pid == "" {
+		t.Fatal("supervisor PID file was empty")
+	}
+	return pid
+}
+
+func hooksStatePath(socket string) string {
+	return strings.TrimSuffix(socket, ".sock") + ".hooks"
 }
 
 // gtlEnv builds the hermetic environment shared by every subprocess call:
@@ -220,8 +250,198 @@ func main() {
 		t.Fatalf("env file missing PORT=%d; contents:\n%s", port, envData)
 	}
 
+	// =====================================================================
+	// STEP 1b: a fresh `start --await` must leave an independently owned
+	// supervisor behind after the command exits. A later CLI invocation can
+	// stop it; this is deliberately a compiled-binary assertion because an
+	// in-process supervisor goroutine hides the original ownership bug.
+	// =====================================================================
+	sockPath := socketPath(repo)
+	t.Cleanup(func() {
+		// Register before the first detached start so an assertion in this block
+		// cannot strand a supervisor or its child outside the test process.
+		_, _ = runGtl(t, gtl, repo, env, "stop", "--kill")
+	})
+	out, err = runGtl(t, gtl, repo, env, "start", "--await", "--await-timeout", "10")
+	if err != nil {
+		t.Fatalf("fresh gtl start --await failed: %v\n%s", err, out)
+	}
+	if !portListening(port) {
+		t.Fatalf("port %d is not listening after gtl start --await exited", port)
+	}
+	if _, err := os.Stat(sockPath); err != nil {
+		t.Fatalf("supervisor socket missing after gtl start --await exited: %v", err)
+	}
+	awaitPID := supervisorPID(t, sockPath)
+	out, err = runGtl(t, gtl, repo, env, "stop")
+	if err != nil {
+		t.Fatalf("gtl stop after await failed: %v\n%s", err, out)
+	}
+	if !waitFor(10*time.Second, func() bool { return !portListening(port) }) {
+		t.Fatalf("port %d remained listening after stopping await supervisor", port)
+	}
+	if got := supervisorPID(t, sockPath); got != awaitPID {
+		t.Fatalf("plain stop replaced supervisor PID: got %s, want %s", got, awaitPID)
+	}
+	out, err = runGtl(t, gtl, repo, env, "start", "--await", "--await-timeout", "10")
+	if err != nil {
+		t.Fatalf("resuming stopped supervisor with --await failed: %v\n%s", err, out)
+	}
+	if got := supervisorPID(t, sockPath); got != awaitPID {
+		t.Fatalf("start --await replaced stopped supervisor PID: got %s, want %s", got, awaitPID)
+	}
+	if !portListening(port) {
+		t.Fatalf("port %d is not listening after resuming supervisor", port)
+	}
+	out, err = runGtl(t, gtl, repo, env, "stop", "--kill")
+	if err != nil {
+		t.Fatalf("gtl stop --kill after resumed await failed: %v\n%s", err, out)
+	}
+	if !waitFor(10*time.Second, func() bool {
+		_, err := os.Stat(sockPath)
+		return os.IsNotExist(err)
+	}) {
+		t.Fatalf("supervisor socket %s survived stop --kill after await", sockPath)
+	}
+	if portListening(port) {
+		t.Fatalf("port %d still listening after stop --kill of await supervisor", port)
+	}
+	t.Logf("STEP 1b ok: start --await exited with a controllable detached supervisor that resumes in place")
+
+	// Two fresh starts must serialize before hooks run. A slow auto hook makes
+	// the race reproducible; one invocation may report startup-in-progress or
+	// may simply await the winner, but the project hook runs only once.
+	concurrentConfig := strings.Replace(treeline, "hooks:\n", "hooks:\n  concurrent_start:\n    auto: true\n    pre_start: sleep 1; echo pre >> concurrent_hooks.log\n    post_stop: echo post >> concurrent_hooks.log\n", 1)
+	if err := os.WriteFile(filepath.Join(repo, ".treeline.yml"), []byte(concurrentConfig), 0o644); err != nil {
+		t.Fatalf("writing concurrent start config: %v", err)
+	}
+	type awaitResult struct {
+		out string
+		err error
+	}
+	results := make(chan awaitResult, 2)
+	gate := make(chan struct{})
+	for range 2 {
+		go func() {
+			<-gate
+			out, err := runGtl(t, gtl, repo, env, "start", "--await", "--await-timeout", "10")
+			results <- awaitResult{out: out, err: err}
+		}()
+	}
+	close(gate)
+	successes := 0
+	for range 2 {
+		result := <-results
+		if result.err == nil {
+			successes++
+			continue
+		}
+		if result.out == "" {
+			t.Fatalf("concurrent start failed without diagnostic: %v", result.err)
+		}
+	}
+	if successes == 0 {
+		t.Fatal("both concurrent start --await commands failed")
+	}
+	if !waitFor(10*time.Second, func() bool { return portListening(port) }) {
+		t.Fatal("concurrent start did not leave the server listening")
+	}
+	out, err = runGtl(t, gtl, repo, env, "stop", "--kill")
+	if err != nil {
+		t.Fatalf("stopping concurrent start winner: %v\n%s", err, out)
+	}
+	concurrentHooks := filepath.Join(repo, "concurrent_hooks.log")
+	if !waitFor(5*time.Second, func() bool {
+		data, err := os.ReadFile(concurrentHooks)
+		return err == nil && string(data) == "pre\npost\n"
+	}) {
+		data, err := os.ReadFile(concurrentHooks)
+		t.Fatalf("concurrent start hooks = %q, %v; want one pre/post pair", data, err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".treeline.yml"), []byte(treeline), 0o644); err != nil {
+		t.Fatalf("restoring start config after concurrent start: %v", err)
+	}
+	t.Logf("STEP 1c ok: concurrent fresh start ran one hook pair")
+
+	// A readiness timeout owns and cleans up only the detached process it just
+	// created. The socket/PID sidecars and private launch config cannot survive
+	// it and block a later foreground start.
+	timeoutConfig := strings.Replace(treeline, "  start: "+binder+" {port}", "  start: sleep 60", 1)
+	timeoutConfig = strings.Replace(timeoutConfig, "hooks:\n", "hooks:\n  await_cleanup:\n    auto: true\n    pre_start: echo pre >> await_hooks.log\n    post_stop: echo post >> await_hooks.log\n", 1)
+	if err := os.WriteFile(filepath.Join(repo, ".treeline.yml"), []byte(timeoutConfig), 0o644); err != nil {
+		t.Fatalf("writing timeout config: %v", err)
+	}
+	out, err = runGtl(t, gtl, repo, env, "start", "--await", "--await-timeout", "1")
+	if err == nil {
+		t.Fatalf("gtl start --await unexpectedly succeeded without a listening server:\n%s", out)
+	}
+	for _, path := range []string{sockPath, supervisorPIDPath(sockPath), childPIDPath(sockPath)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("await timeout left runtime artifact %s: %v\n%s", path, err, out)
+		}
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(gtlHome, ".supervisor-*.json")); len(leftovers) != 0 {
+		t.Fatalf("await timeout left private runtime config: %v", leftovers)
+	}
+	hooksLog := filepath.Join(repo, "await_hooks.log")
+	if data, err := os.ReadFile(hooksLog); err != nil || string(data) != "pre\npost\n" {
+		t.Fatalf("await timeout hooks = %q, %v; want one pre/post pair", data, err)
+	}
+
+	// Cancellation follows the same ownership rule as timeout: signal only the
+	// waiting CLI, then require its newly-created detached supervisor, config,
+	// and hook state to be gone before another command can start.
+	cancelCmd := exec.Command(gtl, "start", "--await", "--await-timeout", "60")
+	cancelCmd.Dir = repo
+	cancelCmd.Env = env
+	var cancelOutput bytes.Buffer
+	cancelCmd.Stdout = &cancelOutput
+	cancelCmd.Stderr = &cancelOutput
+	if err := cancelCmd.Start(); err != nil {
+		t.Fatalf("starting cancellable await command: %v", err)
+	}
+	if !waitFor(5*time.Second, func() bool {
+		_, err := os.Stat(sockPath)
+		return err == nil
+	}) {
+		t.Fatalf("cancellable await never created supervisor socket:\n%s", cancelOutput.String())
+	}
+	if err := cancelCmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("cancelling await command: %v", err)
+	}
+	cancelled := make(chan error, 1)
+	go func() { cancelled <- cancelCmd.Wait() }()
+	select {
+	case err := <-cancelled:
+		if err == nil {
+			t.Fatalf("cancelled await unexpectedly exited 0:\n%s", cancelOutput.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("cancelled await did not exit:\n%s", cancelOutput.String())
+	}
+	for _, path := range []string{sockPath, supervisorPIDPath(sockPath), childPIDPath(sockPath), hooksStatePath(sockPath), hooksStatePath(sockPath) + ".running"} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("cancelled await left runtime artifact %s: %v\n%s", path, err, cancelOutput.String())
+		}
+	}
+	if leftovers, _ := filepath.Glob(filepath.Join(gtlHome, ".supervisor-*.json")); len(leftovers) != 0 {
+		t.Fatalf("cancelled await left private runtime config: %v", leftovers)
+	}
+	if data, err := os.ReadFile(hooksLog); err != nil || string(data) != "pre\npost\npre\npost\n" {
+		t.Fatalf("cancelled await hooks = %q, %v; want one additional pre/post pair", data, err)
+	}
+	for _, path := range []string{hooksStatePath(sockPath), hooksStatePath(sockPath) + ".running"} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("await timeout left hook state %s: %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".treeline.yml"), []byte(treeline), 0o644); err != nil {
+		t.Fatalf("restoring start config: %v", err)
+	}
+	t.Logf("STEP 1d ok: await timeout cleaned its supervisor and runtime state")
+
 	// Ensure teardown even if a later assertion fails: kill supervisor + free port.
-	sockPath := ""
+	sockPath = ""
 	defer func() {
 		// Best-effort supervisor shutdown so no process outlives the test.
 		_, _ = runGtl(t, gtl, repo, env, "stop", "--kill")

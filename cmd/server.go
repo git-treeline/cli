@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -16,10 +19,9 @@ import (
 	"github.com/git-treeline/cli/internal/confirm"
 	"github.com/git-treeline/cli/internal/detect"
 	"github.com/git-treeline/cli/internal/format"
-	"github.com/git-treeline/cli/internal/interpolation"
+	"github.com/git-treeline/cli/internal/platform"
 	"github.com/git-treeline/cli/internal/process"
 	"github.com/git-treeline/cli/internal/registry"
-	"github.com/git-treeline/cli/internal/resolve"
 	"github.com/git-treeline/cli/internal/service"
 	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/style"
@@ -33,6 +35,7 @@ var startAwait bool
 var startAwaitTimeout int
 var startWith string
 var stopKill bool
+var superviseConfigPath string
 
 func init() {
 	startCmd.Flags().BoolVar(&startAwait, "await", false, "Block until the server is accepting connections, then exit 0")
@@ -42,6 +45,53 @@ func init() {
 	stopCmd.Flags().BoolVar(&stopKill, "kill", false, "Shut down the supervisor entirely instead of keeping it alive")
 	rootCmd.AddCommand(stopCmd)
 	rootCmd.AddCommand(restartCmd)
+	superviseCmd.Flags().StringVar(&superviseConfigPath, "config", "", "private supervisor runtime configuration")
+	rootCmd.AddCommand(superviseCmd)
+}
+
+// detachedSupervisorConfig is written to an owner-only temporary file instead
+// of re-exec argv: resolved environment values commonly include credentials.
+type detachedSupervisorConfig struct {
+	CommandTemplate string            `json:"command_template"`
+	Dir             string            `json:"dir"`
+	SocketPath      string            `json:"socket_path"`
+	Port            int               `json:"port"`
+	Env             map[string]string `json:"env"`
+}
+
+var superviseCmd = &cobra.Command{
+	Use:    "__supervise",
+	Hidden: true,
+	Args:   cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if superviseConfigPath == "" {
+			return fmt.Errorf("missing supervisor runtime configuration")
+		}
+		data, err := os.ReadFile(superviseConfigPath)
+		if err != nil {
+			return fmt.Errorf("reading supervisor runtime configuration: %w", err)
+		}
+		var runtime detachedSupervisorConfig
+		if err := json.Unmarshal(data, &runtime); err != nil {
+			return fmt.Errorf("decoding supervisor runtime configuration: %w", err)
+		}
+		if runtime.CommandTemplate == "" || runtime.Dir == "" || runtime.SocketPath == "" {
+			return fmt.Errorf("invalid supervisor runtime configuration")
+		}
+		// The parent only removes this file if it knows the re-exec never claimed
+		// it. Once decoded, this process owns hooks and lifecycle cleanup.
+		if err := os.Remove(superviseConfigPath); err != nil {
+			return fmt.Errorf("removing supervisor runtime configuration: %w", err)
+		}
+
+		sv := supervisor.New(runtime.CommandTemplate, runtime.Dir, runtime.SocketPath)
+		sv.CommandTemplate = runtime.CommandTemplate
+		sv.Env = runtime.Env
+		sv.Port = runtime.Port
+		runErr := sv.Run()
+		runPostStopHooks(runtime.SocketPath, config.LoadProjectConfig(runtime.Dir), runtime.Port, runtime.Dir)
+		return runErr
+	},
 }
 
 var startCmd = &cobra.Command{
@@ -62,16 +112,20 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 		absPath, _ := filepath.Abs(cwd)
 		pc := config.LoadProjectConfig(absPath)
 
-		startCommand := pc.StartCommand()
-		if startCommand == "" {
+		startTemplate := pc.StartCommand()
+		if startTemplate == "" {
 			return cliErr(cmd, errNoStartCommand())
+		}
+
+		if err := checkLegacySupervisor(absPath); err != nil {
+			return cliErr(cmd, err)
 		}
 
 		if err := ensureAllocation(cmd, absPath); err != nil {
 			return err
 		}
 
-		warnPortWiring(startCommand, absPath)
+		warnPortWiring(startTemplate, absPath)
 		if service.IsRunning() {
 			warnRouterVersionMismatch()
 		}
@@ -84,12 +138,11 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 		sockPath := supervisor.SocketPath(absPath)
 		port := resolvePort(absPath)
 
-		startCommand = interpolateCommand(startCommand, port)
-
 		// Resume path — supervisor already running, no hooks re-fired
 		resp, err := supervisor.Send(sockPath, "status")
 		if err == nil {
-			if resp == "running" {
+			switch resp {
+			case "running":
 				// --await is for scripts: just wait for readiness, no prompt.
 				if startAwait {
 					return cliErr(cmd, awaitReady(sockPath))
@@ -106,7 +159,7 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 					if len(activeHooks) > 0 {
 						fmt.Fprintln(os.Stderr, style.Warnf("--with ignored: supervisor already running. Hooks only run on fresh start."))
 					}
-					return cliErr(cmd, restartViaSupervisor(sockPath))
+					return cliErr(cmd, restartViaSupervisor(sockPath, absPath))
 				case runningActionMove:
 					fmt.Println(style.Dimf("Stopping server in the other terminal..."))
 					if err := stopOtherSupervisor(sockPath, 15*time.Second); err != nil {
@@ -121,16 +174,26 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 					}
 					// Fall through to the fresh-start path below.
 				}
-			} else {
-				// Supervisor alive but server stopped — the original terminal is
-				// likely gone (e.g. app restart). Kill the orphaned supervisor and
-				// start fresh here so output appears in the current terminal.
-				if err := stopOtherSupervisor(sockPath, 15*time.Second); err != nil {
-					return cliErr(cmd, err)
-				}
-				fmt.Println(style.Dimf("Restarting in this terminal..."))
-				// Fall through to fresh start below.
+			case "stopped":
+				return cliErr(cmd, resumeSupervisor(sockPath, absPath))
 			}
+		}
+
+		unlock, err := lockServerStartup(sockPath)
+		if err != nil {
+			return cliErr(cmd, err)
+		}
+		defer unlock()
+		// Another start may have completed between the first probe and the lock.
+		// Reuse its supervisor before running hooks or touching shared hook state.
+		if resp, err := supervisor.Send(sockPath, "status"); err == nil {
+			if resp == "stopped" {
+				return cliErr(cmd, resumeSupervisor(sockPath, absPath))
+			}
+			if startAwait && resp == "running" {
+				return cliErr(cmd, awaitReady(sockPath))
+			}
+			return cliErr(cmd, errServerAlreadyRunning())
 		}
 
 		// Fresh start — check for project name drift before proceeding
@@ -142,11 +205,14 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 			return cliErr(cmd, err)
 		}
 
-		if err := runPreStartHooks(activeHooks, port, absPath); err != nil {
-			return cliErr(cmd, err)
-		}
 		if len(activeHooks) > 0 {
-			writeHooksState(sockPath, activeHooks)
+			if err := writeHooksState(sockPath, activeHooks); err != nil {
+				return cliErr(cmd, fmt.Errorf("saving active hooks: %w", err))
+			}
+		}
+		if err := runPreStartHooks(activeHooks, port, absPath); err != nil {
+			cleanHooksState(sockPath)
+			return cliErr(cmd, err)
 		}
 
 		uc := config.LoadUserConfig("")
@@ -158,43 +224,10 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 		printLocalAndRouter(uc, pc.Project(), branch, port)
 
 		if startAwait {
-			sv := supervisor.New(startCommand, absPath, sockPath)
-			sv.Env = resolveEnvVars(pc, absPath)
-			sv.Port = port
-			svErr := make(chan error, 1)
-			go func() { svErr <- sv.Run() }()
-
-			for i := 0; i < 50; i++ {
-				select {
-				case err := <-svErr:
-					return cliErr(cmd, &CliError{
-						Message: fmt.Sprintf("Supervisor exited before ready: %s", err),
-						Hint:    "Check commands.start in .treeline.yml — the process crashed on startup.",
-					})
-				default:
-				}
-				time.Sleep(100 * time.Millisecond)
-				if _, err := os.Stat(sockPath); err == nil {
-					break
-				}
-			}
-
-			select {
-			case err := <-svErr:
-				return cliErr(cmd, &CliError{
-					Message: fmt.Sprintf("Supervisor exited before ready: %s", err),
-					Hint:    "Check commands.start in .treeline.yml — the process crashed on startup.",
-				})
-			default:
-			}
-
-			if err := awaitReady(sockPath); err != nil {
-				return cliErr(cmd, err)
-			}
-			return nil
+			return cliErr(cmd, startAwaitDetached(cmd.Context(), startTemplate, absPath, sockPath, port, resolveEnvVars(pc, absPath), pc))
 		}
 
-		sv := supervisor.New(startCommand, absPath, sockPath)
+		sv := supervisor.New(startTemplate, absPath, sockPath)
 		sv.Env = resolveEnvVars(pc, absPath)
 		sv.Port = port
 		svErr := sv.Run()
@@ -204,6 +237,253 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 
 		return svErr
 	},
+}
+
+func checkLegacySupervisor(dir string) error {
+	present, err := supervisor.LegacyPresent(dir)
+	if err != nil {
+		return err
+	}
+	if present {
+		return &CliError{
+			Message: "An older supervisor is using shared temporary state.",
+			Hint:    "Run 'gtl stop --kill' from this worktree, then 'gtl start' to upgrade it.",
+		}
+	}
+	return nil
+}
+
+func lockServerStartup(socket string) (func(), error) {
+	if err := supervisor.EnsureSocketDir(socket); err != nil {
+		return nil, err
+	}
+	lock, err := supervisor.OpenStateLock(socket + ".startup.lock")
+	if err != nil {
+		return nil, fmt.Errorf("opening server startup lock: %w", err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lock.Close()
+		return nil, &CliError{Message: "Server startup is already in progress.", Hint: "Wait for startup to finish, then retry 'gtl start --await'."}
+	}
+	return func() {
+		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		_ = lock.Close()
+	}, nil
+}
+
+func resumeSupervisor(socket, dir string) error {
+	env, err := setup.SyncRuntimeEnv(dir, config.LoadUserConfig(""))
+	if err != nil {
+		return fmt.Errorf("syncing server environment: %w", err)
+	}
+	if _, err := supervisor.ConfigureAndSend(socket, "start", env, resolvePort(dir)); err != nil {
+		return err
+	}
+	if startAwait {
+		return awaitReady(socket)
+	}
+	fmt.Println("Server resumed in its original supervisor.")
+	return nil
+}
+
+type detachedSupervisor struct {
+	done     <-chan struct{}
+	socket   string
+	config   string
+	logPath  string
+	ownerPID int
+}
+
+// startAwaitDetached starts a private supervisor process for the script-only
+// --await flow. The foreground command retains the terminal-owned supervisor
+// contract; only this path is detached, with its logs retained privately.
+func startAwaitDetached(parent context.Context, commandTemplate, dir, socket string, port int, env map[string]string, pc *config.ProjectConfig) error {
+	ctx, stop := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
+
+	runtime := detachedSupervisorConfig{
+		CommandTemplate: commandTemplate,
+		Dir:             dir,
+		SocketPath:      socket,
+		Port:            port,
+		Env:             env,
+	}
+	detached, err := launchDetachedSupervisor(runtime)
+	if err != nil {
+		runPostStopHooks(socket, pc, port, dir)
+		return err
+	}
+
+	cleanup := func() {
+		cleanupDetachedSupervisor(detached)
+		// claimHooksState makes this safe even if the child is simultaneously
+		// completing its normal post-stop path.
+		runPostStopHooks(socket, pc, port, dir)
+	}
+
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-detached.done:
+			cleanup()
+			return &CliError{Message: "Supervisor exited before ready.", Hint: fmt.Sprintf("Check %s for startup output.", detached.logPath)}
+		case <-ctx.Done():
+			cleanup()
+			return ctx.Err()
+		case <-deadline.C:
+			cleanup()
+			return &CliError{Message: "Supervisor did not start.", Hint: fmt.Sprintf("Check %s for startup output.", detached.logPath)}
+		case <-tick.C:
+			if _, err := os.Stat(detached.config); !os.IsNotExist(err) || !supervisorOwnedBy(socket, detached.ownerPID) {
+				continue
+			}
+			goto ready
+		}
+	}
+
+ready:
+	fmt.Fprintf(os.Stderr, "Supervisor logs: %s\n", detached.logPath)
+	result := make(chan error, 1)
+	go func() { result <- awaitReady(socket) }()
+	select {
+	case err := <-result:
+		if err == nil {
+			return nil
+		}
+		cleanup()
+		return err
+	case <-ctx.Done():
+		cleanup()
+		return ctx.Err()
+	}
+}
+
+func launchDetachedSupervisor(runtime detachedSupervisorConfig) (*detachedSupervisor, error) {
+	if err := platform.EnsureConfigDir(); err != nil {
+		return nil, fmt.Errorf("creating supervisor state directory: %w", err)
+	}
+	configFile, err := os.CreateTemp(platform.ConfigDir(), ".supervisor-*.json")
+	if err != nil {
+		return nil, fmt.Errorf("creating supervisor runtime configuration: %w", err)
+	}
+	configPath := configFile.Name()
+	cleanupConfig := func() {
+		_ = configFile.Close()
+		_ = os.Remove(configPath)
+	}
+	if err := configFile.Chmod(platform.PrivateFileMode); err != nil {
+		cleanupConfig()
+		return nil, fmt.Errorf("securing supervisor runtime configuration: %w", err)
+	}
+	data, err := json.Marshal(runtime)
+	if err != nil {
+		cleanupConfig()
+		return nil, fmt.Errorf("encoding supervisor runtime configuration: %w", err)
+	}
+	if _, err := configFile.Write(data); err != nil {
+		cleanupConfig()
+		return nil, fmt.Errorf("writing supervisor runtime configuration: %w", err)
+	}
+	if err := configFile.Close(); err != nil {
+		_ = os.Remove(configPath)
+		return nil, fmt.Errorf("closing supervisor runtime configuration: %w", err)
+	}
+
+	logPath := detachedSupervisorLogPath(runtime.SocketPath)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, platform.PrivateFileMode)
+	if err != nil {
+		_ = os.Remove(configPath)
+		return nil, fmt.Errorf("opening supervisor log: %w", err)
+	}
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		_ = logFile.Close()
+		_ = os.Remove(configPath)
+		return nil, fmt.Errorf("opening null stdin for supervisor: %w", err)
+	}
+
+	executable, err := os.Executable()
+	if err != nil {
+		_ = devNull.Close()
+		_ = logFile.Close()
+		_ = os.Remove(configPath)
+		return nil, fmt.Errorf("finding current executable: %w", err)
+	}
+	cmd := exec.Command(executable, "__supervise", "--config", configPath)
+	cmd.Dir = runtime.Dir
+	cmd.Stdin = devNull
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		_ = devNull.Close()
+		_ = logFile.Close()
+		_ = os.Remove(configPath)
+		return nil, fmt.Errorf("starting detached supervisor: %w", err)
+	}
+	_ = devNull.Close()
+	_ = logFile.Close()
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
+	return &detachedSupervisor{done: done, socket: runtime.SocketPath, config: configPath, logPath: logPath, ownerPID: cmd.Process.Pid}, nil
+}
+
+func detachedSupervisorLogPath(socket string) string {
+	name := strings.TrimSuffix(filepath.Base(socket), ".sock")
+	return filepath.Join(platform.ConfigDir(), name+".log")
+}
+
+func supervisorOwnedBy(socket string, pid int) bool {
+	if pid <= 1 {
+		return false
+	}
+	data, err := supervisor.ReadStateFile(supervisor.PidPath(socket))
+	if err != nil {
+		return false
+	}
+	stored, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	return err == nil && stored == pid
+}
+
+// cleanupDetachedSupervisor touches only the re-exec PID this invocation
+// created. The PID-file match prevents a failed fresh start from unlinking or
+// signalling a supervisor another invocation won concurrently.
+func cleanupDetachedSupervisor(detached *detachedSupervisor) {
+	defer func() { _ = os.Remove(detached.config) }()
+	owned := supervisorOwnedBy(detached.socket, detached.ownerPID)
+	if owned {
+		_, _ = supervisor.SendWithTimeout(detached.socket, "shutdown", 2*time.Second)
+	}
+	select {
+	case <-detached.done:
+		return
+	case <-time.After(2 * time.Second):
+	}
+	if detached.ownerPID > 1 {
+		_ = syscall.Kill(-detached.ownerPID, syscall.SIGTERM)
+	}
+	if supervisorOwnedBy(detached.socket, detached.ownerPID) {
+		reapChildGroup(detached.socket)
+	}
+	select {
+	case <-detached.done:
+		return
+	case <-time.After(2 * time.Second):
+	}
+	if detached.ownerPID > 1 {
+		_ = syscall.Kill(-detached.ownerPID, syscall.SIGKILL)
+	}
+	if supervisorOwnedBy(detached.socket, detached.ownerPID) {
+		reapChildGroup(detached.socket)
+		_ = os.Remove(detached.socket)
+		_ = os.Remove(supervisor.PidPath(detached.socket))
+	}
 }
 
 var stopCmd = &cobra.Command{
@@ -226,6 +506,21 @@ supervisor entirely.`,
 		resp, err := supervisor.Send(sockPath, command)
 		if err != nil {
 			if stopKill {
+				if _, statErr := os.Lstat(sockPath); os.IsNotExist(statErr) {
+					cwd, cwdErr := os.Getwd()
+					if cwdErr != nil {
+						return cwdErr
+					}
+					if present, legacyErr := supervisor.LegacyPresent(cwd); legacyErr != nil {
+						return cliErr(cmd, legacyErr)
+					} else if present {
+						if err := supervisor.ShutdownLegacy(cwd); err != nil {
+							return cliErr(cmd, err)
+						}
+						fmt.Println("Older supervisor shut down. Run 'gtl start' to use private supervisor state.")
+						return nil
+					}
+				}
 				if killed, killErr := forceKillSupervisor(sockPath); killed {
 					fmt.Println("Supervisor force-killed (was unresponsive).")
 					return nil
@@ -268,23 +563,14 @@ var restartCmd = &cobra.Command{
 		pc := config.LoadProjectConfig(absPath)
 		uc := config.LoadUserConfig("")
 
-		if err := setup.RegenerateEnvFile(absPath, uc); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: env sync skipped: %s\n", err)
+		envVars, err := setup.SyncRuntimeEnv(absPath, uc)
+		if err != nil {
+			return cliErr(cmd, &CliError{
+				Message: fmt.Sprintf("Could not sync environment: %s", err),
+				Hint:    "Fix the .treeline.yml environment or resolve target, then restart again.",
+			})
 		}
-
-		envVars := resolveEnvVars(pc, absPath)
-		if len(envVars) > 0 {
-			var pairs []string
-			for k, v := range envVars {
-				pairs = append(pairs, k+"="+v)
-			}
-			payload := "update-env:" + strings.Join(pairs, "\x00")
-			if _, err := supervisor.Send(sockPath, payload); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: could not update supervisor env: %s\n", err)
-			}
-		}
-
-		resp, err := supervisor.Send(sockPath, "restart")
+		resp, err := supervisor.ConfigureAndSend(sockPath, "restart", envVars, resolvePort(absPath))
 		if err != nil {
 			return cliErr(cmd, &CliError{
 				Message: fmt.Sprintf("Could not reach supervisor: %s", err),
@@ -353,23 +639,13 @@ func ensureAllocation(cmd *cobra.Command, absPath string) error {
 }
 
 func resolveEnvVars(pc *config.ProjectConfig, absPath string) map[string]string {
-	reg := registry.New("")
-	alloc := reg.Find(absPath)
-	if alloc == nil {
-		return nil
-	}
 	uc := config.LoadUserConfig("")
-	interpAlloc := interpolation.Allocation(alloc)
-	branch := worktree.CurrentBranch(absPath)
-	setup.InjectRouterTokens(interpAlloc, pc.Project(), branch, uc.RouterDomain(), uc.TunnelDomain(""))
-	redisURL := interpolation.BuildRedisURL(uc.RedisURL(), interpAlloc)
-	r := resolve.New(reg, absPath, branch)
-	result, err := setup.BuildEnvVarsWithResolver(pc, interpAlloc, redisURL, r.Resolve)
+	result, err := setup.ResolveRuntimeEnv(absPath, uc)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", err)
 		fmt.Fprintf(os.Stderr, "  {resolve:...} tokens will not be expanded in process env.\n")
-		fmt.Fprintf(os.Stderr, "  Your app should read from the env file (written correctly by gtl setup).\n")
-		return setup.BuildEnvVars(pc, interpAlloc, redisURL)
+		fmt.Fprintf(os.Stderr, "  Resolve the missing target, then restart the server.\n")
+		return nil
 	}
 	return result
 }
@@ -400,20 +676,7 @@ func resolvePort(absPath string) int {
 // command string. This lets frameworks that ignore PORT env (Vite, Angular,
 // Expo) receive the allocated port via CLI flags.
 func interpolateCommand(cmd string, port int) string {
-	if !strings.Contains(cmd, "{port") {
-		return cmd
-	}
-	cmd = strings.ReplaceAll(cmd, "{port}", fmt.Sprintf("%d", port))
-
-	inc := 1
-	for i := 2; i <= 10; i++ {
-		token := fmt.Sprintf("{port_%d}", i)
-		if strings.Contains(cmd, token) {
-			cmd = strings.ReplaceAll(cmd, token, fmt.Sprintf("%d", port+inc))
-		}
-		inc++
-	}
-	return cmd
+	return supervisor.InterpolateCommand(cmd, port)
 }
 
 // warnPortWiring checks whether the start command is missing {port} for a
@@ -515,7 +778,7 @@ func runPreStartHooks(hooks []startHookEntry, port int, dir string) error {
 // runPostStopHooks reads the hooks state file, re-reads the project config,
 // and runs post_stop commands in reverse order. Errors are logged, not fatal.
 func runPostStopHooks(sockPath string, pc *config.ProjectConfig, port int, dir string) {
-	names := readHooksState(sockPath)
+	names := claimHooksState(sockPath)
 	if len(names) == 0 {
 		return
 	}
@@ -551,16 +814,39 @@ func hooksStatePath(sockPath string) string {
 	return strings.TrimSuffix(sockPath, ".sock") + ".hooks"
 }
 
-func writeHooksState(sockPath string, hooks []startHookEntry) {
+func writeHooksState(sockPath string, hooks []startHookEntry) error {
 	names := make([]string, len(hooks))
 	for i, h := range hooks {
 		names[i] = h.Name
 	}
-	_ = os.WriteFile(hooksStatePath(sockPath), []byte(strings.Join(names, "\n")), 0o600)
+	return supervisor.WriteStateFile(hooksStatePath(sockPath), []byte(strings.Join(names, "\n")))
 }
 
 func readHooksState(sockPath string) []string {
-	data, err := os.ReadFile(hooksStatePath(sockPath))
+	data, err := supervisor.ReadStateFile(hooksStatePath(sockPath))
+	if err != nil {
+		return nil
+	}
+	raw := strings.TrimSpace(string(data))
+	if raw == "" {
+		return nil
+	}
+	return strings.Split(raw, "\n")
+}
+
+// claimHooksState atomically transfers post-stop hook ownership to one caller.
+// A detached --await parent may need emergency cleanup while its re-exec is
+// exiting; rename ensures only one of them can execute the matching hooks.
+func claimHooksState(sockPath string) []string {
+	path := hooksStatePath(sockPath)
+	claimed := path + ".running"
+	if _, err := supervisor.ReadStateFile(path); err != nil {
+		return nil
+	}
+	if err := os.Rename(path, claimed); err != nil {
+		return nil
+	}
+	data, err := supervisor.ReadStateFile(claimed)
 	if err != nil {
 		return nil
 	}
@@ -572,7 +858,11 @@ func readHooksState(sockPath string) []string {
 }
 
 func cleanHooksState(sockPath string) {
+	if err := supervisor.ValidateSocketDir(sockPath); err != nil {
+		return
+	}
 	_ = os.Remove(hooksStatePath(sockPath))
+	_ = os.Remove(hooksStatePath(sockPath) + ".running")
 }
 
 // stdinIsTTY reports whether stdin is connected to a terminal device.
@@ -626,12 +916,15 @@ func promptRunningElsewhere(reader io.Reader) runningAction {
 // (false, err) if the kill fails.
 func forceKillSupervisor(sockPath string) (bool, error) {
 	pidPath := supervisor.PidPath(sockPath)
-	data, err := os.ReadFile(pidPath)
-	if err != nil {
+	data, err := supervisor.ReadStateFile(pidPath)
+	if os.IsNotExist(err) {
 		return false, nil
 	}
+	if err != nil {
+		return false, err
+	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
+	if err != nil || pid <= 1 {
 		return false, nil
 	}
 	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
@@ -652,7 +945,7 @@ func forceKillSupervisor(sockPath string) (bool, error) {
 // or a pgid that could target the session/init, is a no-op.
 func reapChildGroup(sockPath string) {
 	childPidPath := supervisor.ChildPidPath(sockPath)
-	data, err := os.ReadFile(childPidPath)
+	data, err := supervisor.ReadStateFile(childPidPath)
 	if err != nil {
 		return
 	}
@@ -691,8 +984,12 @@ func stopOtherSupervisor(sockPath string, timeout time.Duration) error {
 
 // restartViaSupervisor sends a restart over the socket. Used when the user
 // picks "restart in place" from the running-elsewhere prompt.
-func restartViaSupervisor(sockPath string) error {
-	resp, err := supervisor.Send(sockPath, "restart")
+func restartViaSupervisor(sockPath, dir string) error {
+	env, err := setup.SyncRuntimeEnv(dir, config.LoadUserConfig(""))
+	if err != nil {
+		return fmt.Errorf("syncing server environment: %w", err)
+	}
+	resp, err := supervisor.ConfigureAndSend(sockPath, "restart", env, resolvePort(dir))
 	if err != nil {
 		return &CliError{
 			Message: fmt.Sprintf("Could not reach supervisor: %s", err),

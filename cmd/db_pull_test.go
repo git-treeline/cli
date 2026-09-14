@@ -35,6 +35,44 @@ func TestManifestRoundTrip(t *testing.T) {
 	if m.Envs["production"].Dump != "production.dump" {
 		t.Errorf("production entry not retained: %+v", m.Envs["production"])
 	}
+	info, err := os.Stat(manifestPath(dir))
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("manifest mode = %v, want 600", info)
+	}
+}
+
+func TestManifestWriteTightensExistingModeAndRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	path := manifestPath(dir)
+	if err := os.WriteFile(path, []byte(`{"last":"old"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeManifestEntry(dir, "production", manifestEntry{Dump: "production.dump"}); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("updated manifest mode = %v, want 600", info)
+	}
+
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeManifestEntry(dir, "staging", manifestEntry{Dump: "staging.dump"}); err == nil {
+		t.Fatal("expected manifest symlink rejection")
+	}
+	if got := manifestLast(dir); got != "" {
+		t.Errorf("unsafe manifest must not be read, got last %q", got)
+	}
+	if got, err := os.ReadFile(victim); err != nil || string(got) != "keep" {
+		t.Errorf("manifest symlink target changed: %q, %v", got, err)
+	}
 }
 
 func TestEnsureDumpDir(t *testing.T) {
@@ -53,9 +91,55 @@ func TestEnsureDumpDir(t *testing.T) {
 	if strings.TrimSpace(string(gi)) != "*" {
 		t.Errorf(".gitignore = %q, want *", gi)
 	}
+	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o700 {
+		t.Errorf("dump directory mode = %v, want 700", info)
+	}
 	// idempotent
 	if _, err := ensureDumpDir(wt); err != nil {
 		t.Fatalf("second call failed: %v", err)
+	}
+}
+
+func TestEnsureDumpDir_TightensExistingAndKeepsWorktreeAlias(t *testing.T) {
+	wt := t.TempDir()
+	dir := dumpDir(wt)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureDumpDir(wt); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o700 {
+		t.Errorf("existing dump directory mode = %v, want 700", info)
+	}
+
+	alias := filepath.Join(t.TempDir(), "worktree-alias")
+	if err := os.Symlink(wt, alias); err != nil {
+		t.Fatal(err)
+	}
+	aliasDir, err := ensureDumpDir(alias)
+	if err != nil {
+		t.Fatalf("symlinked worktree path should work: %v", err)
+	}
+	if aliasDir != filepath.Join(alias, "tmp", "gtl-db") {
+		t.Errorf("alias dump dir = %q", aliasDir)
+	}
+}
+
+func TestEnsureDumpDir_RejectsDumpDirectorySymlink(t *testing.T) {
+	wt := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(wt, "tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	if err := os.Symlink(target, dumpDir(wt)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureDumpDir(wt); err == nil {
+		t.Fatal("expected dump directory symlink rejection")
 	}
 }
 
@@ -153,6 +237,7 @@ func TestDBPull_DryRun_NoSideEffects(t *testing.T) {
 	wt := t.TempDir()
 	if err := os.WriteFile(filepath.Join(wt, ".treeline.yml"), []byte(`
 project: club
+start_command: echo legacy
 database:
   adapter: postgresql
   template: club_development
@@ -164,6 +249,11 @@ database:
 		t.Fatal(err)
 	}
 	writeRegistry(t, wt)
+	configPath := filepath.Join(wt, ".treeline.yml")
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("STAGING_DATABASE_URL", "postgres://u:p@db.example.com:5432/club_staging")
 	t.Chdir(wt)
 
@@ -184,6 +274,13 @@ database:
 	}
 	if _, err := os.Stat(filepath.Join(wt, "tmp", "gtl-db")); err == nil {
 		t.Error("dry-run must not create tmp/gtl-db")
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Error("dry-run must not migrate project configuration")
 	}
 }
 

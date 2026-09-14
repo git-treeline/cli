@@ -22,14 +22,37 @@ import (
 
 var ansiRE = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
-// --- updateOrAppend tests ---
+func createSetupSQLiteFixture(t *testing.T, path string, value int) {
+	t.Helper()
+	cmd := exec.Command("sqlite3", path, fmt.Sprintf("CREATE TABLE widgets (value INTEGER); INSERT INTO widgets VALUES (%d);", value))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("creating SQLite fixture: %v: %s", err, out)
+	}
+}
 
-func TestUpdateOrAppend_CreatesNew(t *testing.T) {
+func setupSQLiteValue(t *testing.T, path string) string {
+	t.Helper()
+	out, err := exec.Command("sqlite3", path, "SELECT value FROM widgets").CombinedOutput()
+	if err != nil {
+		t.Fatalf("querying SQLite fixture: %v: %s", err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// --- managed env writer tests ---
+
+func isolateEnvOwnership(t *testing.T) {
+	t.Helper()
+	t.Setenv("GTL_HOME", filepath.Join(t.TempDir(), "gtl-home"))
+}
+
+func TestWriteManagedEnv_CreatesNew(t *testing.T) {
+	isolateEnvOwnership(t)
 	dir := t.TempDir()
 	f := filepath.Join(dir, ".env")
 	_ = os.WriteFile(f, []byte("EXISTING=hello\n"), 0o644)
 
-	if err := updateOrAppend(f, "PORT", "3010"); err != nil {
+	if err := writeManagedEnv(f, map[string]string{"PORT": "3010"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -43,12 +66,13 @@ func TestUpdateOrAppend_CreatesNew(t *testing.T) {
 	}
 }
 
-func TestUpdateOrAppend_UpdatesExisting(t *testing.T) {
+func TestWriteManagedEnv_UpdatesExisting(t *testing.T) {
+	isolateEnvOwnership(t)
 	dir := t.TempDir()
 	f := filepath.Join(dir, ".env")
 	_ = os.WriteFile(f, []byte("PORT=3000\nOTHER=val\n"), 0o644)
 
-	if err := updateOrAppend(f, "PORT", "3010"); err != nil {
+	if err := writeManagedEnv(f, map[string]string{"PORT": "3010"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -65,11 +89,35 @@ func TestUpdateOrAppend_UpdatesExisting(t *testing.T) {
 	}
 }
 
-func TestUpdateOrAppend_CreatesFileIfMissing(t *testing.T) {
+func TestWriteManagedEnv_PreservesDollarValuesOnRepeatedRuns(t *testing.T) {
+	isolateEnvOwnership(t)
 	dir := t.TempDir()
 	f := filepath.Join(dir, ".env")
+	value := `abc$def${ghi}\\quoted"`
 
-	if err := updateOrAppend(f, "PORT", "3010"); err != nil {
+	if err := writeManagedEnv(f, map[string]string{"TOKEN": value}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeManagedEnv(f, map[string]string{"TOKEN": value}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `TOKEN="abc$def${ghi}\\\\quoted\""` + "\n"
+	if got := string(data); got != want {
+		t.Errorf("env file = %q, want %q", got, want)
+	}
+}
+
+func TestWriteManagedEnv_CreatesFileIfMissing(t *testing.T) {
+	isolateEnvOwnership(t)
+	dir := t.TempDir()
+	f := filepath.Join(dir, "config", ".env")
+
+	if err := writeManagedEnv(f, map[string]string{"PORT": "3010"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -77,6 +125,99 @@ func TestUpdateOrAppend_CreatesFileIfMissing(t *testing.T) {
 	if !strings.Contains(string(data), `PORT="3010"`) {
 		t.Errorf("expected PORT=\"3010\" in new file, got:\n%s", string(data))
 	}
+	assertFileMode(t, f, 0o600)
+}
+
+func TestWriteManagedEnvTightensExistingFileWithoutContentChange(t *testing.T) {
+	isolateEnvOwnership(t)
+	f := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(f, []byte("PORT=\"3010\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeManagedEnv(f, map[string]string{"PORT": "3010"}); err != nil {
+		t.Fatal(err)
+	}
+
+	assertFileMode(t, f, 0o600)
+	after, err := os.Stat(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, after) {
+		t.Error("expected broad env file to be atomically replaced")
+	}
+}
+
+func TestWriteManagedEnvLeavesUnchangedPrivateFileUntouched(t *testing.T) {
+	isolateEnvOwnership(t)
+	f := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(f, []byte("PORT=\"3010\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeManagedEnv(f, map[string]string{"PORT": "3010"}); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := os.Stat(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Error("unchanged private env file was replaced")
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Errorf("unchanged private env file modtime changed: before=%s after=%s", before.ModTime(), after.ModTime())
+	}
+}
+
+func TestWriteManagedEnvKeepsPrivateModeWhenUpdating(t *testing.T) {
+	isolateEnvOwnership(t)
+	f := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(f, []byte("PORT=3000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeManagedEnv(f, map[string]string{"PORT": "3010"}); err != nil {
+		t.Fatal(err)
+	}
+
+	assertFileMode(t, f, 0o600)
+}
+
+func TestWriteManagedEnvRejectsSymlinkDestination(t *testing.T) {
+	isolateEnvOwnership(t)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.env")
+	envPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(target, []byte("TARGET=untouched\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, envPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeManagedEnv(envPath, map[string]string{"PORT": "3010"}); err == nil {
+		t.Fatal("expected symlink destination to be rejected")
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "TARGET=untouched\n" {
+		t.Errorf("symlink target changed: %q", got)
+	}
+	assertFileMode(t, target, 0o644)
 }
 
 // --- RegenerateEnvFile tests ---
@@ -99,6 +240,7 @@ func testSetup(t *testing.T, yamlContent string) (*Setup, string, string) {
 	t.Helper()
 
 	dir := t.TempDir()
+	t.Setenv("GTL_HOME", filepath.Join(dir, "gtl-home"))
 	mainRepo := filepath.Join(dir, "main")
 	worktree := filepath.Join(dir, "worktree")
 	_ = os.MkdirAll(mainRepo, 0o755)
@@ -154,6 +296,7 @@ env:
 	if !strings.Contains(content, `PORT="3010"`) {
 		t.Errorf("expected interpolated PORT, got:\n%s", content)
 	}
+	assertFileMode(t, filepath.Join(worktree, ".env.local"), 0o600)
 }
 
 func TestWriteEnvFile_PreservesUserEditsOnRerun(t *testing.T) {
@@ -230,7 +373,9 @@ copy_files:
 `)
 	_ = os.WriteFile(filepath.Join(mainRepo, "secret.key"), []byte("supersecret"), 0o644)
 
-	s.copyFiles()
+	if err := s.copyFiles(); err != nil {
+		t.Fatal(err)
+	}
 
 	data, err := os.ReadFile(filepath.Join(worktree, "secret.key"))
 	if err != nil {
@@ -248,7 +393,9 @@ copy_files:
   - does_not_exist.key
 `)
 
-	s.copyFiles()
+	if err := s.copyFiles(); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := os.Stat(filepath.Join(worktree, "does_not_exist.key")); err == nil {
 		t.Error("expected missing source file to be skipped")
@@ -264,7 +411,9 @@ copy_files:
 	_ = os.MkdirAll(filepath.Join(mainRepo, "config"), 0o755)
 	_ = os.WriteFile(filepath.Join(mainRepo, "config", "master.key"), []byte("key"), 0o644)
 
-	s.copyFiles()
+	if err := s.copyFiles(); err != nil {
+		t.Fatal(err)
+	}
 
 	data, err := os.ReadFile(filepath.Join(worktree, "config", "master.key"))
 	if err != nil {
@@ -272,6 +421,113 @@ copy_files:
 	}
 	if string(data) != "key" {
 		t.Errorf("expected 'key', got %q", string(data))
+	}
+}
+
+func TestCopyFilesPreservesSourcePermissions(t *testing.T) {
+	s, mainRepo, worktree := testSetup(t, `
+project: test
+copy_files:
+  - config/master.key
+  - bin/setup
+`)
+	if err := os.MkdirAll(filepath.Join(mainRepo, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(mainRepo, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	masterKey := filepath.Join(mainRepo, "config", "master.key")
+	setupScript := filepath.Join(mainRepo, "bin", "setup")
+	if err := os.WriteFile(masterKey, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(setupScript, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktree, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "config", "master.key"), []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.copyFiles(); err != nil {
+		t.Fatal(err)
+	}
+
+	assertFileMode(t, filepath.Join(worktree, "config", "master.key"), 0o600)
+	assertFileMode(t, filepath.Join(worktree, "bin", "setup"), 0o755)
+}
+
+func TestCopyFilesReplacesSymlinkDestinationWithoutTouchingTarget(t *testing.T) {
+	s, mainRepo, worktree := testSetup(t, `
+project: test
+copy_files:
+  - config/master.key
+`)
+	if err := os.MkdirAll(filepath.Join(mainRepo, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mainRepo, "config", "master.key"), []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktree, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "outside-worktree")
+	if err := os.WriteFile(target, []byte("untouched"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(worktree, "config", "master.key")
+	if err := os.Symlink(target, dest); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.copyFiles(); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "untouched" {
+		t.Errorf("symlink target changed: %q", got)
+	}
+	info, err := os.Lstat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Error("copy destination remained a symlink")
+	}
+	assertFileMode(t, dest, 0o600)
+}
+
+func TestCopyFilesReturnsSourceErrors(t *testing.T) {
+	s, mainRepo, _ := testSetup(t, `
+project: test
+copy_files:
+  - config
+`)
+	if err := os.MkdirAll(filepath.Join(mainRepo, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.copyFiles(); err == nil {
+		t.Fatal("expected non-file copy source error")
+	}
+}
+
+func assertFileMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Errorf("%s mode = %o, want %o", path, got, want)
 	}
 }
 
@@ -366,6 +622,62 @@ env:
 	allocs := s.Registry.Allocations()
 	if len(allocs) != 0 {
 		t.Errorf("expected empty registry during dry-run, got %d entries", len(allocs))
+	}
+}
+
+func TestNewWithOptions_DryRunDoesNotMigrateOrCleanUp(t *testing.T) {
+	dir := t.TempDir()
+	mainRepo := filepath.Join(dir, "main")
+	worktreePath := filepath.Join(dir, "worktree")
+	if err := os.MkdirAll(mainRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(worktreePath, config.ProjectConfigFile)
+	projectConfig := []byte("project: renamed\nports_needed: 2\ndatabase:\n  pattern: \"{template}_{worktree}\"\n")
+	if err := os.WriteFile(configPath, projectConfig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	userPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(userPath, []byte(`{"port":{"base":3000,"increment":10}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	regPath := filepath.Join(dir, "registry.json")
+	reg := registry.New(regPath)
+	if err := reg.Allocate(registry.Allocation{"project": "old", "worktree": worktreePath, "port": 3010, "ports": []any{float64(3010)}}); err != nil {
+		t.Fatal(err)
+	}
+	registryBefore, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	previousRegistryPath := RegistryPath
+	RegistryPath = regPath
+	t.Cleanup(func() { RegistryPath = previousRegistryPath })
+	s := NewWithOptions(worktreePath, mainRepo, config.LoadUserConfig(userPath), Options{DryRun: true})
+	s.Log = &bytes.Buffer{}
+	if _, err := s.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if s.ProjectConfig.PortsNeeded() != 2 {
+		t.Error("dry-run config did not migrate ports_needed in memory")
+	}
+	configAfter, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(configAfter) != string(projectConfig) {
+		t.Errorf("dry-run changed project config:\n%s", configAfter)
+	}
+	registryAfter, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(registryAfter) != string(registryBefore) {
+		t.Errorf("dry-run changed registry:\nbefore=%s\nafter=%s", registryBefore, registryAfter)
 	}
 }
 
@@ -497,7 +809,7 @@ env:
 `)
 	_ = os.WriteFile(filepath.Join(mainRepo, ".env"), []byte(""), 0o644)
 	_ = os.MkdirAll(filepath.Join(mainRepo, "db"), 0o755)
-	_ = os.WriteFile(filepath.Join(mainRepo, "db", "development.sqlite3"), []byte("sqlite-data"), 0o644)
+	createSetupSQLiteFixture(t, filepath.Join(mainRepo, "db", "development.sqlite3"), 42)
 
 	alloc, err := s.Run()
 	if err != nil {
@@ -510,12 +822,8 @@ env:
 
 	// The cloned DB should exist in the worktree
 	clonedPath := filepath.Join(worktree, alloc.PrimaryDatabase())
-	data, err := os.ReadFile(clonedPath)
-	if err != nil {
-		t.Fatalf("expected cloned SQLite file at %s: %v", clonedPath, err)
-	}
-	if string(data) != "sqlite-data" {
-		t.Errorf("expected cloned content, got %q", string(data))
+	if got := setupSQLiteValue(t, clonedPath); got != "42" {
+		t.Errorf("expected cloned content, got %q", got)
 	}
 }
 
@@ -1186,7 +1494,7 @@ env:
 	_ = os.WriteFile(filepath.Join(mainRepo, ".treeline.yml"), []byte(yml), 0o644)
 	_ = os.WriteFile(filepath.Join(mainRepo, ".env"), []byte(""), 0o644)
 	_ = os.MkdirAll(filepath.Join(mainRepo, "db"), 0o755)
-	_ = os.WriteFile(filepath.Join(mainRepo, "db", "development.sqlite3"), []byte("sqlite-data"), 0o644)
+	createSetupSQLiteFixture(t, filepath.Join(mainRepo, "db", "development.sqlite3"), 42)
 
 	regPath := filepath.Join(dir, "registry.json")
 	confPath := filepath.Join(dir, "config.json")
@@ -1220,12 +1528,8 @@ env:
 	}
 
 	clonedPath := filepath.Join(worktreeDir, alloc.PrimaryDatabase())
-	data, err := os.ReadFile(clonedPath)
-	if err != nil {
-		t.Fatalf("expected cloned SQLite file at %s: %v", clonedPath, err)
-	}
-	if string(data) != "sqlite-data" {
-		t.Errorf("expected cloned content, got %q", string(data))
+	if got := setupSQLiteValue(t, clonedPath); got != "42" {
+		t.Errorf("expected cloned content, got %q", got)
 	}
 }
 
@@ -1585,16 +1889,16 @@ database:
   pattern: "myapp_{worktree}"
 `
 	tests := []struct {
-		name        string
-		yaml        string
-		adapter     *fakeAdapter
-		hydrate     func(*config.ProjectConfig, string, string) error
-		strict      bool
-		wantErr     bool
-		wantState   string // "" = healthy
-		wantReason  string // substring of the degradation reason
-		wantCalls   []string
-		wantCloned  bool
+		name       string
+		yaml       string
+		adapter    *fakeAdapter
+		hydrate    func(*config.ProjectConfig, string, string) error
+		strict     bool
+		wantErr    bool
+		wantState  string // "" = healthy
+		wantReason string // substring of the degradation reason
+		wantCalls  []string
+		wantCloned bool
 	}{
 		{
 			name:       "template exists — plain clone, no degradation",
@@ -1687,25 +1991,29 @@ provision:
 			wantCalls:  []string{"create:myapp_feature"},
 		},
 		{
-			name:      "empty fallback also fails — database absent, setup continues",
-			yaml:      base,
-			adapter:   func() *fakeAdapter { f := newFakeAdapter(); f.createErr = errors.New("connection refused"); return f }(),
-			wantState: "absent",
+			name:       "empty fallback also fails — database absent, setup continues",
+			yaml:       base,
+			adapter:    func() *fakeAdapter { f := newFakeAdapter(); f.createErr = errors.New("connection refused"); return f }(),
+			wantState:  "absent",
 			wantReason: "also failed",
 		},
 		{
-			name:       "clone fails with template present — empty fallback",
-			yaml:       base,
-			adapter:    func() *fakeAdapter { f := newFakeAdapter("myapp_template"); f.cloneErr = errors.New("createdb: boom"); return f }(),
+			name: "clone fails with template present — empty fallback",
+			yaml: base,
+			adapter: func() *fakeAdapter {
+				f := newFakeAdapter("myapp_template")
+				f.cloneErr = errors.New("createdb: boom")
+				return f
+			}(),
 			wantState:  "empty",
 			wantReason: "boom",
 			wantCalls:  []string{"clone:myapp_template->myapp_feature", "create:myapp_feature"},
 		},
 		{
-			name:      "server unreachable — degrades to absent without attempting anything",
-			yaml:      base,
-			adapter:   func() *fakeAdapter { f := newFakeAdapter(); f.existsErr = errors.New("connection refused"); return f }(),
-			wantState: "absent",
+			name:       "server unreachable — degrades to absent without attempting anything",
+			yaml:       base,
+			adapter:    func() *fakeAdapter { f := newFakeAdapter(); f.existsErr = errors.New("connection refused"); return f }(),
+			wantState:  "absent",
 			wantReason: "connection refused",
 			wantCalls:  nil,
 		},

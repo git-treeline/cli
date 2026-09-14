@@ -246,7 +246,7 @@ func resolveDB() (*dbInfo, error) {
 	}
 	absPath := wt.Path
 	mainRepo := worktree.DetectMainRepo(absPath)
-	pc := config.LoadProjectConfig(absPath)
+	pc := config.LoadProjectConfigReadOnly(absPath)
 
 	dbName, _ := wt.Entry["database"].(string)
 	if dbName == "" {

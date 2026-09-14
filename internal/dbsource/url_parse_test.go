@@ -7,15 +7,15 @@ import (
 
 func TestParsePostgresURL(t *testing.T) {
 	tests := []struct {
-		name        string
-		raw         string
-		cfgSSL      string
-		wantHost    string
-		wantPort    string
-		wantUser    string
-		wantPass    string
-		wantDB      string
-		wantSSL     string
+		name     string
+		raw      string
+		cfgSSL   string
+		wantHost string
+		wantPort string
+		wantUser string
+		wantPass string
+		wantDB   string
+		wantSSL  string
 	}{
 		{
 			name:     "full url",

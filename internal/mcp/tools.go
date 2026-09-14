@@ -13,9 +13,9 @@ import (
 	"github.com/git-treeline/cli/internal/detect"
 	"github.com/git-treeline/cli/internal/format"
 	"github.com/git-treeline/cli/internal/registry"
+	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/supervisor"
 	"github.com/git-treeline/cli/internal/templates"
-	"github.com/git-treeline/cli/internal/worktree"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -103,7 +103,7 @@ func handleList(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallTool
 	}
 
 	if len(allocs) == 0 {
-		return mcplib.NewToolResultText("No active allocations."), nil
+		return jsonResult([]any{})
 	}
 
 	type entry struct {
@@ -131,9 +131,8 @@ func handleList(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallTool
 
 func handleDoctor(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 	absPath := resolvePath(req)
-	mainRepo := worktree.DetectMainRepo(absPath)
 	det := detect.Detect(absPath)
-	pc := config.LoadProjectConfig(mainRepo)
+	pc := config.LoadProjectConfigReadOnly(absPath)
 
 	result := map[string]any{}
 
@@ -228,7 +227,11 @@ func handleStart(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToo
 		return mcplib.NewToolResultText("Server is already running."), nil
 	}
 
-	resp, err = supervisor.Send(sockPath, "start")
+	envVars, err := setup.SyncRuntimeEnv(absPath, config.LoadUserConfig(""))
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("Failed to sync environment: %v", err)), nil
+	}
+	resp, err = supervisor.ConfigureAndSend(sockPath, "start", envVars, runtimePort(absPath))
 	if err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("Failed to start server: %v", err)), nil
 	}
@@ -269,7 +272,11 @@ func handleRestart(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallT
 	absPath := resolvePath(req)
 	sockPath := supervisor.SocketPath(absPath)
 
-	resp, err := supervisor.Send(sockPath, "restart")
+	envVars, err := setup.SyncRuntimeEnv(absPath, config.LoadUserConfig(""))
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("Failed to sync environment: %v", err)), nil
+	}
+	resp, err := supervisor.ConfigureAndSend(sockPath, "restart", envVars, runtimePort(absPath))
 	if err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("Supervisor not running: %v", err)), nil
 	}
@@ -278,6 +285,18 @@ func handleRestart(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallT
 	}
 
 	return mcplib.NewToolResultText("Server restarted."), nil
+}
+
+func runtimePort(worktreePath string) int {
+	alloc := newRegistry().Find(worktreePath)
+	if alloc == nil {
+		return 0
+	}
+	ports := format.GetPorts(format.Allocation(alloc))
+	if len(ports) == 0 {
+		return 0
+	}
+	return ports[0]
 }
 
 func handleConfigGet(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -303,8 +322,7 @@ func handleConfigGet(_ context.Context, req mcplib.CallToolRequest) (*mcplib.Cal
 
 	case "project":
 		absPath := resolvePath(req)
-		mainRepo := worktree.DetectMainRepo(absPath)
-		pc := config.LoadProjectConfig(mainRepo)
+		pc := config.LoadProjectConfigReadOnly(absPath)
 		keys := strings.Split(key, ".")
 		val := config.Dig(pc.Data, keys...)
 		if val == nil {

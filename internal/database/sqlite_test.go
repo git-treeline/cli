@@ -1,6 +1,7 @@
 package database
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,19 +15,14 @@ func TestSQLite_Clone(t *testing.T) {
 	template := filepath.Join(dir, "template.db")
 	target := filepath.Join(dir, "sub", "cloned.db")
 
-	_ = os.WriteFile(template, []byte("SQLite format 3\x00fake-db-content"), 0o644)
+	createSQLiteTable(t, template, "widgets", 42)
 
 	s := &SQLite{}
 	if err := s.Clone(template, target); err != nil {
 		t.Fatal(err)
 	}
-
-	data, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatal("cloned file should exist")
-	}
-	if string(data) != "SQLite format 3\x00fake-db-content" {
-		t.Error("cloned file content doesn't match template")
+	if got := sqliteValue(t, target, "select value from widgets"); got != "42" {
+		t.Errorf("cloned row = %q, want 42", got)
 	}
 }
 
@@ -35,7 +31,7 @@ func TestSQLite_Clone_CreatesParentDirs(t *testing.T) {
 	template := filepath.Join(dir, "template.db")
 	target := filepath.Join(dir, "deep", "nested", "dir", "clone.db")
 
-	_ = os.WriteFile(template, []byte("data"), 0o644)
+	createSQLiteTable(t, template, "widgets", 42)
 
 	s := &SQLite{}
 	if err := s.Clone(template, target); err != nil {
@@ -45,6 +41,149 @@ func TestSQLite_Clone_CreatesParentDirs(t *testing.T) {
 	if _, err := os.Stat(target); err != nil {
 		t.Fatal("expected target file to exist in nested directory")
 	}
+}
+
+func TestSQLite_Clone_IncludesCommittedWALData(t *testing.T) {
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		t.Skip("sqlite3 is required for SQLite cloning")
+	}
+	dir := t.TempDir()
+	template := filepath.Join(dir, "template.db")
+	target := filepath.Join(dir, "clone.db")
+
+	cmd := exec.Command("sqlite3", template)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		_ = cmd.Wait()
+	})
+	if _, err := fmt.Fprintln(stdin, "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE widgets (value INTEGER); INSERT INTO widgets VALUES (42); SELECT 'ready';"); err != nil {
+		t.Fatal(err)
+	}
+	scanner := bufio.NewScanner(stdout)
+	ready := false
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) == "ready" {
+			ready = true
+			break
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !ready {
+		t.Fatal("sqlite did not commit WAL data")
+	}
+	if _, err := os.Stat(template + "-wal"); err != nil {
+		t.Fatalf("expected live WAL file: %v", err)
+	}
+
+	if err := (&SQLite{}).Clone(template, target); err != nil {
+		t.Fatal(err)
+	}
+	if got := sqliteValue(t, target, "select value from widgets"); got != "42" {
+		t.Errorf("WAL row = %q, want 42", got)
+	}
+}
+
+func TestSQLite_Clone_HandlesQuotedAndBackslashPaths(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), `folder "quoted" \ slash`)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	template := filepath.Join(dir, `template "quoted" \ slash.db`)
+	target := filepath.Join(dir, `target "quoted" \ slash.db`)
+	createSQLiteTable(t, template, "widgets", 42)
+
+	if err := (&SQLite{}).Clone(template, target); err != nil {
+		t.Fatal(err)
+	}
+	if got := sqliteValue(t, target, "select value from widgets"); got != "42" {
+		t.Errorf("cloned row = %q, want 42", got)
+	}
+}
+
+func TestSQLite_Clone_RejectsTargetWithWALSidecar(t *testing.T) {
+	dir := t.TempDir()
+	template := filepath.Join(dir, "template.db")
+	target := filepath.Join(dir, "target.db")
+	createSQLiteTable(t, template, "widgets", 42)
+	createSQLiteTable(t, target, "target_rows", 7)
+	if err := os.WriteFile(target+"-wal", []byte("live"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := (&SQLite{}).Clone(template, target)
+	if err == nil || !strings.Contains(err.Error(), "active SQLite sidecar") {
+		t.Fatalf("expected active sidecar error, got %v", err)
+	}
+	if got := sqliteValue(t, target, "select value from target_rows"); got != "7" {
+		t.Errorf("existing target changed after rejected clone: %q", got)
+	}
+}
+
+func TestSQLite_Clone_FailurePreservesExistingTarget(t *testing.T) {
+	dir := t.TempDir()
+	template := filepath.Join(dir, "template.db")
+	target := filepath.Join(dir, "target.db")
+	createSQLiteTable(t, template, "source_rows", 42)
+	createSQLiteTable(t, target, "target_rows", 7)
+
+	s := &SQLite{newCommand: func(string, ...string) *exec.Cmd { return exec.Command("false") }}
+	if err := s.Clone(template, target); err == nil {
+		t.Fatal("expected clone failure")
+	}
+	if got := sqliteValue(t, target, "select value from target_rows"); got != "7" {
+		t.Errorf("existing target changed after failed clone: %q", got)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(dir, ".treeline-clone-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leftovers) != 0 {
+		t.Errorf("failed clone left staging files: %v", leftovers)
+	}
+}
+
+func TestSQLite_Clone_RejectsSameSourceAndTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "database.db")
+	createSQLiteTable(t, path, "widgets", 42)
+	if err := (&SQLite{}).Clone(path, path); err == nil {
+		t.Fatal("expected same source and target error")
+	}
+	if got := sqliteValue(t, path, "select value from widgets"); got != "42" {
+		t.Errorf("source changed after rejected clone: %q", got)
+	}
+}
+
+func createSQLiteTable(t *testing.T, path, table string, value int) {
+	t.Helper()
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		t.Skip("sqlite3 is required for SQLite cloning")
+	}
+	cmd := exec.Command("sqlite3", path, fmt.Sprintf("CREATE TABLE %s (value INTEGER); INSERT INTO %s VALUES (%d);", table, table, value))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("creating SQLite fixture: %v: %s", err, out)
+	}
+}
+
+func sqliteValue(t *testing.T, path, query string) string {
+	t.Helper()
+	out, err := exec.Command("sqlite3", path, query).CombinedOutput()
+	if err != nil {
+		t.Fatalf("querying SQLite fixture: %v: %s", err, out)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func TestSQLite_Clone_MissingTemplate(t *testing.T) {

@@ -20,6 +20,11 @@ var rootCmd = &cobra.Command{
 	Short:         "Worktree environment manager — ports, databases, and Redis across parallel development environments",
 	SilenceErrors: true,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		if dryRun {
+			maybeWarnStaleRouter(cmd)
+			return
+		}
 		_ = platform.EnsureConfigDir()
 		maybeWarnStaleRouter(cmd)
 		maybeCheckForUpdate(cmd)
@@ -32,13 +37,13 @@ var rootCmd = &cobra.Command{
 // commandsThatSelfRepair are commands the user runs to FIX a stale router —
 // emitting a "router is stale" warning during these is just noise.
 var commandsThatSelfRepair = map[string]bool{
-	"install":      true,
-	"update":       true,
-	"serve":        true, // covers all serve subcommands
-	"version":      true,
-	"help":         true,
-	"completion":   true,
-	"__complete":   true, // shell completion handler
+	"install":          true,
+	"update":           true,
+	"serve":            true, // covers all serve subcommands
+	"version":          true,
+	"help":             true,
+	"completion":       true,
+	"__complete":       true, // shell completion handler
 	"__completeNoDesc": true,
 }
 

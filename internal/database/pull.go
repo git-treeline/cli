@@ -2,12 +2,16 @@ package database
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/git-treeline/cli/internal/platform"
 )
 
 // extNameRe validates a PostgreSQL extension name before it is interpolated
@@ -86,8 +90,27 @@ func (p *Puller) Dump(remote *RemoteConn, dumpPath string) error {
 	// complete and verified. A partial or interrupted dump is therefore never
 	// retained as a sample — which a later refresh would restore over the
 	// local db, destroying it.
-	tmp := dumpPath + ".partial"
-	_ = os.Remove(tmp)
+	if err := rejectUnsafeFile(dumpPath); err != nil {
+		return fmt.Errorf("checking dump path %s: %w", dumpPath, err)
+	}
+	// Create the staging file before pg_dump runs so it is private even while
+	// pg_dump is writing it. The random name also lets concurrent pulls avoid
+	// sharing a predictable staging path.
+	tmpFile, err := os.CreateTemp(filepath.Dir(dumpPath), "."+filepath.Base(dumpPath)+".tmp-")
+	if err != nil {
+		return fmt.Errorf("creating dump staging file: %w", err)
+	}
+	tmp := tmpFile.Name()
+	if err := tmpFile.Chmod(0o600); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("securing dump staging file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("closing dump staging file: %w", err)
+	}
+	defer func() { _ = os.Remove(tmp) }()
 	args := []string{
 		"-Fc",
 		"-h", remote.Host,
@@ -97,20 +120,20 @@ func (p *Puller) Dump(remote *RemoteConn, dumpPath string) error {
 		"-f", tmp,
 	}
 	if err := p.runStage("dump", remoteEnv(remote), "pg_dump", args...); err != nil {
-		_ = os.Remove(tmp)
 		return err
 	}
-	if info, err := os.Stat(tmp); err != nil || info.Size() == 0 {
-		_ = os.Remove(tmp)
+	info, err := os.Lstat(tmp)
+	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
 		return &ExecError{Stage: "dump", Output: "pg_dump produced no output file"}
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		return fmt.Errorf("securing dump staging file: %w", err)
 	}
 	// Verify the archive is readable before committing it as the sample.
 	if _, err := p.listDump(tmp); err != nil {
-		_ = os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, dumpPath); err != nil {
-		_ = os.Remove(tmp)
 		return fmt.Errorf("finalizing dump %s: %w", dumpPath, err)
 	}
 	return nil
@@ -121,6 +144,9 @@ func (p *Puller) Dump(remote *RemoteConn, dumpPath string) error {
 // dump. It performs no network access — pull calls Dump first, refresh reuses
 // an already-retained dump. listPath is where a stripped TOC may be written.
 func (p *Puller) Refresh(target, dumpPath, listPath string, exts Extensions) error {
+	if err := secureRegularFile(dumpPath); err != nil {
+		return fmt.Errorf("securing dump %s: %w", dumpPath, err)
+	}
 	// Validate the dump (and capture its TOC) BEFORE dropping anything. A
 	// missing or corrupt dump fails here, leaving the local db untouched.
 	toc, err := p.listDump(dumpPath)
@@ -137,13 +163,76 @@ func (p *Puller) Refresh(target, dumpPath, listPath string, exts Extensions) err
 	if len(exts.Strip) > 0 {
 		filtered, changed := commentStripped(string(toc), exts.Strip)
 		if changed {
-			if err := os.WriteFile(listPath, []byte(filtered), 0o644); err != nil {
+			if err := writePrivateFile(listPath, []byte(filtered)); err != nil {
 				return fmt.Errorf("writing restore list: %w", err)
 			}
 			useList = listPath
 		}
 	}
 	return p.restoreLocal(target, dumpPath, useList)
+}
+
+// rejectUnsafeFile rejects a symlink or non-regular final path without
+// resolving parent-directory aliases. Callers may safely use a symlinked
+// worktree path, but dump files themselves must never be followed.
+func rejectUnsafeFile(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing symlink")
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file")
+	}
+	return nil
+}
+
+func secureRegularFile(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		// Let pg_restore report a missing dump through the usual validate stage.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing symlink")
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		return fmt.Errorf("file changed while opening")
+	}
+	if err := file.Chmod(platform.PrivateFileMode); err != nil {
+		return err
+	}
+	return nil
+}
+
+// writePrivateFile atomically replaces path with a private regular file. The
+// lstat check keeps an existing symlink from being followed while the random
+// temporary name avoids a predictable staging target.
+func writePrivateFile(path string, data []byte) error {
+	if err := rejectUnsafeFile(path); err != nil {
+		return err
+	}
+	return platform.AtomicWriteFile(path, data, platform.PrivateFileMode)
 }
 
 // listDump runs `pg_restore -l` over a dump. This both validates the archive

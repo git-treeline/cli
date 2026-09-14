@@ -84,20 +84,21 @@ Examples:
 
 		fmt.Printf("Linked %s -> %s\n", project, branch)
 
-		// Regenerate env file immediately so the link takes effect
+		// Resolve once for both the env file and supervised child so the
+		// restarted process cannot retain the previous link target.
 		uc := config.LoadUserConfig("")
-		if err := setup.RegenerateEnvFile(absPath, uc); err != nil {
+		envVars, err := setup.SyncRuntimeEnv(absPath, uc)
+		if err != nil {
 			fmt.Fprintln(os.Stderr, style.Warnf("Could not update env file: %s", err))
 		} else {
 			fmt.Println("Environment file updated.")
-		}
-
-		// Restart the server (or warn if we can't)
-		sockPath := supervisor.SocketPath(absPath)
-		if resp, err := supervisor.Send(sockPath, "restart"); err == nil && resp == "ok" {
-			fmt.Println("Server restarted.")
-		} else {
-			fmt.Println(style.Warnf("Server not running — restart manually to pick up the new link."))
+			// Restart the server (or warn if we can't).
+			sockPath := supervisor.SocketPath(absPath)
+			if _, err := supervisor.ConfigureAndSend(sockPath, "restart", envVars, resolvePort(absPath)); err == nil {
+				fmt.Println("Server restarted.")
+			} else {
+				fmt.Fprintln(os.Stderr, style.Warnf("Link saved, but server restart failed: %s", err))
+			}
 		}
 
 		return nil
@@ -130,20 +131,21 @@ var unlinkCmd = &cobra.Command{
 
 		fmt.Printf("Unlinked %s (will resolve to same-branch default)\n", project)
 
-		// Regenerate env file immediately so the unlink takes effect
+		// Resolve once for both the env file and supervised child so the
+		// restarted process cannot retain the previous link target.
 		uc := config.LoadUserConfig("")
-		if err := setup.RegenerateEnvFile(absPath, uc); err != nil {
+		envVars, err := setup.SyncRuntimeEnv(absPath, uc)
+		if err != nil {
 			fmt.Fprintln(os.Stderr, style.Warnf("Could not update env file: %s", err))
 		} else {
 			fmt.Println("Environment file updated.")
-		}
-
-		// Restart the server (or warn if we can't)
-		sockPath := supervisor.SocketPath(absPath)
-		if resp, err := supervisor.Send(sockPath, "restart"); err == nil && resp == "ok" {
-			fmt.Println("Server restarted.")
-		} else {
-			fmt.Println(style.Warnf("Server not running — restart manually to pick up the change."))
+			// Restart the server (or warn if we can't).
+			sockPath := supervisor.SocketPath(absPath)
+			if _, err := supervisor.ConfigureAndSend(sockPath, "restart", envVars, resolvePort(absPath)); err == nil {
+				fmt.Println("Server restarted.")
+			} else {
+				fmt.Fprintln(os.Stderr, style.Warnf("Link removed, but server restart failed: %s", err))
+			}
 		}
 
 		return nil

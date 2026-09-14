@@ -65,8 +65,15 @@ Must be run from inside a worktree (not the main repo).`,
 		}
 
 		if switchRestart {
+			envVars, err := setup.SyncRuntimeEnv(absPath, config.LoadUserConfig(""))
+			if err != nil {
+				return cliErr(cmd, &CliError{
+					Message: fmt.Sprintf("Could not sync environment before restart: %s", err),
+					Hint:    "Fix the .treeline.yml environment or resolve target, then run 'gtl restart'.",
+				})
+			}
 			sockPath := supervisor.SocketPath(absPath)
-			if resp, err := supervisor.Send(sockPath, "restart"); err == nil && resp == "ok" {
+			if resp, err := supervisor.ConfigureAndSend(sockPath, "restart", envVars, resolvePort(absPath)); err == nil && resp == "ok" {
 				fmt.Println("Server restarted.")
 			} else {
 				fmt.Fprintln(os.Stderr, style.Warnf("could not restart server (is it running?)"))

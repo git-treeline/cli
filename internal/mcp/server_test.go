@@ -3,13 +3,19 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/setup"
+	"github.com/git-treeline/cli/internal/supervisor"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -152,6 +158,33 @@ func TestHandleList_FilterByProject(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Errorf("expected 1 entry for 'other', got %d", len(entries))
+	}
+}
+
+func TestHandleList_EmptyIsJSONArray(t *testing.T) {
+	dir := t.TempDir()
+	registryPath = filepath.Join(dir, "registry.json")
+	setup.RegistryPath = registryPath
+	t.Cleanup(func() {
+		registryPath = ""
+		setup.RegistryPath = ""
+	})
+	if err := os.WriteFile(registryPath, []byte(`{"version":1,"allocations":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "list"
+	result, err := handleList(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entries []any
+	if err := json.Unmarshal([]byte(extractText(t, result)), &entries); err != nil {
+		t.Fatalf("empty list was not JSON: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("entries = %#v, want empty", entries)
 	}
 }
 
@@ -310,6 +343,73 @@ func TestHandleRestart_NotRunning(t *testing.T) {
 	}
 }
 
+func TestHandleRestartReplacesEnvironmentObservedByChild(t *testing.T) {
+	worktree := t.TempDir()
+	registryPath = filepath.Join(t.TempDir(), "registry.json")
+	setup.RegistryPath = registryPath
+	t.Cleanup(func() {
+		registryPath = ""
+		setup.RegistryPath = ""
+	})
+	if err := os.WriteFile(filepath.Join(worktree, ".treeline.yml"), []byte("project: app\nenv:\n  VALUE: fresh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	registryData, err := json.Marshal(registry.RegistryData{Version: 1, Allocations: []registry.Allocation{{
+		"worktree": worktree,
+		"project":  "app",
+		"branch":   "main",
+		"port":     float64(4300),
+		"ports":    []any{float64(4300)},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(registryPath, registryData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	childOutput := filepath.Join(worktree, "child-env.log")
+	command := "printf 'VALUE=%s STALE=%s\\n' \"$VALUE\" \"${STALE-unset}\" >> " + strconv.Quote(childOutput) + "; sleep 30"
+	socket := supervisor.SocketPath(worktree)
+	sv := supervisor.New(command, worktree, socket)
+	sv.Env = map[string]string{"VALUE": "old", "STALE": "remove-me"}
+	errCh := make(chan error, 1)
+	go func() { errCh <- sv.Run() }()
+	t.Cleanup(func() {
+		_, _ = supervisor.Send(socket, "shutdown")
+		select {
+		case <-errCh:
+		case <-time.After(2 * time.Second):
+		}
+	})
+
+	waitForMCPOutput(t, childOutput, "VALUE=old STALE=remove-me")
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "restart"
+	req.Params.Arguments = map[string]any{"path": worktree}
+	result, err := handleRestart(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("handleRestart failed: %v", result.Content)
+	}
+	waitForMCPOutput(t, childOutput, "VALUE=fresh STALE=unset")
+}
+
+func waitForMCPOutput(t *testing.T, path, want string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(path); err == nil && strings.Contains(string(data), want) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	data, _ := os.ReadFile(path)
+	t.Fatalf("child output did not contain %q: %s", want, data)
+}
+
 func TestHandleDoctor_NoAllocation(t *testing.T) {
 	seedRegistry(t)
 
@@ -464,6 +564,46 @@ func TestHandleConfigGet_ProjectScope_Nested(t *testing.T) {
 	text := extractText(t, result)
 	if text != "\"postgresql\"" {
 		t.Errorf("expected \"postgresql\", got %s", text)
+	}
+}
+
+func TestProjectConfigToolsUseRequestedWorktree(t *testing.T) {
+	mainRepo := initMCPGitRepo(t)
+	mainConfig := "project: mainapp\ncommands:\n  start: echo main\n"
+	if err := os.WriteFile(filepath.Join(mainRepo, ".treeline.yml"), []byte(mainConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	feature := filepath.Join(t.TempDir(), "feature")
+	runMCPGit(t, mainRepo, "worktree", "add", "-b", "feature", feature)
+	if err := os.WriteFile(filepath.Join(feature, ".treeline.yml"), []byte("project: featureapp\ncommands:\n  start: echo feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	configReq := mcplib.CallToolRequest{}
+	configReq.Params.Name = "config_get"
+	configReq.Params.Arguments = map[string]any{"key": "commands.start", "scope": "project", "path": feature}
+	configResult, err := handleConfigGet(context.Background(), configReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := extractText(t, configResult); got != `"echo feature"` {
+		t.Errorf("config_get = %s, want feature worktree config", got)
+	}
+
+	doctorReq := mcplib.CallToolRequest{}
+	doctorReq.Params.Name = "doctor"
+	doctorReq.Params.Arguments = map[string]any{"path": feature}
+	doctorResult, err := handleDoctor(context.Background(), doctorReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doctor map[string]any
+	if err := json.Unmarshal([]byte(extractText(t, doctorResult)), &doctor); err != nil {
+		t.Fatal(err)
+	}
+	configInfo := doctor["config"].(map[string]any)
+	if got := configInfo["start_command"]; got != "echo feature" {
+		t.Errorf("doctor start_command = %v, want feature worktree config", got)
 	}
 }
 
@@ -977,6 +1117,61 @@ func TestHandleNew_DryRun(t *testing.T) {
 	}
 }
 
+func TestHandleNewUsesRequestedRepositoryForGitOperations(t *testing.T) {
+	repoA := initMCPGitRepo(t)
+	repoB := initMCPGitRepo(t)
+	if err := os.WriteFile(filepath.Join(repoA, ".treeline.yml"), []byte("project: repo-a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoB, ".treeline.yml"), []byte("project: repo-b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repoA)
+
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "new"
+	req.Params.Arguments = map[string]any{"branch": "main", "path": repoB, "dry_run": true}
+	result, err := handleNew(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("handleNew failed: %v", result.Content)
+	}
+	var response map[string]any
+	if err := json.Unmarshal([]byte(extractText(t, result)), &response); err != nil {
+		t.Fatal(err)
+	}
+	wantWorktree, err := filepath.EvalSymlinks(repoB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := response["worktree"]; got != wantWorktree {
+		t.Errorf("worktree = %v, want requested repo %s", got, wantWorktree)
+	}
+	if got := response["project"]; got != "repo-b" {
+		t.Errorf("project = %v, want repo-b", got)
+	}
+}
+
+func initMCPGitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	runMCPGit(t, dir, "init", "--initial-branch=main")
+	runMCPGit(t, dir, "commit", "--allow-empty", "-m", "init")
+	return dir
+}
+
+func runMCPGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com", "GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %s", args, out)
+	}
+}
+
 func TestHandleNew_NoConfig(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, ".git"), 0o755)
@@ -1006,4 +1201,98 @@ func extractText(t *testing.T, result *mcplib.CallToolResult) string {
 	}
 	t.Fatal("no text content in result")
 	return ""
+}
+
+func TestHandleNewRelativeWorktreePath(t *testing.T) {
+	repoA := initMCPGitRepo(t)
+	repoB := initMCPGitRepo(t)
+	t.Chdir(repoA)
+	t.Setenv("GTL_HOME", t.TempDir())
+	regPath := filepath.Join(t.TempDir(), "registry.json")
+	oldMCP, oldSetup := registryPath, setup.RegistryPath
+	registryPath = regPath
+	setup.RegistryPath = regPath
+	defer func() { registryPath = oldMCP; setup.RegistryPath = oldSetup }()
+	if err := os.WriteFile(filepath.Join(repoB, ".treeline.yml"), []byte("project: repo_b\nport_count: 1\nenv:\n  PORT: '{port}'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runMCPGit(t, repoB, "add", ".treeline.yml")
+	runMCPGit(t, repoB, "commit", "-m", "config")
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "new"
+	req.Params.Arguments = map[string]any{"branch": "feature", "path": repoB, "worktree_path": "feature-wt"}
+	result, err := handleNew(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("handleNew: %s", extractText(t, result))
+	}
+	var response map[string]any
+	if err := json.Unmarshal([]byte(extractText(t, result)), &response); err != nil {
+		t.Fatal(err)
+	}
+	_, actualErr := os.Stat(filepath.Join(repoB, "feature-wt", ".git"))
+	actualAlloc := registry.New(regPath).Find(filepath.Join(repoB, "feature-wt"))
+	wrongAlloc := registry.New(regPath).Find(filepath.Join(repoA, "feature-wt"))
+	t.Logf("result error=%v response=%s git created under repoB=%v actualAlloc=%v wrongAlloc=%v", result.IsError, extractText(t, result), actualErr == nil, actualAlloc, wrongAlloc)
+	if result.IsError || actualAlloc == nil || wrongAlloc != nil {
+		t.Fatal("MCP new does not set up the worktree Git actually created")
+	}
+}
+
+func TestHandleLinkAndUnlinkReportLegacySupervisor(t *testing.T) {
+	seedRegistry(t)
+	t.Setenv("GTL_HOME", t.TempDir())
+	dir := t.TempDir()
+	if err := newRegistry().Allocate(registry.Allocation{"worktree": dir, "project": "app", "branch": "main", "port": float64(4500)}); err != nil {
+		t.Fatal(err)
+	}
+	socket := supervisor.SocketPath(dir)
+	if err := supervisor.EnsureSocketDir(socket); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(socket, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for i := 0; i < 2; i++ {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = io.ReadAll(conn)
+			_, _ = conn.Write([]byte("unknown command: configure-action"))
+			_ = conn.Close()
+		}
+	}()
+	for _, name := range []string{"link", "unlink"} {
+		req := mcplib.CallToolRequest{}
+		req.Params.Arguments = map[string]any{"path": dir, "project": "other", "branch": "main"}
+		var result *mcplib.CallToolResult
+		if name == "link" {
+			result, err = handleLink(context.Background(), req)
+		} else {
+			result, err = handleUnlink(context.Background(), req)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.IsError {
+			t.Fatalf("%s: %s", name, extractText(t, result))
+		}
+		var data map[string]any
+		if err := json.Unmarshal([]byte(extractText(t, result)), &data); err != nil {
+			t.Fatal(err)
+		}
+		diagnostic, _ := data["restart_error"].(string)
+		if data["restarted"] != false || !strings.Contains(diagnostic, "gtl stop --kill then gtl start") {
+			t.Fatalf("%s lost restart remediation: %v", name, data)
+		}
+	}
 }

@@ -442,9 +442,9 @@ func TestPostgreSQL_Restore_RestoreCommandFailure(t *testing.T) {
 
 func TestForAdapter(t *testing.T) {
 	tests := []struct {
-		name      string
-		wantErr   bool
-		wantType  string
+		name     string
+		wantErr  bool
+		wantType string
 	}{
 		{"postgresql", false, "postgresql"},
 		{"sqlite", false, "sqlite"},

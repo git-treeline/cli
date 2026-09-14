@@ -231,3 +231,27 @@ func extractHostPort(rawURL string) (string, int, error) {
 	}
 	return u.Hostname(), p, nil
 }
+
+func TestTokenHandler_ForwardedScheme(t *testing.T) {
+	for _, incoming := range []string{"https", "http", ""} {
+		t.Run("incoming="+incoming, func(t *testing.T) {
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(r.Header.Get("X-Forwarded-Proto")))
+			}))
+			defer backend.Close()
+			_, port, _ := extractHostPort(backend.URL)
+			token := GenerateToken()
+			handler := NewTokenHandler(token, port)
+			req := httptest.NewRequest(http.MethodGet, "http://shared.example.com/", nil)
+			if incoming != "" {
+				req.Header.Set("X-Forwarded-Proto", incoming)
+			}
+			req.AddCookie(&http.Cookie{Name: cookieName, Value: cookieValue(token)})
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK || rec.Body.String() != "https" {
+				t.Fatalf("backend scheme: status=%d, body=%q; want 200, https", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}

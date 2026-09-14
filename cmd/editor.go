@@ -64,4 +64,3 @@ var editorRefreshCmd = &cobra.Command{
 		return nil
 	},
 }
-

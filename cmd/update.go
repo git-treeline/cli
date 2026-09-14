@@ -34,7 +34,7 @@ Checks the latest published release first, then detects the install channel
 from the binary's location:
   - Homebrew (Cellar path): runs 'brew update' then 'brew upgrade git-treeline'.
     The formula's post-install hook restarts the router automatically.
-  - go install (GOBIN/GOPATH): runs 'go install github.com/git-treeline/cli@latest'.
+  - go install (GOBIN/GOPATH): runs 'go install github.com/git-treeline/cli/cmd/git-treeline@latest'.
 
 For release-binary installs the channel can't be detected; instructions are
 printed instead.
@@ -90,14 +90,14 @@ at most once a day, never blocking). Suppress with GTL_NO_UPDATE_NOTIFY=1.`,
 			}
 		case installGoBin:
 			fmt.Println(style.Actionf("Updating via go install"))
-			if err := runUpdateStep(cmd, "go", "install", "github.com/git-treeline/cli@latest"); err != nil {
+			if err := runUpdateStep(cmd, "go", "install", "github.com/git-treeline/cli/cmd/git-treeline@latest"); err != nil {
 				return cliErr(cmd, err)
 			}
 		default:
 			return cliErr(cmd, &CliError{
 				Message: fmt.Sprintf("Cannot determine how git-treeline was installed (%s).", exe),
 				Hint: "Homebrew:       brew upgrade git-treeline\n" +
-					"  go install:     go install github.com/git-treeline/cli@latest\n" +
+					"  go install:     go install github.com/git-treeline/cli/cmd/git-treeline@latest\n" +
 					"  Release binary: download the latest release and replace the binary.",
 			})
 		}

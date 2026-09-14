@@ -54,7 +54,12 @@ empty as a last resort.`,
 			path = args[0]
 		}
 		abs, _ := filepath.Abs(path)
-		pc := config.LoadProjectConfig(abs)
+		var pc *config.ProjectConfig
+		if provisionDryRun {
+			pc = config.LoadProjectConfigReadOnly(abs)
+		} else {
+			pc = config.LoadProjectConfig(abs)
+		}
 
 		if !pc.Exists() {
 			fmt.Println(style.Actionf("Nothing to provision — no %s here.", config.ProjectConfigFile))
@@ -148,6 +153,15 @@ func provisionDeps(pc *config.ProjectConfig, repoDir string) provision.Deps {
 			return adapter.Exists(name)
 		},
 		CreateDB: func(name string) error { return createDB(connArgs, name) },
+		DropDB: func(name string) error {
+			if adapter == nil {
+				if adapterErr != nil {
+					return fmt.Errorf("database adapter %q: %w", pc.DatabaseAdapter(), adapterErr)
+				}
+				return fmt.Errorf("no database adapter for %q", pc.DatabaseAdapter())
+			}
+			return adapter.Drop(name)
+		},
 		HydrateFromSource: func(template, env string) error {
 			return hydrateTemplateFromSource(pc, template, env)
 		},

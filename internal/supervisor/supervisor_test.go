@@ -2,6 +2,8 @@ package supervisor
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -209,6 +211,307 @@ func TestSupervisor_UpdateEnv(t *testing.T) {
 	<-errCh
 }
 
+func TestSupervisor_ConfigureAndRestartReplacesRuntimeEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	sock := tmpSocket(t)
+	envOut := filepath.Join(dir, "runtime.env")
+	commandOut := filepath.Join(dir, "runtime.command")
+	command := "printf '%s,%s\\n' {port} {port_2} > \"$GTL_COMMAND_OUT\"; env > \"$GTL_ENV_OUT\"; sleep 60"
+
+	sv := newTestSupervisor(t, command, dir, sock)
+	sv.Port = 4101
+	sv.Env = map[string]string{
+		"GTL_ENV_OUT":     envOut,
+		"GTL_COMMAND_OUT": commandOut,
+		"OLD":             "old-value",
+		"REMOVE":          "remove-me",
+	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- sv.Run() }()
+	waitForSocket(t, sock, 2*time.Second)
+	waitForFile(t, envOut, 2*time.Second)
+	waitForFile(t, commandOut, 2*time.Second)
+
+	resp, err := ConfigureAndSend(sock, "restart", map[string]string{
+		"GTL_ENV_OUT":     envOut,
+		"GTL_COMMAND_OUT": commandOut,
+		"NEW":             "new-value",
+	}, 4201)
+	if err != nil {
+		t.Fatalf("configure/restart failed: %v", err)
+	}
+	if resp != "ok" {
+		t.Fatalf("configure/restart response = %q, want ok", resp)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		data, _ := os.ReadFile(envOut)
+		commandData, _ := os.ReadFile(commandOut)
+		if strings.Contains(string(data), "NEW=new-value") &&
+			!strings.Contains(string(data), "OLD=old-value") &&
+			!strings.Contains(string(data), "REMOVE=remove-me") &&
+			strings.TrimSpace(string(commandData)) == "4201,4202" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("replacement was not observed by child; env=%q command=%q", data, commandData)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	gotCommand, err := Send(sock, "get-command")
+	if err != nil {
+		t.Fatalf("get-command failed: %v", err)
+	}
+	if !strings.Contains(gotCommand, "4201") || !strings.Contains(gotCommand, "4202") {
+		t.Errorf("active command did not refresh allocated ports: %q", gotCommand)
+	}
+
+	_, _ = Send(sock, "shutdown")
+	<-errCh
+}
+
+func TestSupervisor_ConfigureRestartSerializesWithWaitReady(t *testing.T) {
+	dir := t.TempDir()
+	sock := tmpSocket(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	readyPort := listener.Addr().(*net.TCPAddr).Port
+
+	// Pick a port with no listener so wait-ready remains active until the
+	// configure operation publishes readyPort under the supervisor mutex.
+	unused, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stalePort := unused.Addr().(*net.TCPAddr).Port
+	_ = unused.Close()
+
+	sv := newTestSupervisor(t, "sleep 60", dir, sock)
+	sv.Port = stalePort
+	errCh := make(chan error, 1)
+	go func() { errCh <- sv.Run() }()
+	waitForSocket(t, sock, 2*time.Second)
+
+	waitResult := make(chan string, 1)
+	go func() {
+		resp, _ := SendWithTimeout(sock, "wait-ready:2", 3*time.Second)
+		waitResult <- resp
+	}()
+	time.Sleep(50 * time.Millisecond)
+
+	results := make(chan string, 2)
+	for _, value := range []string{"one", "two"} {
+		value := value
+		go func() {
+			resp, _ := ConfigureAndSend(sock, "restart", map[string]string{"VALUE": value}, readyPort)
+			results <- resp
+		}()
+	}
+	for range 2 {
+		if resp := <-results; resp != "ok" {
+			t.Fatalf("configure/restart response = %q, want ok", resp)
+		}
+	}
+	if resp := <-waitResult; resp != "ok" {
+		t.Fatalf("wait-ready did not observe atomically updated port: %q", resp)
+	}
+
+	_, _ = Send(sock, "shutdown")
+	<-errCh
+}
+
+func TestSupervisor_ShutdownRejectsQueuedConfigure(t *testing.T) {
+	dir := t.TempDir()
+	sock := tmpSocket(t)
+	marker := filepath.Join(dir, "starts")
+	// Keep shutdown in stopChildLocked long enough to queue a configure action
+	// behind its opMu. The command is a real child process, not a mocked state.
+	command := "trap 'sleep 1; exit 0' TERM; echo $$ >> " + marker + "; sleep 60"
+	sv := newTestSupervisor(t, command, dir, sock)
+	errCh := make(chan error, 1)
+	go func() { errCh <- sv.Run() }()
+	waitForSocket(t, sock, 2*time.Second)
+	waitForFile(t, marker, 2*time.Second)
+
+	shutdownResult := make(chan string, 1)
+	go func() {
+		resp, _ := Send(sock, "shutdown")
+		shutdownResult <- resp
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		sv.mu.Lock()
+		terminal := sv.terminal
+		sv.mu.Unlock()
+		if terminal {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("shutdown did not enter terminal state")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	configured := make(chan error, 1)
+	go func() {
+		_, err := sv.configureAndAct(configureRequest{Action: "restart", Env: map[string]string{"AFTER": "shutdown"}})
+		configured <- err
+	}()
+	if err := <-configured; !errors.Is(err, errSupervisorShuttingDown) {
+		t.Fatalf("queued configure error = %v, want terminal shutdown error", err)
+	}
+	if resp := <-shutdownResult; resp != "ok" {
+		t.Fatalf("shutdown response = %q, want ok", resp)
+	}
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("supervisor returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("supervisor did not exit after terminal shutdown")
+	}
+
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if starts := splitNonEmpty(string(data)); len(starts) != 1 {
+		t.Fatalf("queued configure spawned after shutdown: starts=%q", data)
+	}
+	if _, err := os.Stat(ChildPidPath(sock)); !os.IsNotExist(err) {
+		t.Fatalf("terminal shutdown left child sidecar: %v", err)
+	}
+}
+
+func TestConfigureAndSendValidatesSupervisorResponse(t *testing.T) {
+	t.Run("legacy supervisor", func(t *testing.T) {
+		sock, requests := protocolReplySupervisor(t, "unknown command: configure-action")
+		resp, err := ConfigureAndSend(sock, "restart", map[string]string{"NEW": "value"}, 4321)
+		if err == nil || !strings.Contains(err.Error(), "supervisor uses an older protocol; run gtl stop --kill then gtl start") {
+			t.Fatalf("legacy configure error = %v, want actionable protocol upgrade error", err)
+		}
+		if resp != "" {
+			t.Fatalf("legacy configure response = %q, want empty on error", resp)
+		}
+		if request := <-requests; !strings.HasPrefix(request, "configure-action:") {
+			t.Fatalf("legacy supervisor request = %q, want configure-action", request)
+		}
+	})
+
+	t.Run("server error", func(t *testing.T) {
+		sock, _ := protocolReplySupervisor(t, "error: rejected")
+		_, err := ConfigureAndSend(sock, "restart", map[string]string{}, 0)
+		if err == nil || !strings.Contains(err.Error(), "supervisor returned runtime configuration error: rejected") {
+			t.Fatalf("server error = %v, want normalized error", err)
+		}
+	})
+
+	t.Run("unexpected response", func(t *testing.T) {
+		sock, _ := protocolReplySupervisor(t, "maybe")
+		_, err := ConfigureAndSend(sock, "restart", map[string]string{}, 0)
+		if err == nil || !strings.Contains(err.Error(), "unexpected supervisor response") {
+			t.Fatalf("unexpected response error = %v", err)
+		}
+	})
+
+	t.Run("start already running", func(t *testing.T) {
+		sock, _ := protocolReplySupervisor(t, "already running")
+		resp, err := ConfigureAndSend(sock, "start", map[string]string{}, 0)
+		if err != nil || resp != "already running" {
+			t.Fatalf("start response = %q, %v; want already running, nil", resp, err)
+		}
+	})
+}
+
+func protocolReplySupervisor(t *testing.T, reply string) (string, <-chan string) {
+	t.Helper()
+	sock := tmpSocket(t)
+	listener, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sock, 0600); err != nil {
+		_ = listener.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	requests := make(chan string, 1)
+	go func() {
+		defer close(requests)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		request, _ := io.ReadAll(conn)
+		requests <- string(request)
+		_, _ = io.WriteString(conn, reply)
+	}()
+	return sock, requests
+}
+
+// TestSupervisor_StopWaitsForSurvivingDescendant uses a real inherited pipe
+// fd. The shell leader exits on SIGTERM while its background descendant ignores
+// it; stop must escalate to the entire group before replying and the inherited
+// descriptor must reach EOF after the parent writer closes.
+func TestSupervisor_StopWaitsForSurvivingDescendant(t *testing.T) {
+	dir := t.TempDir()
+	sock := tmpSocket(t)
+	ready := filepath.Join(dir, "descendant-ready")
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	command := "sh -c 'trap \"\" TERM; echo ready > " + ready + "; echo inherited-fd; while :; do sleep 1; done' & wait"
+	sv := newTestSupervisor(t, command, dir, sock)
+	sv.ChildStdout = writer
+	sv.ChildStderr = writer
+	sv.StopTimeout = 150 * time.Millisecond
+	sv.KillTimeout = 2 * time.Second
+	errCh := make(chan error, 1)
+	go func() { errCh <- sv.Run() }()
+	waitForSocket(t, sock, 2*time.Second)
+	waitForFile(t, ready, 2*time.Second)
+
+	start := time.Now()
+	resp, err := Send(sock, "stop")
+	if err != nil {
+		t.Fatalf("stop failed: %v", err)
+	}
+	if resp != "ok" {
+		t.Fatalf("stop response = %q, want ok", resp)
+	}
+	if elapsed := time.Since(start); elapsed < sv.StopTimeout {
+		t.Fatalf("stop returned before graceful process-group timeout: %s", elapsed)
+	}
+	if _, err := os.Stat(ChildPidPath(sock)); !os.IsNotExist(err) {
+		t.Fatalf("child group sidecar remains after successful stop: %v", err)
+	}
+
+	_ = writer.Close()
+	eof := make(chan error, 1)
+	go func() { _, err := io.ReadAll(reader); eof <- err }()
+	select {
+	case err := <-eof:
+		if err != nil {
+			t.Fatalf("reading inherited fd: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("surviving descendant still held the inherited output fd after stop")
+	}
+
+	_, _ = Send(sock, "shutdown")
+	<-errCh
+}
+
 func TestSupervisor_GetCommand(t *testing.T) {
 	dir := t.TempDir()
 	sock := tmpSocket(t)
@@ -300,10 +603,10 @@ func TestSupervisor_GetCommandLargeReply(t *testing.T) {
 	<-errCh
 }
 
-// TestSupervisor_StartDuringStopReturnsRetryError verifies that a 'start' racing
-// a stop-in-progress gets an explicit retry error rather than a misleading "ok"
-// for a child that was never started.
-func TestSupervisor_StartDuringStopReturnsRetryError(t *testing.T) {
+// TestSupervisor_StartDuringStopIsSerialized verifies that a racing start never
+// reports "ok" without a child. Lifecycle operations are serialized, so by the
+// time start runs the restart has completed and it accurately reports running.
+func TestSupervisor_StartDuringStopIsSerialized(t *testing.T) {
 	dir := t.TempDir()
 	sock := tmpSocket(t)
 	marker := filepath.Join(dir, "started")
@@ -317,8 +620,7 @@ func TestSupervisor_StartDuringStopReturnsRetryError(t *testing.T) {
 	waitForSocket(t, sock, 2*time.Second)
 	waitForFile(t, marker, 2*time.Second)
 
-	// Enter the stop window (s.mu released before the SIGTERM linger), then fire
-	// a start into it.
+	// Enter the stop window, then fire a start into it.
 	go func() { _, _ = Send(sock, "restart") }()
 	time.Sleep(300 * time.Millisecond)
 
@@ -326,8 +628,8 @@ func TestSupervisor_StartDuringStopReturnsRetryError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("racing start send failed: %v", err)
 	}
-	if !strings.Contains(resp, "stop in progress") {
-		t.Errorf("expected a retry error, got %q", resp)
+	if resp != "already running" {
+		t.Errorf("expected serialized start to find the restarted child, got %q", resp)
 	}
 
 	// The supervisor must recover: restart finishes and the server is running.
@@ -535,25 +837,219 @@ func reapChildGroup(t *testing.T, sock string) {
 	_ = os.Remove(ChildPidPath(sock))
 }
 
-// tmpSocket returns a short /tmp socket path (macOS caps unix socket paths at
-// ~104 bytes, which t.TempDir() paths exceed) and registers its cleanup.
+// tmpSocket returns a short socket path in a private immediate child of /tmp.
+// macOS caps unix socket paths at ~104 bytes, which t.TempDir() paths exceed.
 func tmpSocket(t *testing.T) string {
 	t.Helper()
-	f, err := os.CreateTemp("/tmp", "gtl-test-*.sock")
+	dir, err := os.MkdirTemp("/tmp", "gtl-test-")
 	if err != nil {
-		t.Fatalf("create temp sock: %v", err)
+		t.Fatalf("create temp socket directory: %v", err)
 	}
-	sock := f.Name()
-	_ = f.Close()
-	_ = os.Remove(sock)
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatalf("secure temp socket directory: %v", err)
+	}
+	sock := filepath.Join(dir, "gtl.sock")
 	t.Cleanup(func() {
 		reapChildGroup(t, sock)
-		_ = os.Remove(sock)
-		_ = os.Remove(ChildPidPath(sock))
-		_ = os.Remove(PidPath(sock))
+		_ = os.RemoveAll(dir)
 	})
 	return sock
 }
+
+func TestSupervisorSecurityBoundary(t *testing.T) {
+	t.Run("rejects direct tmp socket", func(t *testing.T) {
+		if err := EnsureSocketDir("/tmp/gtl-direct.sock"); err == nil {
+			t.Fatal("EnsureSocketDir accepted a socket directly in /tmp")
+		}
+	})
+
+	t.Run("rejects insecure and symlinked parents", func(t *testing.T) {
+		dir, err := os.MkdirTemp("/tmp", "gtl-security-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		if err := os.Chmod(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateSocketDir(filepath.Join(dir, "gtl.sock")); err == nil {
+			t.Fatal("ValidateSocketDir accepted an insecure parent")
+		}
+		if err := os.Chmod(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		link := dir + "-link"
+		if err := os.Symlink(dir, link); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Remove(link) })
+		if err := ValidateSocketDir(filepath.Join(link, "gtl.sock")); err == nil {
+			t.Fatal("ValidateSocketDir accepted a symlinked parent")
+		}
+	})
+
+	t.Run("rejects public socket before configuration", func(t *testing.T) {
+		sock := tmpSocket(t)
+		ln, err := net.Listen("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = ln.Close() }()
+		if err := os.Chmod(sock, 0666); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ConfigureAndSend(sock, "start", nil, 0); err == nil {
+			t.Fatal("ConfigureAndSend connected to a public socket")
+		}
+	})
+
+	t.Run("does not follow state-file symlinks", func(t *testing.T) {
+		sock := tmpSocket(t)
+		target := filepath.Join(t.TempDir(), "target")
+		if err := os.WriteFile(target, []byte("unchanged"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		statePath := PidPath(sock)
+		if err := os.Symlink(target, statePath); err != nil {
+			t.Fatal(err)
+		}
+		if err := WriteStateFile(statePath, []byte("replacement")); err == nil {
+			t.Fatal("WriteStateFile accepted a symlink")
+		}
+		data, err := os.ReadFile(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := string(data); got != "unchanged" {
+			t.Fatalf("symlink target changed to %q", got)
+		}
+	})
+
+	t.Run("rejects state FIFOs without blocking", func(t *testing.T) {
+		sock := tmpSocket(t)
+		statePath := PidPath(sock)
+		if err := syscall.Mkfifo(statePath, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadStateFile(statePath); err == nil {
+			t.Fatal("ReadStateFile accepted a FIFO")
+		}
+	})
+
+	t.Run("validates foreign owner metadata", func(t *testing.T) {
+		info := fakeFileInfo{
+			mode: os.ModeSocket | 0600,
+			sys:  &syscall.Stat_t{Uid: uint32(os.Geteuid() + 1)},
+		}
+		if err := validateOwnedPrivateSocket(info); err == nil {
+			t.Fatal("private socket validator accepted foreign ownership")
+		}
+	})
+}
+
+func TestShutdownLegacyWaitsForSocketRemoval(t *testing.T) {
+	worktree := t.TempDir()
+	sock := LegacySocketPath(canonicalWorktreePath(worktree))
+	listener, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sock, 0600); err != nil {
+		_ = listener.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = os.Remove(sock)
+	})
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = io.ReadAll(conn)
+		_, _ = conn.Write([]byte("ok"))
+		_ = conn.Close()
+		_ = listener.Close()
+		_ = os.Remove(sock)
+	}()
+
+	if err := ShutdownLegacy(worktree); err != nil {
+		t.Fatalf("ShutdownLegacy: %v", err)
+	}
+	if _, err := os.Lstat(sock); !os.IsNotExist(err) {
+		t.Fatalf("legacy socket still present after shutdown: %v", err)
+	}
+}
+
+func TestLegacyPresentRecognizesCanonicalWorktree(t *testing.T) {
+	worktree := t.TempDir()
+	aliasRoot := t.TempDir()
+	alias := filepath.Join(aliasRoot, "worktree-alias")
+	if err := os.Symlink(worktree, alias); err != nil {
+		t.Fatal(err)
+	}
+	sock := LegacySocketPath(canonicalWorktreePath(worktree))
+	listener, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sock, 0600); err != nil {
+		_ = listener.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = os.Remove(sock)
+	})
+
+	present, err := LegacyPresent(alias)
+	if err != nil {
+		t.Fatalf("LegacyPresent: %v", err)
+	}
+	if !present {
+		t.Fatal("LegacyPresent did not detect canonical legacy socket through alias")
+	}
+}
+
+func TestShutdownLegacyRemovesRefusedSocket(t *testing.T) {
+	worktree := t.TempDir()
+	sock := LegacySocketPath(worktree)
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Bind(fd, &syscall.SockaddrUnix{Name: sock}); err != nil {
+		_ = syscall.Close(fd)
+		t.Fatal(err)
+	}
+	if err := syscall.Close(fd); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sock, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(sock) })
+
+	if err := ShutdownLegacy(worktree); err != nil {
+		t.Fatalf("ShutdownLegacy stale socket: %v", err)
+	}
+	if _, err := os.Lstat(sock); !os.IsNotExist(err) {
+		t.Fatalf("stale legacy socket remains: %v", err)
+	}
+}
+
+type fakeFileInfo struct {
+	mode os.FileMode
+	sys  any
+}
+
+func (f fakeFileInfo) Name() string       { return "fake" }
+func (f fakeFileInfo) Size() int64        { return 0 }
+func (f fakeFileInfo) Mode() os.FileMode  { return f.mode }
+func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeFileInfo) IsDir() bool        { return f.mode.IsDir() }
+func (f fakeFileInfo) Sys() any           { return f.sys }
 
 func waitForFileGone(t *testing.T, path string, timeout time.Duration) {
 	t.Helper()
@@ -641,15 +1137,7 @@ func TestSupervisor_SIGHUPShutdown(t *testing.T) {
 // once the write deadline fires on the stuck connection.
 func TestSupervisor_WriteDeadlineUnblocksLock(t *testing.T) {
 	dir := t.TempDir()
-	// macOS caps unix socket paths at ~104 bytes; t.TempDir() paths exceed that.
-	f, err := os.CreateTemp("/tmp", "gtl-test-*.sock")
-	if err != nil {
-		t.Fatalf("create temp sock: %v", err)
-	}
-	sock := f.Name()
-	_ = f.Close()
-	_ = os.Remove(sock)
-	t.Cleanup(func() { _ = os.Remove(sock) })
+	sock := tmpSocket(t)
 
 	sv := newTestSupervisor(t, "sleep 60", dir, sock)
 	sv.ConnWriteDeadline = 200 * time.Millisecond // fast deadline for the test
