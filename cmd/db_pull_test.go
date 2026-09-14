@@ -153,6 +153,7 @@ func TestDBPull_DryRun_NoSideEffects(t *testing.T) {
 	wt := t.TempDir()
 	if err := os.WriteFile(filepath.Join(wt, ".treeline.yml"), []byte(`
 project: club
+start_command: echo legacy
 database:
   adapter: postgresql
   template: club_development
@@ -164,6 +165,11 @@ database:
 		t.Fatal(err)
 	}
 	writeRegistry(t, wt)
+	configPath := filepath.Join(wt, ".treeline.yml")
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("STAGING_DATABASE_URL", "postgres://u:p@db.example.com:5432/club_staging")
 	t.Chdir(wt)
 
@@ -184,6 +190,13 @@ database:
 	}
 	if _, err := os.Stat(filepath.Join(wt, "tmp", "gtl-db")); err == nil {
 		t.Error("dry-run must not create tmp/gtl-db")
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Error("dry-run must not migrate project configuration")
 	}
 }
 

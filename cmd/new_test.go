@@ -55,6 +55,55 @@ func TestNewCmd_StrictFlagRegistered(t *testing.T) {
 	}
 }
 
+func TestNewCmd_DryRunDoesNotMigrateConfigOrCreateGitignore(t *testing.T) {
+	mainRepo := t.TempDir()
+	runGit(t, mainRepo, "init", "--initial-branch=main")
+	marker := filepath.Join(mainRepo, "started")
+	configPath := filepath.Join(mainRepo, config.ProjectConfigFile)
+	original := "project: preview\ndefault_branch: main\nports_needed: 2\ncommands:\n  start: touch " + marker + "\n"
+	writeFile(t, configPath, original)
+	runGit(t, mainRepo, "add", config.ProjectConfigFile)
+	runGit(t, mainRepo, "commit", "-m", "config")
+
+	t.Setenv("GTL_HOME", t.TempDir())
+	chdir(t, mainRepo)
+	originalBase, originalPath := newBase, newPath
+	originalStart, originalOpen := newStart, newOpen
+	originalDryRun, originalForce := newDryRun, newForce
+	originalNoSetup, originalStrict := newNoSetup, newStrict
+	t.Cleanup(func() {
+		newBase, newPath = originalBase, originalPath
+		newStart, newOpen = originalStart, originalOpen
+		newDryRun, newForce = originalDryRun, originalForce
+		newNoSetup, newStrict = originalNoSetup, originalStrict
+	})
+	newPath = filepath.Join(filepath.Dir(mainRepo), "preview-feature")
+	newStart = true
+	newDryRun = true
+
+	for _, branch := range []string{"feature", "main"} {
+		if err := newCmd.RunE(newCmd, []string{branch}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != original {
+		t.Errorf("dry-run changed config:\n%s", after)
+	}
+	if _, err := os.Stat(filepath.Join(mainRepo, ".gitignore")); !os.IsNotExist(err) {
+		t.Errorf("dry-run created .gitignore: %v", err)
+	}
+	if _, err := os.Stat(newPath); !os.IsNotExist(err) {
+		t.Errorf("dry-run created worktree: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Errorf("dry-run started the application: %v", err)
+	}
+}
+
 func TestSetupHydrateSeam_WiredByCmd(t *testing.T) {
 	// The cmd package's init must hand setup the source-hydration path;
 	// without it, provision.database.auto silently degrades to the empty

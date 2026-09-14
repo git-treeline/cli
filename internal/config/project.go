@@ -63,10 +63,10 @@ var ProjectDefaults = map[string]any{
 		"template": nil,
 		"name":     "{template}_{worktree}",
 	},
-	"copy_files":   []any{},
-	"env":          map[string]any{},
-	"hooks":        map[string]any{},
-	"commands":     map[string]any{},
+	"copy_files":    []any{},
+	"env":           map[string]any{},
+	"hooks":         map[string]any{},
+	"commands":      map[string]any{},
 	"editor":        map[string]any{},
 	"merge_target":  "",
 	"worktree_base": "",
@@ -76,13 +76,25 @@ type ProjectConfig struct {
 	ProjectRoot string
 	Data        map[string]any
 	loadErr     error
+	readOnly    bool
 	// sawPatternKey records that the file on disk still spells the primary
 	// database key as `pattern`, so migrateDatabaseName knows to rewrite it.
 	sawPatternKey bool
 }
 
 func LoadProjectConfig(projectRoot string) *ProjectConfig {
-	pc := &ProjectConfig{ProjectRoot: projectRoot}
+	return loadProjectConfig(projectRoot, false)
+}
+
+// LoadProjectConfigReadOnly loads project configuration and applies legacy
+// migrations in memory without rewriting the config file. Use it for previews
+// so their reported configuration matches a normal load without changing disk.
+func LoadProjectConfigReadOnly(projectRoot string) *ProjectConfig {
+	return loadProjectConfig(projectRoot, true)
+}
+
+func loadProjectConfig(projectRoot string, readOnly bool) *ProjectConfig {
+	pc := &ProjectConfig{ProjectRoot: projectRoot, readOnly: readOnly}
 	pc.Data = pc.load()
 	pc.migrateDatabaseName()
 	pc.migrateDefaultBranch()
@@ -949,6 +961,9 @@ func (pc *ProjectConfig) migrateDatabaseName() {
 		return
 	}
 	pc.sawPatternKey = false
+	if pc.readOnly {
+		return
+	}
 
 	path := pc.configPath()
 	raw, err := os.ReadFile(path)
@@ -1011,6 +1026,9 @@ func (pc *ProjectConfig) migrateDefaultBranch() {
 		pc.Data["merge_target"] = old
 	}
 	delete(pc.Data, "default_branch")
+	if pc.readOnly {
+		return
+	}
 
 	path := pc.configPath()
 	raw, err := os.ReadFile(path)
@@ -1050,6 +1068,9 @@ func (pc *ProjectConfig) migrateCommands() {
 		delete(pc.Data, "start_command")
 	}
 	pc.Data["commands"] = cmds
+	if pc.readOnly {
+		return
+	}
 
 	path := pc.configPath()
 	raw, err := os.ReadFile(path)
@@ -1132,6 +1153,15 @@ func (pc *ProjectConfig) migrateEnvFile() {
 		return
 	}
 
+	if pc.readOnly {
+		if target == source || source == "" {
+			pc.Data["env_file"] = target
+		} else {
+			pc.Data["env_file"] = map[string]any{"path": target, "seed_from": source}
+		}
+		return
+	}
+
 	path := pc.configPath()
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -1173,6 +1203,9 @@ func (pc *ProjectConfig) migrateEditor() {
 
 	editorMap["title"] = vt
 	delete(editorMap, "vscode_title")
+	if pc.readOnly {
+		return
+	}
 
 	path := pc.configPath()
 	raw, err := os.ReadFile(path)
@@ -1186,6 +1219,14 @@ func (pc *ProjectConfig) migrateEditor() {
 func (pc *ProjectConfig) migratePortCount() {
 	_, hasOld := pc.Data["ports_needed"]
 	if !hasOld {
+		return
+	}
+	if pc.readOnly {
+		raw, err := os.ReadFile(pc.configPath())
+		if err == nil && !strings.Contains(string(raw), "port_count:") {
+			pc.Data["port_count"] = pc.Data["ports_needed"]
+		}
+		delete(pc.Data, "ports_needed")
 		return
 	}
 

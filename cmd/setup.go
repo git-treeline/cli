@@ -60,19 +60,25 @@ var setupCmd = &cobra.Command{
 		}
 
 		setupAbs, _ := filepath.Abs(path)
-		if err := checkDriftOrAbortForSetup(setupAbs); err != nil {
-			return cliErr(cmd, err)
+		if !setupDryRun {
+			if err := checkDriftOrAbortForSetup(setupAbs); err != nil {
+				return cliErr(cmd, err)
+			}
 		}
 
 		uc := config.LoadUserConfig("")
-		s := setup.New(path, setupMainRepo, uc)
-		s.Options.DryRun = setupDryRun
+		s := setup.NewWithOptions(path, setupMainRepo, uc, setup.Options{DryRun: setupDryRun})
 		if _, err := s.Run(); err != nil {
 			return err
 		}
 
 		absPath, _ := filepath.Abs(path)
-		pc := config.LoadProjectConfig(absPath)
+		var pc *config.ProjectConfig
+		if setupDryRun {
+			pc = config.LoadProjectConfigReadOnly(absPath)
+		} else {
+			pc = config.LoadProjectConfig(absPath)
+		}
 		printSetupDiagnostics(absPath, pc)
 
 		return nil

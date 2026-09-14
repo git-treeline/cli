@@ -60,7 +60,7 @@ func runDBPull(cmd *cobra.Command, env string) error {
 		return cliErr(cmd, errPullNotPostgres())
 	}
 
-	pc := config.LoadProjectConfig(info.worktreeDir)
+	pc := config.LoadProjectConfigReadOnly(info.worktreeDir)
 	spec, err := buildSourceSpec(pc, env)
 	if err != nil {
 		return cliErr(cmd, err)

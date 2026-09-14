@@ -51,6 +51,9 @@ type Deps struct {
 	DBExists func(name string) (bool, error)
 	// CreateDB creates an empty local database.
 	CreateDB func(name string) error
+	// DropDB removes a database created by a failed hydration. It is never
+	// called for a template that existed before this run.
+	DropDB func(name string) error
 	// HydrateFromSource dumps a configured source env and restores it into the
 	// named template database, creating it. Reuses the gtl db pull machinery.
 	HydrateFromSource func(template, sourceEnv string) error
@@ -225,7 +228,10 @@ func runDatabase(a Action, repoDir string, d Deps) error {
 	switch a.DBMode {
 	case DBModeSource:
 		d.Log("hydrating %q from source %q", a.DBTemplate, a.DBSource)
-		return d.HydrateFromSource(a.DBTemplate, a.DBSource)
+		if err := d.HydrateFromSource(a.DBTemplate, a.DBSource); err != nil {
+			return cleanupFailedTemplate(a.DBTemplate, err, d)
+		}
+		return nil
 	case DBModeHydrate:
 		d.Log("creating empty template %q", a.DBTemplate)
 		if err := d.CreateDB(a.DBTemplate); err != nil {
@@ -233,7 +239,7 @@ func runDatabase(a Action, repoDir string, d Deps) error {
 		}
 		d.Log("running: %s", a.DBHydrate)
 		if err := d.RunInDir(repoDir, a.DBHydrate); err != nil {
-			return fmt.Errorf("hydrate command failed: %s: %w", a.DBHydrate, err)
+			return cleanupFailedTemplate(a.DBTemplate, fmt.Errorf("hydrate command failed: %s: %w", a.DBHydrate, err), d)
 		}
 		return nil
 	default:
@@ -244,6 +250,16 @@ func runDatabase(a Action, repoDir string, d Deps) error {
 		d.Warn("template %q created empty — worktree databases will be empty until a schema is loaded (set provision.database.source or provision.database.hydrate)", a.DBTemplate)
 		return nil
 	}
+}
+
+func cleanupFailedTemplate(template string, cause error, d Deps) error {
+	if d.DropDB == nil {
+		return cause
+	}
+	if err := d.DropDB(template); err != nil {
+		return fmt.Errorf("%w (removing incomplete template %q: %v)", cause, template, err)
+	}
+	return cause
 }
 
 // missingPackages returns the subset of pkgs not already installed.

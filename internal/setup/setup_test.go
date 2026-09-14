@@ -22,14 +22,37 @@ import (
 
 var ansiRE = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
-// --- updateOrAppend tests ---
+func createSetupSQLiteFixture(t *testing.T, path string, value int) {
+	t.Helper()
+	cmd := exec.Command("sqlite3", path, fmt.Sprintf("CREATE TABLE widgets (value INTEGER); INSERT INTO widgets VALUES (%d);", value))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("creating SQLite fixture: %v: %s", err, out)
+	}
+}
 
-func TestUpdateOrAppend_CreatesNew(t *testing.T) {
+func setupSQLiteValue(t *testing.T, path string) string {
+	t.Helper()
+	out, err := exec.Command("sqlite3", path, "SELECT value FROM widgets").CombinedOutput()
+	if err != nil {
+		t.Fatalf("querying SQLite fixture: %v: %s", err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// --- managed env writer tests ---
+
+func isolateEnvOwnership(t *testing.T) {
+	t.Helper()
+	t.Setenv("GTL_HOME", filepath.Join(t.TempDir(), "gtl-home"))
+}
+
+func TestWriteManagedEnv_CreatesNew(t *testing.T) {
+	isolateEnvOwnership(t)
 	dir := t.TempDir()
 	f := filepath.Join(dir, ".env")
 	_ = os.WriteFile(f, []byte("EXISTING=hello\n"), 0o644)
 
-	if err := updateOrAppend(f, "PORT", "3010"); err != nil {
+	if err := writeManagedEnv(f, map[string]string{"PORT": "3010"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -43,12 +66,13 @@ func TestUpdateOrAppend_CreatesNew(t *testing.T) {
 	}
 }
 
-func TestUpdateOrAppend_UpdatesExisting(t *testing.T) {
+func TestWriteManagedEnv_UpdatesExisting(t *testing.T) {
+	isolateEnvOwnership(t)
 	dir := t.TempDir()
 	f := filepath.Join(dir, ".env")
 	_ = os.WriteFile(f, []byte("PORT=3000\nOTHER=val\n"), 0o644)
 
-	if err := updateOrAppend(f, "PORT", "3010"); err != nil {
+	if err := writeManagedEnv(f, map[string]string{"PORT": "3010"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -65,11 +89,35 @@ func TestUpdateOrAppend_UpdatesExisting(t *testing.T) {
 	}
 }
 
-func TestUpdateOrAppend_CreatesFileIfMissing(t *testing.T) {
+func TestWriteManagedEnv_PreservesDollarValuesOnRepeatedRuns(t *testing.T) {
+	isolateEnvOwnership(t)
 	dir := t.TempDir()
 	f := filepath.Join(dir, ".env")
+	value := `abc$def${ghi}\\quoted"`
 
-	if err := updateOrAppend(f, "PORT", "3010"); err != nil {
+	if err := writeManagedEnv(f, map[string]string{"TOKEN": value}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeManagedEnv(f, map[string]string{"TOKEN": value}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `TOKEN="abc$def${ghi}\\\\quoted\""` + "\n"
+	if got := string(data); got != want {
+		t.Errorf("env file = %q, want %q", got, want)
+	}
+}
+
+func TestWriteManagedEnv_CreatesFileIfMissing(t *testing.T) {
+	isolateEnvOwnership(t)
+	dir := t.TempDir()
+	f := filepath.Join(dir, "config", ".env")
+
+	if err := writeManagedEnv(f, map[string]string{"PORT": "3010"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -99,6 +147,7 @@ func testSetup(t *testing.T, yamlContent string) (*Setup, string, string) {
 	t.Helper()
 
 	dir := t.TempDir()
+	t.Setenv("GTL_HOME", filepath.Join(dir, "gtl-home"))
 	mainRepo := filepath.Join(dir, "main")
 	worktree := filepath.Join(dir, "worktree")
 	_ = os.MkdirAll(mainRepo, 0o755)
@@ -369,6 +418,62 @@ env:
 	}
 }
 
+func TestNewWithOptions_DryRunDoesNotMigrateOrCleanUp(t *testing.T) {
+	dir := t.TempDir()
+	mainRepo := filepath.Join(dir, "main")
+	worktreePath := filepath.Join(dir, "worktree")
+	if err := os.MkdirAll(mainRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(worktreePath, config.ProjectConfigFile)
+	projectConfig := []byte("project: renamed\nports_needed: 2\ndatabase:\n  pattern: \"{template}_{worktree}\"\n")
+	if err := os.WriteFile(configPath, projectConfig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	userPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(userPath, []byte(`{"port":{"base":3000,"increment":10}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	regPath := filepath.Join(dir, "registry.json")
+	reg := registry.New(regPath)
+	if err := reg.Allocate(registry.Allocation{"project": "old", "worktree": worktreePath, "port": 3010, "ports": []any{float64(3010)}}); err != nil {
+		t.Fatal(err)
+	}
+	registryBefore, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	previousRegistryPath := RegistryPath
+	RegistryPath = regPath
+	t.Cleanup(func() { RegistryPath = previousRegistryPath })
+	s := NewWithOptions(worktreePath, mainRepo, config.LoadUserConfig(userPath), Options{DryRun: true})
+	s.Log = &bytes.Buffer{}
+	if _, err := s.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if s.ProjectConfig.PortsNeeded() != 2 {
+		t.Error("dry-run config did not migrate ports_needed in memory")
+	}
+	configAfter, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(configAfter) != string(projectConfig) {
+		t.Errorf("dry-run changed project config:\n%s", configAfter)
+	}
+	registryAfter, err := os.ReadFile(regPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(registryAfter) != string(registryBefore) {
+		t.Errorf("dry-run changed registry:\nbefore=%s\nafter=%s", registryBefore, registryAfter)
+	}
+}
+
 func TestRun_RefreshOnly(t *testing.T) {
 	s, mainRepo, worktree := testSetup(t, `
 project: test
@@ -497,7 +602,7 @@ env:
 `)
 	_ = os.WriteFile(filepath.Join(mainRepo, ".env"), []byte(""), 0o644)
 	_ = os.MkdirAll(filepath.Join(mainRepo, "db"), 0o755)
-	_ = os.WriteFile(filepath.Join(mainRepo, "db", "development.sqlite3"), []byte("sqlite-data"), 0o644)
+	createSetupSQLiteFixture(t, filepath.Join(mainRepo, "db", "development.sqlite3"), 42)
 
 	alloc, err := s.Run()
 	if err != nil {
@@ -510,12 +615,8 @@ env:
 
 	// The cloned DB should exist in the worktree
 	clonedPath := filepath.Join(worktree, alloc.PrimaryDatabase())
-	data, err := os.ReadFile(clonedPath)
-	if err != nil {
-		t.Fatalf("expected cloned SQLite file at %s: %v", clonedPath, err)
-	}
-	if string(data) != "sqlite-data" {
-		t.Errorf("expected cloned content, got %q", string(data))
+	if got := setupSQLiteValue(t, clonedPath); got != "42" {
+		t.Errorf("expected cloned content, got %q", got)
 	}
 }
 
@@ -1186,7 +1287,7 @@ env:
 	_ = os.WriteFile(filepath.Join(mainRepo, ".treeline.yml"), []byte(yml), 0o644)
 	_ = os.WriteFile(filepath.Join(mainRepo, ".env"), []byte(""), 0o644)
 	_ = os.MkdirAll(filepath.Join(mainRepo, "db"), 0o755)
-	_ = os.WriteFile(filepath.Join(mainRepo, "db", "development.sqlite3"), []byte("sqlite-data"), 0o644)
+	createSetupSQLiteFixture(t, filepath.Join(mainRepo, "db", "development.sqlite3"), 42)
 
 	regPath := filepath.Join(dir, "registry.json")
 	confPath := filepath.Join(dir, "config.json")
@@ -1220,12 +1321,8 @@ env:
 	}
 
 	clonedPath := filepath.Join(worktreeDir, alloc.PrimaryDatabase())
-	data, err := os.ReadFile(clonedPath)
-	if err != nil {
-		t.Fatalf("expected cloned SQLite file at %s: %v", clonedPath, err)
-	}
-	if string(data) != "sqlite-data" {
-		t.Errorf("expected cloned content, got %q", string(data))
+	if got := setupSQLiteValue(t, clonedPath); got != "42" {
+		t.Errorf("expected cloned content, got %q", got)
 	}
 }
 
@@ -1585,16 +1682,16 @@ database:
   pattern: "myapp_{worktree}"
 `
 	tests := []struct {
-		name        string
-		yaml        string
-		adapter     *fakeAdapter
-		hydrate     func(*config.ProjectConfig, string, string) error
-		strict      bool
-		wantErr     bool
-		wantState   string // "" = healthy
-		wantReason  string // substring of the degradation reason
-		wantCalls   []string
-		wantCloned  bool
+		name       string
+		yaml       string
+		adapter    *fakeAdapter
+		hydrate    func(*config.ProjectConfig, string, string) error
+		strict     bool
+		wantErr    bool
+		wantState  string // "" = healthy
+		wantReason string // substring of the degradation reason
+		wantCalls  []string
+		wantCloned bool
 	}{
 		{
 			name:       "template exists — plain clone, no degradation",
@@ -1687,25 +1784,29 @@ provision:
 			wantCalls:  []string{"create:myapp_feature"},
 		},
 		{
-			name:      "empty fallback also fails — database absent, setup continues",
-			yaml:      base,
-			adapter:   func() *fakeAdapter { f := newFakeAdapter(); f.createErr = errors.New("connection refused"); return f }(),
-			wantState: "absent",
+			name:       "empty fallback also fails — database absent, setup continues",
+			yaml:       base,
+			adapter:    func() *fakeAdapter { f := newFakeAdapter(); f.createErr = errors.New("connection refused"); return f }(),
+			wantState:  "absent",
 			wantReason: "also failed",
 		},
 		{
-			name:       "clone fails with template present — empty fallback",
-			yaml:       base,
-			adapter:    func() *fakeAdapter { f := newFakeAdapter("myapp_template"); f.cloneErr = errors.New("createdb: boom"); return f }(),
+			name: "clone fails with template present — empty fallback",
+			yaml: base,
+			adapter: func() *fakeAdapter {
+				f := newFakeAdapter("myapp_template")
+				f.cloneErr = errors.New("createdb: boom")
+				return f
+			}(),
 			wantState:  "empty",
 			wantReason: "boom",
 			wantCalls:  []string{"clone:myapp_template->myapp_feature", "create:myapp_feature"},
 		},
 		{
-			name:      "server unreachable — degrades to absent without attempting anything",
-			yaml:      base,
-			adapter:   func() *fakeAdapter { f := newFakeAdapter(); f.existsErr = errors.New("connection refused"); return f }(),
-			wantState: "absent",
+			name:       "server unreachable — degrades to absent without attempting anything",
+			yaml:       base,
+			adapter:    func() *fakeAdapter { f := newFakeAdapter(); f.existsErr = errors.New("connection refused"); return f }(),
+			wantState:  "absent",
 			wantReason: "connection refused",
 			wantCalls:  nil,
 		},

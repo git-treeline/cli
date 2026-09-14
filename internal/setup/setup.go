@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 
@@ -120,12 +119,24 @@ type Setup struct {
 // config from mainRepo to get the project name, then passes the worktree path
 // here after creation).
 func New(worktreePath string, mainRepo string, uc *config.UserConfig) *Setup {
+	return NewWithOptions(worktreePath, mainRepo, uc, Options{})
+}
+
+// NewWithOptions creates a Setup with options available before configuration
+// is loaded. Dry runs use the read-only config loader so legacy migrations are
+// reflected in the preview without changing the worktree.
+func NewWithOptions(worktreePath string, mainRepo string, uc *config.UserConfig, options Options) *Setup {
 	absPath, _ := filepath.Abs(worktreePath)
 	if mainRepo == "" {
 		mainRepo = worktree.DetectMainRepo(absPath)
 	}
 
-	pc := config.LoadProjectConfig(absPath)
+	var pc *config.ProjectConfig
+	if options.DryRun {
+		pc = config.LoadProjectConfigReadOnly(absPath)
+	} else {
+		pc = config.LoadProjectConfig(absPath)
+	}
 	reg := registry.New(RegistryPath)
 	al := allocator.New(uc, pc, reg)
 
@@ -137,6 +148,7 @@ func New(worktreePath string, mainRepo string, uc *config.UserConfig) *Setup {
 		Registry:      reg,
 		Allocator:     al,
 		Log:           os.Stdout,
+		Options:       options,
 	}
 }
 
@@ -144,11 +156,13 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	if err := s.ProjectConfig.Validate(); err != nil {
 		return nil, err
 	}
-	if err := s.handleProjectRename(); err != nil {
-		return nil, err
-	}
-	if pruned, err := s.Registry.Prune(); err == nil && pruned > 0 {
-		s.log("Reclaimed %d stale allocation(s)", pruned)
+	if !s.Options.DryRun {
+		if err := s.handleProjectRename(); err != nil {
+			return nil, err
+		}
+		if pruned, err := s.Registry.Prune(); err == nil && pruned > 0 {
+			s.log("Reclaimed %d stale allocation(s)", pruned)
+		}
 	}
 
 	worktreeName := filepath.Base(s.WorktreePath)
@@ -397,98 +411,39 @@ func BuildEnvVarsWithResolver(pc *config.ProjectConfig, alloc interpolation.Allo
 // rewrites the env file for an existing allocation. Used by gtl link/unlink to
 // immediately apply link changes without running full setup.
 func RegenerateEnvFile(worktreePath string, uc *config.UserConfig) error {
-	absPath, _ := filepath.Abs(worktreePath)
-	// Load from worktree (not mainRepo) so branch-specific config is respected
-	pc := config.LoadProjectConfig(absPath)
-	reg := registry.New(RegistryPath)
-
-	allocMap := reg.Find(absPath)
-	if allocMap == nil {
-		return nil
-	}
-
-	interpAlloc := interpolation.Allocation(allocMap)
-	branch, _ := allocMap["branch"].(string)
-
-	InjectRouterTokens(interpAlloc, pc.Project(), branch, uc.RouterDomain(), uc.TunnelDomain(""))
-
-	redisURL := interpolation.BuildRedisURL(uc.RedisURL(), interpAlloc)
-
-	resolverPkg := resolve.New(reg, absPath, branch)
-
-	envVars, err := BuildEnvVarsWithResolver(pc, interpAlloc, redisURL, resolverPkg.Resolve)
-	if err != nil {
-		return fmt.Errorf("resolving env vars: %w", err)
-	}
-
-	target := pc.EnvFileTarget()
-	envPath := filepath.Join(absPath, target)
-
-	for key, value := range envVars {
-		if err := updateOrAppend(envPath, key, value); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	_, err := SyncRuntimeEnv(worktreePath, uc)
+	return err
 }
 
 func (s *Setup) writeEnvFile(vars map[string]string) error {
 	target := s.ProjectConfig.EnvFileTarget()
 	envPath := filepath.Join(s.WorktreePath, target)
+	if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
+		return fmt.Errorf("creating env file directory: %w", err)
+	}
 
 	// Seed from the main repo's env file only on first provisioning. On a
 	// re-run (setup/refresh) the worktree env already exists and may hold
 	// manual edits — copying the seed over it would destroy them before the
-	// updateOrAppend pass below re-applies gtl's vars. Update-in-place instead.
+	// managed-env pass below re-applies Treeline's vars. Update-in-place instead.
 	if _, err := os.Stat(envPath); err != nil {
 		source := filepath.Join(s.MainRepo, s.ProjectConfig.EnvFileSource())
 		if _, err := os.Stat(source); err != nil {
 			source = filepath.Join(s.MainRepo, ".env")
 		}
 		if data, err := os.ReadFile(source); err == nil {
-			_ = platform.AtomicWriteFile(envPath, data, 0o644)
+			if err := platform.AtomicWriteFile(envPath, data, 0o644); err != nil {
+				return fmt.Errorf("seeding env file: %w", err)
+			}
 		}
 	}
 
-	for key, value := range vars {
-		if err := updateOrAppend(envPath, key, value); err != nil {
-			return err
-		}
+	if err := writeManagedEnv(envPath, vars); err != nil {
+		return err
 	}
 
 	s.log("%s written", target)
 	return nil
-}
-
-func updateOrAppend(file, key, value string) error {
-	if _, err := os.Stat(file); err != nil {
-		_ = os.WriteFile(file, []byte{}, 0o644)
-	}
-
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return err
-	}
-
-	content := string(data)
-	escaped := strings.ReplaceAll(value, `\`, `\\`)
-	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-	escaped = strings.ReplaceAll(escaped, "\n", `\n`)
-	escaped = strings.ReplaceAll(escaped, "\r", `\r`)
-	line := fmt.Sprintf(`%s="%s"`, key, escaped)
-	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(key) + `=.*$`)
-
-	if re.MatchString(content) {
-		content = re.ReplaceAllString(content, line)
-	} else {
-		if len(content) > 0 && !strings.HasSuffix(content, "\n") {
-			content += "\n"
-		}
-		content += line + "\n"
-	}
-
-	return platform.AtomicWriteFile(file, []byte(content), 0o644)
 }
 
 func (s *Setup) syncTemplateDatabase() error {

@@ -1,6 +1,37 @@
 package cmd
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/spf13/cobra"
+)
+
+func TestPreRunDryRunDoesNotCreateState(t *testing.T) {
+	for _, preview := range []bool{true, false} {
+		name := "normal"
+		if preview {
+			name = "dry-run"
+		}
+		t.Run(name, func(t *testing.T) {
+			stateDir := filepath.Join(t.TempDir(), "state")
+			t.Setenv("GTL_HOME", stateDir)
+			t.Setenv("GTL_NO_STALE_WARN", "1")
+			t.Setenv("GTL_NO_UPDATE_NOTIFY", "1")
+			command := &cobra.Command{Use: "setup"}
+			command.Flags().Bool("dry-run", preview, "")
+			rootCmd.PersistentPreRun(command, nil)
+			_, err := os.Stat(stateDir)
+			if preview && !os.IsNotExist(err) {
+				t.Fatalf("preview created state directory: %v", err)
+			}
+			if !preview && err != nil {
+				t.Fatalf("normal command did not initialize state: %v", err)
+			}
+		})
+	}
+}
 
 func TestShouldWarnStaleRouter_Truthy(t *testing.T) {
 	if !shouldWarnStaleRouter("status", "0.39.4", "0.39.2", "") {
