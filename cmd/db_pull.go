@@ -14,6 +14,7 @@ import (
 	"github.com/git-treeline/cli/internal/confirm"
 	"github.com/git-treeline/cli/internal/database"
 	"github.com/git-treeline/cli/internal/dbsource"
+	"github.com/git-treeline/cli/internal/platform"
 	"github.com/spf13/cobra"
 )
 
@@ -246,8 +247,33 @@ func dumpDir(worktreeDir string) string {
 // .gitignore so large dumps can't be accidentally staged.
 func ensureDumpDir(worktreeDir string) (string, error) {
 	dir := dumpDir(worktreeDir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("creating %s: %w", dir, err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return "", fmt.Errorf("checking %s: %w", dir, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", fmt.Errorf("refusing unsafe dump directory %s", dir)
+	}
+	// Tighten an existing dump directory, but never its parents: a worktree may
+	// be reached through a normal filesystem alias. Chmod the opened directory
+	// so a swapped path cannot redirect it to another target.
+	dirFile, err := os.Open(dir)
+	if err != nil {
+		return "", fmt.Errorf("opening %s: %w", dir, err)
+	}
+	defer func() { _ = dirFile.Close() }()
+	openedInfo, err := dirFile.Stat()
+	if err != nil {
+		return "", fmt.Errorf("checking opened %s: %w", dir, err)
+	}
+	if !openedInfo.IsDir() || !os.SameFile(info, openedInfo) {
+		return "", fmt.Errorf("dump directory changed while opening %s", dir)
+	}
+	if err := dirFile.Chmod(platform.DirMode); err != nil {
+		return "", fmt.Errorf("securing %s: %w", dir, err)
 	}
 	gi := filepath.Join(dir, ".gitignore")
 	if _, err := os.Stat(gi); errors.Is(err, os.ErrNotExist) {
@@ -413,7 +439,11 @@ func manifestPath(dir string) string { return filepath.Join(dir, "manifest.json"
 
 func readManifest(dir string) dumpManifest {
 	m := dumpManifest{Envs: map[string]manifestEntry{}}
-	raw, err := os.ReadFile(manifestPath(dir))
+	path := manifestPath(dir)
+	if err := rejectUnsafeManifest(path); err != nil {
+		return m
+	}
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return m
 	}
@@ -425,6 +455,10 @@ func readManifest(dir string) dumpManifest {
 }
 
 func writeManifestEntry(dir, env string, entry manifestEntry) error {
+	path := manifestPath(dir)
+	if err := rejectUnsafeManifest(path); err != nil {
+		return err
+	}
 	m := readManifest(dir)
 	m.Last = env
 	m.Envs[env] = entry
@@ -432,7 +466,21 @@ func writeManifestEntry(dir, env string, entry manifestEntry) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(manifestPath(dir), raw, 0o644)
+	return platform.AtomicWriteFile(path, raw, platform.PrivateFileMode)
+}
+
+func rejectUnsafeManifest(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("refusing unsafe manifest path %s", path)
+	}
+	return nil
 }
 
 func manifestLast(dir string) string { return readManifest(dir).Last }
