@@ -71,6 +71,9 @@ func NewTokenHandler(token string, appPort int) http.Handler {
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)
 			r.Out.Header.Set("X-Forwarded-Host", r.In.Host)
+			// Share sessions enter through HTTPS at the tunnel, which connects
+			// to this loopback proxy over HTTP. Do not trust a client-supplied scheme.
+			r.Out.Header.Set("X-Forwarded-Proto", "https")
 		},
 	}
 
