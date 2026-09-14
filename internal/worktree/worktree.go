@@ -201,6 +201,12 @@ func parseRepoNameFromURL(url string) string {
 // Create adds a git worktree at path. If newBranch is true, it creates a new
 // branch from base. Otherwise it checks out an existing branch.
 func Create(path, branch string, newBranch bool, base string) error {
+	return CreateInRepo("", path, branch, newBranch, base)
+}
+
+// CreateInRepo adds a git worktree using repoPath as the repository context.
+// Unlike Create, it never falls back to the process working directory.
+func CreateInRepo(repoPath, path, branch string, newBranch bool, base string) error {
 	args := []string{"worktree", "add"}
 	if newBranch {
 		args = append(args, path, "-b", branch)
@@ -211,19 +217,29 @@ func Create(path, branch string, newBranch bool, base string) error {
 		args = append(args, path, branch)
 	}
 
-	_, err := gitRun("", args...)
+	_, err := gitRun(repoPath, args...)
 	return err
 }
 
 // BranchExists checks whether a branch exists locally or as a remote tracking ref.
 func BranchExists(branch string) bool {
-	return gitCheck("", "show-ref", "--verify", "--quiet", "refs/heads/"+branch) ||
-		gitCheck("", "show-ref", "--verify", "--quiet", "refs/remotes/origin/"+branch)
+	return BranchExistsInRepo("", branch)
+}
+
+// BranchExistsInRepo checks for a branch in repoPath without consulting cwd.
+func BranchExistsInRepo(repoPath, branch string) bool {
+	return gitCheck(repoPath, "show-ref", "--verify", "--quiet", "refs/heads/"+branch) ||
+		gitCheck(repoPath, "show-ref", "--verify", "--quiet", "refs/remotes/origin/"+branch)
 }
 
 // Fetch fetches a branch from the given remote.
 func Fetch(remote, branch string) error {
-	_, err := gitRun("", "fetch", remote, branch)
+	return FetchInRepo("", remote, branch)
+}
+
+// FetchInRepo fetches a branch from remote in repoPath without consulting cwd.
+func FetchInRepo(repoPath, remote, branch string) error {
+	_, err := gitRun(repoPath, "fetch", remote, branch)
 	return err
 }
 
@@ -250,7 +266,13 @@ func IsDivergedPull(err error) bool {
 // FindWorktreeForBranch returns the path of an existing worktree that has
 // the given branch checked out, or empty string if none.
 func FindWorktreeForBranch(branch string) string {
-	out := gitOutput("", "worktree", "list", "--porcelain")
+	return FindWorktreeForBranchInRepo("", branch)
+}
+
+// FindWorktreeForBranchInRepo returns an existing worktree for branch in
+// repoPath without consulting cwd.
+func FindWorktreeForBranchInRepo(repoPath, branch string) string {
+	out := gitOutput(repoPath, "worktree", "list", "--porcelain")
 	if out == "" {
 		return ""
 	}

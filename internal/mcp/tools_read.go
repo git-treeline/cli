@@ -252,4 +252,3 @@ func handleRoutes(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallTo
 
 	return jsonResult(out)
 }
-

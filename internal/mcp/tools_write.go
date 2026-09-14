@@ -91,24 +91,30 @@ func handleLink(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallTool
 	}
 
 	uc := config.LoadUserConfig("")
-	envUpdated := true
-	if err := setup.RegenerateEnvFile(absPath, uc); err != nil {
-		envUpdated = false
-	}
-
+	envVars, syncErr := setup.SyncRuntimeEnv(absPath, uc)
+	envUpdated := syncErr == nil
 	restarted := false
-	sockPath := supervisor.SocketPath(absPath)
-	if resp, err := supervisor.Send(sockPath, "restart"); err == nil && resp == "ok" {
-		restarted = true
+	var restartErr error
+	if envUpdated {
+		sockPath := supervisor.SocketPath(absPath)
+		_, restartErr = supervisor.ConfigureAndSend(sockPath, "restart", envVars, runtimePort(absPath))
+		restarted = restartErr == nil
 	}
 
-	return jsonResult(map[string]any{
+	result := map[string]any{
 		"linked":      true,
 		"project":     project,
 		"branch":      branch,
 		"env_updated": envUpdated,
 		"restarted":   restarted,
-	})
+	}
+	if syncErr != nil {
+		result["env_error"] = syncErr.Error()
+	}
+	if restartErr != nil {
+		result["restart_error"] = restartErr.Error()
+	}
+	return jsonResult(result)
 }
 
 func handleUnlink(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -130,23 +136,29 @@ func handleUnlink(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallTo
 	}
 
 	uc := config.LoadUserConfig("")
-	envUpdated := true
-	if err := setup.RegenerateEnvFile(absPath, uc); err != nil {
-		envUpdated = false
-	}
-
+	envVars, syncErr := setup.SyncRuntimeEnv(absPath, uc)
+	envUpdated := syncErr == nil
 	restarted := false
-	sockPath := supervisor.SocketPath(absPath)
-	if resp, err := supervisor.Send(sockPath, "restart"); err == nil && resp == "ok" {
-		restarted = true
+	var restartErr error
+	if envUpdated {
+		sockPath := supervisor.SocketPath(absPath)
+		_, restartErr = supervisor.ConfigureAndSend(sockPath, "restart", envVars, runtimePort(absPath))
+		restarted = restartErr == nil
 	}
 
-	return jsonResult(map[string]any{
+	result := map[string]any{
 		"unlinked":    true,
 		"project":     project,
 		"env_updated": envUpdated,
 		"restarted":   restarted,
-	})
+	}
+	if syncErr != nil {
+		result["env_error"] = syncErr.Error()
+	}
+	if restartErr != nil {
+		result["restart_error"] = restartErr.Error()
+	}
+	return jsonResult(result)
 }
 
 func handleSetup(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
@@ -156,9 +168,8 @@ func handleSetup(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToo
 	dryRun, _ := args["dry_run"].(bool)
 
 	uc := config.LoadUserConfig("")
-	s := setup.New(absPath, mainRepo, uc)
+	s := setup.NewWithOptions(absPath, mainRepo, uc, setup.Options{DryRun: dryRun})
 	s.Log = io.Discard
-	s.Options.DryRun = dryRun
 
 	alloc, err := s.Run()
 	if err != nil {
@@ -224,7 +235,7 @@ func handleNew(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolR
 	}
 	mainRepo = worktree.DetectMainRepo(mainRepo)
 
-	pc := config.LoadProjectConfig(mainRepo)
+	pc := config.LoadProjectConfigReadOnly(mainRepo)
 	uc := config.LoadUserConfig("")
 
 	if !pc.Exists() {
@@ -243,9 +254,12 @@ func handleNew(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolR
 	if wtPath == "" {
 		wtPath = filepath.Join(filepath.Dir(mainRepo), fmt.Sprintf("%s-%s", projectName, branch))
 	}
+	if !filepath.IsAbs(wtPath) {
+		wtPath = filepath.Join(mainRepo, wtPath)
+	}
 
 	// Check if branch is already in a worktree (resume case).
-	if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
+	if existingWT := worktree.FindWorktreeForBranchInRepo(mainRepo, branch); existingWT != "" {
 		reg := newRegistry()
 		alloc := reg.Find(existingWT)
 
@@ -278,7 +292,7 @@ func handleNew(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolR
 	}
 
 	if dryRun {
-		existing := worktree.BranchExists(branch)
+		existing := worktree.BranchExistsInRepo(mainRepo, branch)
 		result := map[string]any{
 			"dry_run":       true,
 			"worktree_path": wtPath,
@@ -297,20 +311,20 @@ func handleNew(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolR
 
 	mcpEnsureGitignored(mainRepo, wtPath)
 
-	existing := worktree.BranchExists(branch)
+	existing := worktree.BranchExistsInRepo(mainRepo, branch)
 	if existing {
-		_ = worktree.Fetch("origin", branch)
-		if err := worktree.Create(wtPath, branch, false, ""); err != nil {
+		_ = worktree.FetchInRepo(mainRepo, "origin", branch)
+		if err := worktree.CreateInRepo(mainRepo, wtPath, branch, false, ""); err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to create worktree: %v", err)), nil
 		}
 	} else {
 		if base == "" {
-			base = worktree.CurrentBranch(".")
+			base = worktree.CurrentBranch(mainRepo)
 			if base == "" {
 				base = "main"
 			}
 		}
-		if err := worktree.Create(wtPath, branch, true, base); err != nil {
+		if err := worktree.CreateInRepo(mainRepo, wtPath, branch, true, base); err != nil {
 			return mcplib.NewToolResultError(fmt.Sprintf("Failed to create worktree: %v", err)), nil
 		}
 	}

@@ -70,6 +70,36 @@ func TestCreateNewBranch(t *testing.T) {
 	_ = cmd.Run()
 }
 
+func TestRepositoryScopedWorktreeOperationsIgnoreCurrentDirectory(t *testing.T) {
+	repoA := initTestRepo(t)
+	repoB := initTestRepo(t)
+	run(t, repoB, "git", "branch", "only-in-b")
+
+	if BranchExistsInRepo(repoA, "only-in-b") {
+		t.Fatal("branch from repo B appeared in repo A")
+	}
+	if !BranchExistsInRepo(repoB, "only-in-b") {
+		t.Fatal("branch missing from its requested repository")
+	}
+	if got := FindWorktreeForBranchInRepo(repoA, "main"); got != repoA {
+		t.Errorf("repo A main worktree = %q, want %q", got, repoA)
+	}
+	if got := FindWorktreeForBranchInRepo(repoB, "main"); got != repoB {
+		t.Errorf("repo B main worktree = %q, want %q", got, repoB)
+	}
+
+	newWorktree := filepath.Join(t.TempDir(), "feature")
+	if err := CreateInRepo(repoB, newWorktree, "created-in-b", true, "main"); err != nil {
+		t.Fatalf("CreateInRepo: %v", err)
+	}
+	if !BranchExistsInRepo(repoB, "created-in-b") {
+		t.Error("created branch missing from repo B")
+	}
+	if BranchExistsInRepo(repoA, "created-in-b") {
+		t.Error("created branch leaked into repo A")
+	}
+}
+
 func TestCreateExistingBranch(t *testing.T) {
 	repo := initTestRepo(t)
 	run(t, repo, "git", "branch", "existing-branch")

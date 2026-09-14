@@ -214,7 +214,7 @@ func registerTools(s *mcpserver.MCPServer) {
 			mcplib.Description("Base branch for new branch creation (defaults to current branch)"),
 		),
 		mcplib.WithString("worktree_path",
-			mcplib.Description("Custom path for the new worktree directory. If omitted, uses the configured template or ../project-branch convention."),
+			mcplib.Description("Custom path for the new worktree directory, relative to the main repository if not absolute. If omitted, uses the configured template or ../project-branch convention."),
 		),
 		mcplib.WithBoolean("dry_run",
 			mcplib.Description("If true, show what would happen without creating anything"),

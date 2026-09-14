@@ -167,13 +167,6 @@ func runRefresh() error {
 	var manualWarnings []refreshChange
 	var succeeded, failed int
 	for _, c := range changes {
-		if c.supervised {
-			sockPath := supervisor.SocketPath(c.worktree)
-			if _, err := supervisor.Send(sockPath, "stop"); err != nil {
-				fmt.Fprintf(os.Stderr, "  ⚠ %s: could not stop supervisor: %s\n", c.displayName, err)
-			}
-		}
-
 		mainRepo := worktree.DetectMainRepo(c.worktree)
 		s := setup.New(c.worktree, mainRepo, uc)
 		s.Options.RefreshOnly = true
@@ -186,17 +179,28 @@ func runRefresh() error {
 			continue
 		}
 
-		succeeded++
 		fmt.Printf("  ✓ %s: :%d → :%s\n", c.displayName, c.oldPorts[0], format.JoinInts(newAlloc.Ports, ", "))
 
 		if c.supervised {
 			sockPath := supervisor.SocketPath(c.worktree)
-			if _, err := supervisor.Send(sockPath, "start"); err == nil {
+			envVars, syncErr := setup.SyncRuntimeEnv(c.worktree, uc)
+			if syncErr != nil {
+				failed++
+				fmt.Fprintf(os.Stderr, "    ⚠ Failed to sync environment: %s\n", syncErr)
+				continue
+			} else if resp, err := supervisor.ConfigureAndSend(sockPath, "restart", envVars, resolvePort(c.worktree)); err == nil && resp == "ok" {
 				fmt.Printf("    Restarted via supervisor\n")
 			} else {
-				fmt.Fprintf(os.Stderr, "    ⚠ Failed to restart: %s\n", err)
+				failed++
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "    ⚠ Failed to restart: %s\n", err)
+				} else {
+					fmt.Fprintf(os.Stderr, "    ⚠ Failed to restart: supervisor returned %q\n", resp)
+				}
+				continue
 			}
 		}
+		succeeded++
 
 		if c.listening {
 			manualWarnings = append(manualWarnings, c)
@@ -215,6 +219,9 @@ func runRefresh() error {
 		fmt.Printf(", %d failed", failed)
 	}
 	fmt.Println(".")
+	if failed > 0 {
+		return fmt.Errorf("refresh failed for %d worktree(s)", failed)
+	}
 	return nil
 }
 
@@ -238,7 +245,7 @@ func detectPortChange(project, branch string, currentPorts []int, isMain bool, r
 		}
 	}
 
-	pc := config.LoadProjectConfig(wtPath)
+	pc := config.LoadProjectConfigReadOnly(wtPath)
 	if pc != nil && len(currentPorts) != pc.PortsNeeded() {
 		return true, fmt.Sprintf("port_count changed (%d → %d)", len(currentPorts), pc.PortsNeeded())
 	}

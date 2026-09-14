@@ -50,8 +50,7 @@ func startFakeSupervisor(t *testing.T, reply string, removeAfter bool) string {
 			return
 		}
 		defer func() { _ = conn.Close() }()
-		buf := make([]byte, 64)
-		_, _ = conn.Read(buf)
+		_, _ = io.ReadAll(conn)
 		_, _ = conn.Write([]byte(reply))
 		if removeAfter {
 			_ = ln.Close()
@@ -97,14 +96,14 @@ func TestStopOtherSupervisor_SocketLingers(t *testing.T) {
 
 func TestRestartViaSupervisor_Success(t *testing.T) {
 	sockPath := startFakeSupervisor(t, "ok", false)
-	if err := restartViaSupervisor(sockPath); err != nil {
+	if err := restartViaSupervisor(sockPath, t.TempDir()); err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
 }
 
 func TestRestartViaSupervisor_ErrorResponse(t *testing.T) {
 	sockPath := startFakeSupervisor(t, "error: child crashed", false)
-	err := restartViaSupervisor(sockPath)
+	err := restartViaSupervisor(sockPath, t.TempDir())
 	if err == nil {
 		t.Fatal("expected error when supervisor replies with error:")
 	}
@@ -115,7 +114,7 @@ func TestRestartViaSupervisor_ErrorResponse(t *testing.T) {
 
 func TestRestartViaSupervisor_NoSocket(t *testing.T) {
 	sockPath := filepath.Join(t.TempDir(), "missing.sock")
-	err := restartViaSupervisor(sockPath)
+	err := restartViaSupervisor(sockPath, t.TempDir())
 	if err == nil {
 		t.Fatal("expected error when socket is missing")
 	}
