@@ -436,6 +436,10 @@ func protocolReplySupervisor(t *testing.T, reply string) (string, <-chan string)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(sock, 0600); err != nil {
+		_ = listener.Close()
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = listener.Close() })
 	requests := make(chan string, 1)
 	go func() {
@@ -833,26 +837,219 @@ func reapChildGroup(t *testing.T, sock string) {
 	_ = os.Remove(ChildPidPath(sock))
 }
 
-// tmpSocket returns a short /tmp socket path (macOS caps unix socket paths at
-// ~104 bytes, which t.TempDir() paths exceed) and registers its cleanup.
+// tmpSocket returns a short socket path in a private immediate child of /tmp.
+// macOS caps unix socket paths at ~104 bytes, which t.TempDir() paths exceed.
 func tmpSocket(t *testing.T) string {
 	t.Helper()
-	f, err := os.CreateTemp("/tmp", "gtl-test-*.sock")
+	dir, err := os.MkdirTemp("/tmp", "gtl-test-")
 	if err != nil {
-		t.Fatalf("create temp sock: %v", err)
+		t.Fatalf("create temp socket directory: %v", err)
 	}
-	sock := f.Name()
-	_ = f.Close()
-	_ = os.Remove(sock)
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatalf("secure temp socket directory: %v", err)
+	}
+	sock := filepath.Join(dir, "gtl.sock")
 	t.Cleanup(func() {
 		reapChildGroup(t, sock)
-		_ = os.Remove(sock)
-		_ = os.Remove(sock + ".lock")
-		_ = os.Remove(ChildPidPath(sock))
-		_ = os.Remove(PidPath(sock))
+		_ = os.RemoveAll(dir)
 	})
 	return sock
 }
+
+func TestSupervisorSecurityBoundary(t *testing.T) {
+	t.Run("rejects direct tmp socket", func(t *testing.T) {
+		if err := EnsureSocketDir("/tmp/gtl-direct.sock"); err == nil {
+			t.Fatal("EnsureSocketDir accepted a socket directly in /tmp")
+		}
+	})
+
+	t.Run("rejects insecure and symlinked parents", func(t *testing.T) {
+		dir, err := os.MkdirTemp("/tmp", "gtl-security-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		if err := os.Chmod(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := ValidateSocketDir(filepath.Join(dir, "gtl.sock")); err == nil {
+			t.Fatal("ValidateSocketDir accepted an insecure parent")
+		}
+		if err := os.Chmod(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		link := dir + "-link"
+		if err := os.Symlink(dir, link); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Remove(link) })
+		if err := ValidateSocketDir(filepath.Join(link, "gtl.sock")); err == nil {
+			t.Fatal("ValidateSocketDir accepted a symlinked parent")
+		}
+	})
+
+	t.Run("rejects public socket before configuration", func(t *testing.T) {
+		sock := tmpSocket(t)
+		ln, err := net.Listen("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = ln.Close() }()
+		if err := os.Chmod(sock, 0666); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ConfigureAndSend(sock, "start", nil, 0); err == nil {
+			t.Fatal("ConfigureAndSend connected to a public socket")
+		}
+	})
+
+	t.Run("does not follow state-file symlinks", func(t *testing.T) {
+		sock := tmpSocket(t)
+		target := filepath.Join(t.TempDir(), "target")
+		if err := os.WriteFile(target, []byte("unchanged"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		statePath := PidPath(sock)
+		if err := os.Symlink(target, statePath); err != nil {
+			t.Fatal(err)
+		}
+		if err := WriteStateFile(statePath, []byte("replacement")); err == nil {
+			t.Fatal("WriteStateFile accepted a symlink")
+		}
+		data, err := os.ReadFile(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := string(data); got != "unchanged" {
+			t.Fatalf("symlink target changed to %q", got)
+		}
+	})
+
+	t.Run("rejects state FIFOs without blocking", func(t *testing.T) {
+		sock := tmpSocket(t)
+		statePath := PidPath(sock)
+		if err := syscall.Mkfifo(statePath, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadStateFile(statePath); err == nil {
+			t.Fatal("ReadStateFile accepted a FIFO")
+		}
+	})
+
+	t.Run("validates foreign owner metadata", func(t *testing.T) {
+		info := fakeFileInfo{
+			mode: os.ModeSocket | 0600,
+			sys:  &syscall.Stat_t{Uid: uint32(os.Geteuid() + 1)},
+		}
+		if err := validateOwnedPrivateSocket(info); err == nil {
+			t.Fatal("private socket validator accepted foreign ownership")
+		}
+	})
+}
+
+func TestShutdownLegacyWaitsForSocketRemoval(t *testing.T) {
+	worktree := t.TempDir()
+	sock := LegacySocketPath(canonicalWorktreePath(worktree))
+	listener, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sock, 0600); err != nil {
+		_ = listener.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = os.Remove(sock)
+	})
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = io.ReadAll(conn)
+		_, _ = conn.Write([]byte("ok"))
+		_ = conn.Close()
+		_ = listener.Close()
+		_ = os.Remove(sock)
+	}()
+
+	if err := ShutdownLegacy(worktree); err != nil {
+		t.Fatalf("ShutdownLegacy: %v", err)
+	}
+	if _, err := os.Lstat(sock); !os.IsNotExist(err) {
+		t.Fatalf("legacy socket still present after shutdown: %v", err)
+	}
+}
+
+func TestLegacyPresentRecognizesCanonicalWorktree(t *testing.T) {
+	worktree := t.TempDir()
+	aliasRoot := t.TempDir()
+	alias := filepath.Join(aliasRoot, "worktree-alias")
+	if err := os.Symlink(worktree, alias); err != nil {
+		t.Fatal(err)
+	}
+	sock := LegacySocketPath(canonicalWorktreePath(worktree))
+	listener, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sock, 0600); err != nil {
+		_ = listener.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = os.Remove(sock)
+	})
+
+	present, err := LegacyPresent(alias)
+	if err != nil {
+		t.Fatalf("LegacyPresent: %v", err)
+	}
+	if !present {
+		t.Fatal("LegacyPresent did not detect canonical legacy socket through alias")
+	}
+}
+
+func TestShutdownLegacyRemovesRefusedSocket(t *testing.T) {
+	worktree := t.TempDir()
+	sock := LegacySocketPath(worktree)
+	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Bind(fd, &syscall.SockaddrUnix{Name: sock}); err != nil {
+		_ = syscall.Close(fd)
+		t.Fatal(err)
+	}
+	if err := syscall.Close(fd); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sock, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(sock) })
+
+	if err := ShutdownLegacy(worktree); err != nil {
+		t.Fatalf("ShutdownLegacy stale socket: %v", err)
+	}
+	if _, err := os.Lstat(sock); !os.IsNotExist(err) {
+		t.Fatalf("stale legacy socket remains: %v", err)
+	}
+}
+
+type fakeFileInfo struct {
+	mode os.FileMode
+	sys  any
+}
+
+func (f fakeFileInfo) Name() string       { return "fake" }
+func (f fakeFileInfo) Size() int64        { return 0 }
+func (f fakeFileInfo) Mode() os.FileMode  { return f.mode }
+func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeFileInfo) IsDir() bool        { return f.mode.IsDir() }
+func (f fakeFileInfo) Sys() any           { return f.sys }
 
 func waitForFileGone(t *testing.T, path string, timeout time.Duration) {
 	t.Helper()
@@ -940,15 +1137,7 @@ func TestSupervisor_SIGHUPShutdown(t *testing.T) {
 // once the write deadline fires on the stuck connection.
 func TestSupervisor_WriteDeadlineUnblocksLock(t *testing.T) {
 	dir := t.TempDir()
-	// macOS caps unix socket paths at ~104 bytes; t.TempDir() paths exceed that.
-	f, err := os.CreateTemp("/tmp", "gtl-test-*.sock")
-	if err != nil {
-		t.Fatalf("create temp sock: %v", err)
-	}
-	sock := f.Name()
-	_ = f.Close()
-	_ = os.Remove(sock)
-	t.Cleanup(func() { _ = os.Remove(sock) })
+	sock := tmpSocket(t)
 
 	sv := newTestSupervisor(t, "sleep 60", dir, sock)
 	sv.ConnWriteDeadline = 200 * time.Millisecond // fast deadline for the test

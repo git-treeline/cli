@@ -117,6 +117,10 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 			return cliErr(cmd, errNoStartCommand())
 		}
 
+		if err := checkLegacySupervisor(absPath); err != nil {
+			return cliErr(cmd, err)
+		}
+
 		if err := ensureAllocation(cmd, absPath); err != nil {
 			return err
 		}
@@ -201,11 +205,14 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 			return cliErr(cmd, err)
 		}
 
-		if err := runPreStartHooks(activeHooks, port, absPath); err != nil {
-			return cliErr(cmd, err)
-		}
 		if len(activeHooks) > 0 {
-			writeHooksState(sockPath, activeHooks)
+			if err := writeHooksState(sockPath, activeHooks); err != nil {
+				return cliErr(cmd, fmt.Errorf("saving active hooks: %w", err))
+			}
+		}
+		if err := runPreStartHooks(activeHooks, port, absPath); err != nil {
+			cleanHooksState(sockPath)
+			return cliErr(cmd, err)
 		}
 
 		uc := config.LoadUserConfig("")
@@ -232,8 +239,25 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 	},
 }
 
+func checkLegacySupervisor(dir string) error {
+	present, err := supervisor.LegacyPresent(dir)
+	if err != nil {
+		return err
+	}
+	if present {
+		return &CliError{
+			Message: "An older supervisor is using shared temporary state.",
+			Hint:    "Run 'gtl stop --kill' from this worktree, then 'gtl start' to upgrade it.",
+		}
+	}
+	return nil
+}
+
 func lockServerStartup(socket string) (func(), error) {
-	lock, err := os.OpenFile(socket+".startup.lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err := supervisor.EnsureSocketDir(socket); err != nil {
+		return nil, err
+	}
+	lock, err := supervisor.OpenStateLock(socket + ".startup.lock")
 	if err != nil {
 		return nil, fmt.Errorf("opening server startup lock: %w", err)
 	}
@@ -419,7 +443,7 @@ func supervisorOwnedBy(socket string, pid int) bool {
 	if pid <= 1 {
 		return false
 	}
-	data, err := os.ReadFile(supervisor.PidPath(socket))
+	data, err := supervisor.ReadStateFile(supervisor.PidPath(socket))
 	if err != nil {
 		return false
 	}
@@ -482,6 +506,21 @@ supervisor entirely.`,
 		resp, err := supervisor.Send(sockPath, command)
 		if err != nil {
 			if stopKill {
+				if _, statErr := os.Lstat(sockPath); os.IsNotExist(statErr) {
+					cwd, cwdErr := os.Getwd()
+					if cwdErr != nil {
+						return cwdErr
+					}
+					if present, legacyErr := supervisor.LegacyPresent(cwd); legacyErr != nil {
+						return cliErr(cmd, legacyErr)
+					} else if present {
+						if err := supervisor.ShutdownLegacy(cwd); err != nil {
+							return cliErr(cmd, err)
+						}
+						fmt.Println("Older supervisor shut down. Run 'gtl start' to use private supervisor state.")
+						return nil
+					}
+				}
 				if killed, killErr := forceKillSupervisor(sockPath); killed {
 					fmt.Println("Supervisor force-killed (was unresponsive).")
 					return nil
@@ -775,16 +814,16 @@ func hooksStatePath(sockPath string) string {
 	return strings.TrimSuffix(sockPath, ".sock") + ".hooks"
 }
 
-func writeHooksState(sockPath string, hooks []startHookEntry) {
+func writeHooksState(sockPath string, hooks []startHookEntry) error {
 	names := make([]string, len(hooks))
 	for i, h := range hooks {
 		names[i] = h.Name
 	}
-	_ = os.WriteFile(hooksStatePath(sockPath), []byte(strings.Join(names, "\n")), 0o600)
+	return supervisor.WriteStateFile(hooksStatePath(sockPath), []byte(strings.Join(names, "\n")))
 }
 
 func readHooksState(sockPath string) []string {
-	data, err := os.ReadFile(hooksStatePath(sockPath))
+	data, err := supervisor.ReadStateFile(hooksStatePath(sockPath))
 	if err != nil {
 		return nil
 	}
@@ -801,10 +840,13 @@ func readHooksState(sockPath string) []string {
 func claimHooksState(sockPath string) []string {
 	path := hooksStatePath(sockPath)
 	claimed := path + ".running"
+	if _, err := supervisor.ReadStateFile(path); err != nil {
+		return nil
+	}
 	if err := os.Rename(path, claimed); err != nil {
 		return nil
 	}
-	data, err := os.ReadFile(claimed)
+	data, err := supervisor.ReadStateFile(claimed)
 	if err != nil {
 		return nil
 	}
@@ -816,6 +858,9 @@ func claimHooksState(sockPath string) []string {
 }
 
 func cleanHooksState(sockPath string) {
+	if err := supervisor.ValidateSocketDir(sockPath); err != nil {
+		return
+	}
 	_ = os.Remove(hooksStatePath(sockPath))
 	_ = os.Remove(hooksStatePath(sockPath) + ".running")
 }
@@ -871,12 +916,15 @@ func promptRunningElsewhere(reader io.Reader) runningAction {
 // (false, err) if the kill fails.
 func forceKillSupervisor(sockPath string) (bool, error) {
 	pidPath := supervisor.PidPath(sockPath)
-	data, err := os.ReadFile(pidPath)
-	if err != nil {
+	data, err := supervisor.ReadStateFile(pidPath)
+	if os.IsNotExist(err) {
 		return false, nil
 	}
+	if err != nil {
+		return false, err
+	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
+	if err != nil || pid <= 1 {
 		return false, nil
 	}
 	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
@@ -897,7 +945,7 @@ func forceKillSupervisor(sockPath string) (bool, error) {
 // or a pgid that could target the session/init, is a no-op.
 func reapChildGroup(sockPath string) {
 	childPidPath := supervisor.ChildPidPath(sockPath)
-	data, err := os.ReadFile(childPidPath)
+	data, err := supervisor.ReadStateFile(childPidPath)
 	if err != nil {
 		return
 	}

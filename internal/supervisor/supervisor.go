@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,12 +31,114 @@ var errStopInProgress = errors.New("stop in progress")
 
 var errSupervisorShuttingDown = errors.New("supervisor is shutting down")
 
-// SocketPath returns a short, deterministic socket path under /tmp to avoid
-// the ~104 byte macOS limit on Unix socket paths. The hash ensures uniqueness
-// per worktree without depending on path length.
+// SocketPath returns a short, deterministic socket path in a private,
+// per-user directory under /tmp. It does not create that directory.
 func SocketPath(worktreePath string) string {
+	worktreePath = canonicalWorktreePath(worktreePath)
+	h := sha256.Sum256([]byte(worktreePath))
+	return fmt.Sprintf("/tmp/gtl-%d/gtl-%x.sock", os.Geteuid(), h[:8])
+}
+
+func canonicalWorktreePath(worktreePath string) string {
+	if absolute, err := filepath.Abs(worktreePath); err == nil {
+		worktreePath = filepath.Clean(absolute)
+	}
+	if resolved, err := filepath.EvalSymlinks(worktreePath); err == nil {
+		return resolved
+	}
+	return worktreePath
+}
+
+// LegacySocketPath returns the pre-private-directory socket name. It is only
+// for detecting and shutting down a previously started supervisor.
+func LegacySocketPath(worktreePath string) string {
 	h := sha256.Sum256([]byte(worktreePath))
 	return fmt.Sprintf("/tmp/gtl-%x.sock", h[:8])
+}
+
+// LegacyPresent reports whether a valid legacy socket exists. It never dials
+// the socket or reads environment/configuration through it.
+func LegacyPresent(worktreePath string) (bool, error) {
+	for _, socketPath := range legacySocketPaths(worktreePath) {
+		err := validateLegacySocket(socketPath)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// ShutdownLegacy asks a validated legacy supervisor to exit. The legacy path
+// is deliberately not accepted by Send, which requires a private directory.
+func ShutdownLegacy(worktreePath string) error {
+	found := false
+	for _, socketPath := range legacySocketPaths(worktreePath) {
+		info, err := legacySocketInfo(socketPath)
+		if os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		found = true
+		if err := shutdownLegacySocket(socketPath, info); err != nil {
+			return err
+		}
+	}
+	if !found {
+		return os.ErrNotExist
+	}
+	return nil
+}
+
+func legacySocketPaths(worktreePath string) []string {
+	raw := LegacySocketPath(worktreePath)
+	canonical := LegacySocketPath(canonicalWorktreePath(worktreePath))
+	if canonical == raw {
+		return []string{raw}
+	}
+	return []string{raw, canonical}
+}
+
+func shutdownLegacySocket(socketPath string, expected os.FileInfo) error {
+	response, err := sendRawWithTimeout(socketPath, "shutdown", 5*time.Second)
+	if err != nil {
+		// A refused Unix connection means the socket inode has no listener. It
+		// is the one failed-dial result that proves this validated legacy socket
+		// is stale; timeouts and other failures may still have a live owner.
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			current, revalidateErr := legacySocketInfo(socketPath)
+			if os.IsNotExist(revalidateErr) {
+				return nil
+			} else if revalidateErr != nil {
+				return revalidateErr
+			}
+			if !os.SameFile(expected, current) {
+				return fmt.Errorf("legacy supervisor socket changed while shutting down: %s", socketPath)
+			}
+			if removeErr := os.Remove(socketPath); removeErr != nil && !os.IsNotExist(removeErr) {
+				return fmt.Errorf("removing stale legacy supervisor socket: %w", removeErr)
+			}
+			return nil
+		}
+		return err
+	}
+	if strings.TrimSpace(response) != "ok" {
+		return fmt.Errorf("legacy supervisor rejected shutdown: %s", strings.TrimSpace(response))
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Lstat(socketPath); os.IsNotExist(err) {
+			return nil
+		} else if err != nil {
+			return fmt.Errorf("checking legacy supervisor shutdown: %w", err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return fmt.Errorf("legacy supervisor socket did not close: %s", socketPath)
 }
 
 // PidPath returns the supervisor PID file path corresponding to a socket path.
@@ -169,11 +272,14 @@ func New(command, dir, socketPath string) *Supervisor {
 }
 
 func (s *Supervisor) Run() error {
+	if err := EnsureSocketDir(s.SocketPath); err != nil {
+		return fmt.Errorf("preparing supervisor socket directory: %w", err)
+	}
 	// Hold a lifetime lock before inspecting or unlinking the socket. Two fresh
 	// starts can otherwise both observe a missing socket and one can unlink the
 	// other's newly-bound listener between its check and net.Listen.
 	lockPath := s.SocketPath + ".lock"
-	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	lock, err := OpenStateLock(lockPath)
 	if err != nil {
 		return fmt.Errorf("opening supervisor lock: %w", err)
 	}
@@ -186,19 +292,24 @@ func (s *Supervisor) Run() error {
 		_ = lock.Close()
 	}()
 
-	if _, err := os.Stat(s.SocketPath); err == nil {
+	if _, err := os.Lstat(s.SocketPath); err == nil {
+		if err := validateSocketEndpoint(s.SocketPath); err != nil {
+			return err
+		}
 		if resp, dialErr := Send(s.SocketPath, "status"); dialErr == nil {
 			return fmt.Errorf("supervisor already running (status: %s) on %s", resp, s.SocketPath)
 		}
 		// A failed dial does not prove the socket is stale: another fresh
 		// supervisor can have bound it before its accept loop/PID file is ready.
 		// Only unlink when a recorded owner is definitely dead.
-		data, readErr := os.ReadFile(PidPath(s.SocketPath))
+		data, readErr := ReadStateFile(PidPath(s.SocketPath))
 		pid, parseErr := strconv.Atoi(strings.TrimSpace(string(data)))
 		if readErr != nil || parseErr != nil || pid <= 1 || syscall.Kill(pid, 0) == nil || syscall.Kill(pid, 0) == syscall.EPERM {
 			return fmt.Errorf("supervisor socket exists but is not reachable: %s", s.SocketPath)
 		}
 		_ = os.Remove(PidPath(s.SocketPath))
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspecting supervisor socket: %w", err)
 	}
 	_ = os.Remove(s.SocketPath)
 
@@ -206,12 +317,20 @@ func (s *Supervisor) Run() error {
 	if err != nil {
 		return fmt.Errorf("listening on socket: %w", err)
 	}
-	_ = os.Chmod(s.SocketPath, 0600)
+	if err := os.Chmod(s.SocketPath, privateFileMode); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(s.SocketPath)
+		return fmt.Errorf("securing supervisor socket: %w", err)
+	}
 	s.listener = ln
 	defer s.shutdownOnce.Do(func() { close(s.done) })
 
 	pidPath := PidPath(s.SocketPath)
-	_ = os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0600)
+	if err := WriteStateFile(pidPath, []byte(strconv.Itoa(os.Getpid()))); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(s.SocketPath)
+		return fmt.Errorf("writing supervisor PID: %w", err)
+	}
 	defer func() {
 		_ = ln.Close()
 		_ = os.Remove(s.SocketPath)
@@ -291,7 +410,14 @@ func (s *Supervisor) startChildLocked() error {
 	// Persist the child's pgid (== child pid because Setpgid gives it a fresh
 	// group) so a force-kill can reap the whole group even if this process is
 	// gone. Removed when the child exits, on stop, and on supervisor shutdown.
-	_ = os.WriteFile(ChildPidPath(s.SocketPath), []byte(strconv.Itoa(cmd.Process.Pid)), 0600)
+	if err := WriteStateFile(ChildPidPath(s.SocketPath), []byte(strconv.Itoa(cmd.Process.Pid))); err != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = cmd.Wait()
+		s.child = nil
+		s.childPGID = 0
+		s.childDone = nil
+		return fmt.Errorf("writing child PID: %w", err)
+	}
 
 	go func() {
 		_ = cmd.Wait()
@@ -734,33 +860,8 @@ func Send(socketPath, command string) (string, error) {
 // SendWithTimeout is like Send but with a caller-specified deadline.
 // Used by --await which may need to wait longer than the default 30s.
 func SendWithTimeout(socketPath, command string, timeout time.Duration) (string, error) {
-	// The dial is bounded too: a wedged supervisor with a full accept backlog
-	// would otherwise block connect() indefinitely, before the deadline applies.
-	conn, err := net.DialTimeout("unix", socketPath, timeout)
-	if err != nil {
-		return "", fmt.Errorf("server not running (no socket at %s)", socketPath)
+	if err := validateSocketEndpoint(socketPath); err != nil {
+		return "", err
 	}
-	defer func() { _ = conn.Close() }()
-
-	_ = conn.SetDeadline(time.Now().Add(timeout))
-	if _, err := conn.Write([]byte(command)); err != nil {
-		return "", fmt.Errorf("sending command: %w", err)
-	}
-
-	// Half-close the write side so the server knows the request is complete and
-	// can read it whole without a fixed-size buffer. This stays compatible with
-	// OLD servers: they single-read the request (short commands are unaffected)
-	// and close the conn after replying, so the ReadAll below still ends at EOF.
-	if uc, ok := conn.(*net.UnixConn); ok {
-		_ = uc.CloseWrite()
-	}
-
-	// Read the full reply until EOF instead of a single 256-byte read, which
-	// truncated long responses (e.g. a get-command over 256B) into false
-	// "command changed" warnings.
-	resp, err := io.ReadAll(conn)
-	if err != nil {
-		return "", fmt.Errorf("reading response: %w", err)
-	}
-	return string(resp), nil
+	return sendRawWithTimeout(socketPath, command, timeout)
 }

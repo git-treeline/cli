@@ -111,9 +111,15 @@ func refreshRuntimeFixture(t *testing.T, projectConfig string) (string, *registr
 func startRefreshSupervisor(t *testing.T, worktree string, replies ...string) <-chan string {
 	t.Helper()
 	socket := supervisor.SocketPath(worktree)
+	if err := supervisor.EnsureSocketDir(socket); err != nil {
+		t.Fatal(err)
+	}
 	_ = os.Remove(socket)
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(socket, 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {

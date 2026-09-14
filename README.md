@@ -124,6 +124,8 @@ gtl restart    # bounces the server in one step — logs keep flowing
 
 `stop` + `start` lets agents pause the server, do work (run migrations, install packages), and bring it back — all in your terminal. `restart` is a single-step bounce. Ctrl+C in the terminal exits the supervisor entirely.
 
+Supervisor sockets and state live in a private per-user directory under `/tmp`. After upgrading from a version that used shared temporary paths, run `gtl stop --kill` using the same directory path (including any symlink alias) used to launch each running worktree, then `gtl start`. You can also stop the older supervisor with Ctrl+C in its terminal. The upgrade command only sends shutdown to an owned, private legacy socket; it never forwards environment variables there.
+
 The supervisor communicates over a Unix socket. With ordinary `gtl start`, your terminal owns the process and displays its logs. A fresh `gtl start --await` starts a background supervisor, prints its private log path, and returns once the server is ready. `gtl stop`, `gtl start`, and `gtl restart` can then control that supervisor; `gtl stop --kill` shuts it down. If startup times out or is interrupted, Treeline cleans up the supervisor it just launched.
 
 For agents and scripts that need to wait for the server:

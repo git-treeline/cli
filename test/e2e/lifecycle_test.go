@@ -32,8 +32,11 @@ import (
 // path. Reproduced here (not imported) so the test asserts against the same
 // on-disk artifact the binary creates, independent of internal packages.
 func socketPath(worktreePath string) string {
+	if resolved, err := filepath.EvalSymlinks(worktreePath); err == nil {
+		worktreePath = resolved
+	}
 	h := sha256.Sum256([]byte(worktreePath))
-	return fmt.Sprintf("/tmp/gtl-%x.sock", h[:8])
+	return fmt.Sprintf("/tmp/gtl-%d/gtl-%x.sock", os.Geteuid(), h[:8])
 }
 
 func supervisorPIDPath(socket string) string {

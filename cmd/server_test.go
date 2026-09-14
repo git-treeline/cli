@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/supervisor"
 )
 
 // startFakeSupervisor stands up a unix-socket listener that responds to a single
@@ -24,18 +25,14 @@ import (
 // which the default t.TempDir() blows past.
 func startFakeSupervisor(t *testing.T, reply string, removeAfter bool) string {
 	t.Helper()
-	f, err := os.CreateTemp("/tmp", "gtl-test-*.sock")
-	if err != nil {
-		t.Fatalf("create temp sock path: %v", err)
-	}
-	sockPath := f.Name()
-	_ = f.Close()
-	_ = os.Remove(sockPath)
-	t.Cleanup(func() { _ = os.Remove(sockPath) })
+	sockPath := privateTestSocket(t)
 
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
+	}
+	if err := os.Chmod(sockPath, 0600); err != nil {
+		t.Fatal(err)
 	}
 	// By default UnixListener.Close() unlinks the socket file. For the
 	// "supervisor is wedged" case we want the file to stay so the wait loop
@@ -483,12 +480,14 @@ func contains(ss []string, s string) bool {
 }
 
 func TestHooksStateRoundTrip(t *testing.T) {
-	sockPath := filepath.Join(t.TempDir(), "test.sock")
+	sockPath := privateTestSocket(t)
 	hooks := []startHookEntry{
 		{Name: "oauth"},
 		{Name: "workers"},
 	}
-	writeHooksState(sockPath, hooks)
+	if err := writeHooksState(sockPath, hooks); err != nil {
+		t.Fatal(err)
+	}
 
 	names := readHooksState(sockPath)
 	if len(names) != 2 || names[0] != "oauth" || names[1] != "workers" {
@@ -516,12 +515,14 @@ func TestRunPostStopHooks_ReverseOrder(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
 	pc := config.LoadProjectConfig(dir)
 
-	sockPath := filepath.Join(dir, "test.sock")
+	sockPath := privateTestSocket(t)
 	hooks := []startHookEntry{
 		{Name: "first"},
 		{Name: "second"},
 	}
-	writeHooksState(sockPath, hooks)
+	if err := writeHooksState(sockPath, hooks); err != nil {
+		t.Fatal(err)
+	}
 
 	runPostStopHooks(sockPath, pc, 3000, dir)
 
@@ -551,8 +552,10 @@ hooks:
 	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte(yml), 0o644)
 	pc := config.LoadProjectConfig(dir)
 
-	sockPath := filepath.Join(dir, "test.sock")
-	writeHooksState(sockPath, []startHookEntry{{Name: "cleanup"}})
+	sockPath := privateTestSocket(t)
+	if err := writeHooksState(sockPath, []startHookEntry{{Name: "cleanup"}}); err != nil {
+		t.Fatal(err)
+	}
 
 	runPostStopHooks(sockPath, pc, 3000, dir)
 
@@ -784,5 +787,82 @@ func TestClearOrphanedPortProcess_LivePidNotPortOwner(t *testing.T) {
 	// The bystander must be untouched.
 	if err := syscall.Kill(bystanderPid, 0); err != nil {
 		t.Errorf("bystander PID %d should still be alive, got: %v", bystanderPid, err)
+	}
+}
+
+func privateTestSocket(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "gtl-cmd-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "s.sock")
+}
+
+func TestSupervisorSidecarsRejectSymlinks(t *testing.T) {
+	for _, sidecar := range []string{"pid", "startup-lock", "hooks"} {
+		t.Run(sidecar, func(t *testing.T) {
+			socket := privateTestSocket(t)
+			target := filepath.Join(t.TempDir(), "unrelated")
+			const original = "1\n"
+			if err := os.WriteFile(target, []byte(original), 0600); err != nil {
+				t.Fatal(err)
+			}
+			path := supervisor.PidPath(socket)
+			switch sidecar {
+			case "startup-lock":
+				path = socket + ".startup.lock"
+			case "hooks":
+				path = hooksStatePath(socket)
+			}
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+			switch sidecar {
+			case "pid":
+				if killed, err := forceKillSupervisor(socket); err == nil || killed {
+					t.Fatalf("symlink PID accepted: killed=%v err=%v", killed, err)
+				}
+			case "startup-lock":
+				if unlock, err := lockServerStartup(socket); err == nil {
+					unlock()
+					t.Fatal("symlink lock accepted")
+				}
+			case "hooks":
+				if err := writeHooksState(socket, []startHookEntry{{Name: "cleanup"}}); err == nil {
+					t.Fatal("symlink hook file accepted")
+				}
+				if names := claimHooksState(socket); names != nil {
+					t.Fatalf("claimed hooks from symlink: %v", names)
+				}
+			}
+			data, err := os.ReadFile(target)
+			if err != nil || string(data) != original {
+				t.Fatalf("unrelated target changed: %q, %v", data, err)
+			}
+		})
+	}
+}
+
+func TestStartRequiresLegacySupervisorShutdown(t *testing.T) {
+	dir := t.TempDir()
+	if err := checkLegacySupervisor(dir); err != nil {
+		t.Fatalf("absent legacy socket: %v", err)
+	}
+	path := supervisor.LegacySocketPath(dir)
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkLegacySupervisor(dir); err == nil || !strings.Contains(err.Error(), "older supervisor") {
+		t.Fatalf("expected actionable upgrade error, got %v", err)
+	}
+	if _, err := os.Lstat(supervisor.SocketPath(dir)); !os.IsNotExist(err) {
+		t.Fatalf("upgrade check created new state: %v", err)
 	}
 }

@@ -1249,8 +1249,14 @@ func TestHandleLinkAndUnlinkReportLegacySupervisor(t *testing.T) {
 		t.Fatal(err)
 	}
 	socket := supervisor.SocketPath(dir)
+	if err := supervisor.EnsureSocketDir(socket); err != nil {
+		t.Fatal(err)
+	}
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(socket, 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
