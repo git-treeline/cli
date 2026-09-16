@@ -204,9 +204,23 @@ func Create(path, branch string, newBranch bool, base string) error {
 	return CreateInRepo("", path, branch, newBranch, base)
 }
 
+// CreateOptions controls behavior scoped to the git worktree add process.
+type CreateOptions struct {
+	DeferSetup bool
+}
+
+// CreateWithOptions adds a git worktree with command-scoped behavior.
+func CreateWithOptions(path, branch string, newBranch bool, base string, opts CreateOptions) error {
+	return createInRepoWithOptions("", path, branch, newBranch, base, opts)
+}
+
 // CreateInRepo adds a git worktree using repoPath as the repository context.
 // Unlike Create, it never falls back to the process working directory.
 func CreateInRepo(repoPath, path, branch string, newBranch bool, base string) error {
+	return createInRepoWithOptions(repoPath, path, branch, newBranch, base, CreateOptions{})
+}
+
+func createInRepoWithOptions(repoPath, path, branch string, newBranch bool, base string, opts CreateOptions) error {
 	args := []string{"worktree", "add"}
 	if newBranch {
 		args = append(args, path, "-b", branch)
@@ -217,8 +231,44 @@ func CreateInRepo(repoPath, path, branch string, newBranch bool, base string) er
 		args = append(args, path, branch)
 	}
 
-	_, err := gitRun(repoPath, args...)
-	return err
+	if !opts.DeferSetup {
+		_, err := gitRun(repoPath, args...)
+		return err
+	}
+
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locating gtl executable: %w", err)
+	}
+	shimDir, err := os.MkdirTemp("", "gtl-defer-setup-")
+	if err != nil {
+		return fmt.Errorf("creating gtl hook shim: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(shimDir) }()
+	// Legacy hooks call gtl by name. Put this executable first so an older gtl
+	// elsewhere on PATH cannot miss GTL_DEFER_SETUP and perform setup anyway.
+	if err := os.Symlink(executable, filepath.Join(shimDir, "gtl")); err != nil {
+		return fmt.Errorf("creating gtl hook shim: %w", err)
+	}
+
+	cmd := exec.Command("git", args...)
+	if repoPath != "" {
+		cmd.Dir = repoPath
+	}
+	cmd.Env = append(os.Environ(),
+		"LC_ALL=C",
+		"GTL_DEFER_SETUP=1",
+		"PATH="+shimDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		detail := strings.TrimSpace(string(out))
+		if detail != "" {
+			return fmt.Errorf("git %s: %s", args[0], detail)
+		}
+		return fmt.Errorf("git %s: %w", args[0], err)
+	}
+	return nil
 }
 
 // BranchExists checks whether a branch exists locally or as a remote tracking ref.

@@ -103,6 +103,61 @@ func TestInstallPostCheckoutHook_AppendsToExisting(t *testing.T) {
 	}
 }
 
+func TestInstalledPostCheckoutHookHonorsDeferredSetup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	dir := t.TempDir()
+	shellPath := func(path string) string {
+		return "'" + strings.ReplaceAll(path, "'", "'\"'\"'") + "'"
+	}
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "--initial-branch=main")
+	run("commit", "--allow-empty", "-m", "init")
+
+	customMarker := filepath.Join(dir, "custom-ran")
+	hookPath := filepath.Join(dir, ".git", "hooks", "post-checkout")
+	if err := os.WriteFile(hookPath, []byte("#!/bin/sh\ntouch "+shellPath(customMarker)+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InstallPostCheckoutHook(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	gtlLog := filepath.Join(dir, "gtl-ran")
+	fakeGTL := filepath.Join(binDir, "gtl")
+	if err := os.WriteFile(fakeGTL, []byte("#!/bin/sh\ntouch "+shellPath(gtlLog)+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hook := exec.Command(hookPath, "old", "new", "1")
+	hook.Dir = dir
+	hook.Env = append(os.Environ(),
+		"GTL_DEFER_SETUP=1",
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	if out, err := hook.CombinedOutput(); err != nil {
+		t.Fatalf("running installed hook: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(customMarker); err != nil {
+		t.Fatalf("custom hook command did not run: %v", err)
+	}
+	if _, err := os.Stat(gtlLog); !os.IsNotExist(err) {
+		t.Fatalf("generated Treeline block ran during deferral: %v", err)
+	}
+}
+
 func TestInstallPostCheckoutHook_Idempotent(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, ".git"), 0o755)
@@ -324,4 +379,76 @@ func TestHookRunScriptContent(t *testing.T) {
 	if !strings.Contains(hookRunScript, "gtl prune --stale") {
 		t.Error("run script should include background stale prune")
 	}
+}
+
+func TestGeneratedHookScriptsHonorDeferredSetup(t *testing.T) {
+	dir := t.TempDir()
+	run := exec.Command("git", "init", "--initial-branch=main")
+	run.Dir = dir
+	run.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	if out, err := run.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	commit := exec.Command("git", "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "init")
+	commit.Dir = dir
+	commit.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	if out, err := commit.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v\n%s", err, out)
+	}
+	worktreeDir := filepath.Join(t.TempDir(), "feature")
+	add := exec.Command("git", "worktree", "add", "-b", "feature", worktreeDir, "main")
+	add.Dir = dir
+	add.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	if out, err := add.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add: %v\n%s", err, out)
+	}
+
+	binDir := t.TempDir()
+	fakeGTL := filepath.Join(binDir, "gtl")
+	if err := os.WriteFile(fakeGTL, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GTL_TEST_LOG\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, script := range map[string]string{
+		"shell block":       scriptBody(hookBlock),
+		"manager one-liner": hookRunScript,
+	} {
+		t.Run(name, func(t *testing.T) {
+			logPath := filepath.Join(t.TempDir(), "gtl.log")
+			baseEnv := append(os.Environ(),
+				"GIT_CONFIG_GLOBAL=/dev/null",
+				"GIT_CONFIG_NOSYSTEM=1",
+				"GTL_TEST_LOG="+logPath,
+				"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+			)
+
+			deferred := exec.Command("sh", "-c", script)
+			deferred.Dir = worktreeDir
+			deferred.Env = append(baseEnv, "GTL_DEFER_SETUP=1")
+			if out, err := deferred.CombinedOutput(); err != nil {
+				t.Fatalf("deferred hook: %v\n%s", err, out)
+			}
+			if _, err := os.Stat(logPath); !os.IsNotExist(err) {
+				t.Fatalf("gtl ran during deferral: %v", err)
+			}
+
+			normal := exec.Command("sh", "-c", script)
+			normal.Dir = worktreeDir
+			normal.Env = baseEnv
+			if out, err := normal.CombinedOutput(); err != nil {
+				t.Fatalf("normal hook: %v\n%s", err, out)
+			}
+			data, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatalf("normal hook did not invoke gtl: %v", err)
+			}
+			if !strings.Contains(string(data), "port") || !strings.Contains(string(data), "editor refresh") {
+				t.Fatalf("normal hook invocation = %q", data)
+			}
+		})
+	}
+}
+
+func scriptBody(block string) string {
+	return strings.TrimPrefix(block, hookMarkerStart+"\n")
 }

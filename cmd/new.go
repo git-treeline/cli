@@ -122,6 +122,10 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		// and treat the command as resumable.
 		if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
 			fmt.Println(style.Actionf("Branch '%s' already checked out at %s", branch, existingWT))
+			if newNoSetup {
+				fmt.Printf("\n  cd %s\n", existingWT)
+				return nil
+			}
 			alloc, err := ensureWorktreeAllocation(existingWT, mainRepo, uc, os.Stdout, newStrict)
 			if err != nil {
 				return cliErr(cmd, err)
@@ -150,13 +154,13 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		if existing {
 			_ = worktree.Fetch("origin", branch) // non-fatal: branch may only exist locally
 			fmt.Println(style.Actionf("Checking out existing branch '%s'", branch))
-			if err := worktree.Create(wtPath, branch, false, ""); err != nil {
+			if err := worktree.CreateWithOptions(wtPath, branch, false, "", worktree.CreateOptions{DeferSetup: newNoSetup}); err != nil {
 				return err
 			}
 		} else {
 			base := resolveBase(pc)
 			fmt.Println(style.Actionf("Creating branch '%s' from '%s'", branch, base))
-			if err := worktree.Create(wtPath, branch, true, base); err != nil {
+			if err := worktree.CreateWithOptions(wtPath, branch, true, base, worktree.CreateOptions{DeferSetup: newNoSetup}); err != nil {
 				return err
 			}
 		}
@@ -265,13 +269,13 @@ func createWorktreeOnly(mainRepo, branch string, uc *config.UserConfig, pc *conf
 	if existing {
 		_ = worktree.Fetch("origin", branch)
 		fmt.Println(style.Actionf("Checking out existing branch '%s'", branch))
-		if err := worktree.Create(wtPath, branch, false, ""); err != nil {
+		if err := worktree.CreateWithOptions(wtPath, branch, false, "", worktree.CreateOptions{DeferSetup: newNoSetup}); err != nil {
 			return err
 		}
 	} else {
 		base := resolveBase(pc)
 		fmt.Println(style.Actionf("Creating branch '%s' from '%s'", branch, base))
-		if err := worktree.Create(wtPath, branch, true, base); err != nil {
+		if err := worktree.CreateWithOptions(wtPath, branch, true, base, worktree.CreateOptions{DeferSetup: newNoSetup}); err != nil {
 			return err
 		}
 	}
