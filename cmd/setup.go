@@ -52,6 +52,9 @@ var setupCmd = &cobra.Command{
 	Short: "Allocate resources and set up a worktree environment",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if os.Getenv("GTL_DEFER_SETUP") == "1" {
+			return nil
+		}
 		warnServeNotInstalled()
 
 		path := "."

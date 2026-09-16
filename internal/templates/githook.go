@@ -14,7 +14,7 @@ const hookMarkerStart = "# --- git-treeline: auto-setup worktrees ---"
 const hookMarkerEnd = "# --- end git-treeline ---"
 
 const hookBlock = `# --- git-treeline: auto-setup worktrees ---
-if command -v gtl >/dev/null 2>&1; then
+if [ "${GTL_DEFER_SETUP:-}" != "1" ] && command -v gtl >/dev/null 2>&1; then
   COMMON=$(git rev-parse --git-common-dir 2>/dev/null)
   GITDIR=$(git rev-parse --git-dir 2>/dev/null)
   if [ "$COMMON" != "$GITDIR" ]; then
@@ -31,7 +31,7 @@ fi
 
 // hookRunScript is the shell one-liner used in lefthook/pre-commit entries.
 // Same logic as hookBlock but collapsed for YAML run: fields.
-const hookRunScript = `command -v gtl >/dev/null 2>&1 && { COMMON=$(git rev-parse --git-common-dir 2>/dev/null); GITDIR=$(git rev-parse --git-dir 2>/dev/null); [ "$COMMON" != "$GITDIR" ] && { gtl port >/dev/null 2>&1 && gtl editor refresh || gtl setup .; }; gtl prune --stale --quiet >/dev/null 2>&1 & } || true`
+const hookRunScript = `[ "${GTL_DEFER_SETUP:-}" = "1" ] || { command -v gtl >/dev/null 2>&1 && { COMMON=$(git rev-parse --git-common-dir 2>/dev/null); GITDIR=$(git rev-parse --git-dir 2>/dev/null); [ "$COMMON" != "$GITDIR" ] && { gtl port >/dev/null 2>&1 && gtl editor refresh || gtl setup .; }; gtl prune --stale --quiet >/dev/null 2>&1 & } || true; }`
 
 // InstallPostCheckoutHook writes a post-checkout Git hook that triggers
 // gtl setup for new worktrees and gtl editor refresh for branch changes.
