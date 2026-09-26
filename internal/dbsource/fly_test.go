@@ -3,6 +3,7 @@ package dbsource
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -99,6 +100,39 @@ func TestFlySource_NotAuthed(t *testing.T) {
 	}
 	if _, err := src.Resolve(); !errors.Is(err, ErrFlyNotAuthed) {
 		t.Errorf("want ErrFlyNotAuthed, got %v", err)
+	}
+}
+
+// A failed `fly ssh console -C printenv` can still have dumped the app's
+// environment to stdout, so the error must never echo that output.
+func TestFlySource_FailureRedactsOutput(t *testing.T) {
+	out := "DATABASE_URL=postgres://app:s3cr3t-pw@db.internal:5432/club\n" +
+		"SECRET_KEY=abc123\n" +
+		"STRIPE_API_KEY=sk_live_deadbeef\n" +
+		"Error: connection reset by peer\n"
+	runErr := fmt.Errorf("exit status 1")
+	src := &flySource{
+		spec: Spec{Env: "production", App: "cv-prod"},
+		deps: flyDeps(out, runErr, nil),
+	}
+	_, err := src.Resolve()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if errors.Is(err, ErrFlyNotAuthed) {
+		t.Fatalf("generic failure misclassified as unauthenticated: %v", err)
+	}
+	msg := err.Error()
+	for _, leak := range []string{"s3cr3t-pw", "abc123", "sk_live_deadbeef", "postgres://", "DATABASE_URL", "SECRET_KEY", "connection reset"} {
+		if strings.Contains(msg, leak) {
+			t.Errorf("error leaks %q from command output: %s", leak, msg)
+		}
+	}
+	if !strings.Contains(msg, "cv-prod") || !strings.Contains(msg, "redacted") {
+		t.Errorf("error should name the app and say output was redacted: %s", msg)
+	}
+	if !errors.Is(err, runErr) {
+		t.Errorf("underlying exec error should be wrapped, got %v", err)
 	}
 }
 
