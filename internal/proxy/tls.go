@@ -551,18 +551,49 @@ func detectLinuxDistro() string {
 	}
 }
 
-func trustLinux(caCertFile string) error {
-	cfg := linuxTrustConfigs[detectLinuxDistro()]
-	script := fmt.Sprintf("/bin/mkdir -p '%s' && /bin/cp '%s' '%s' && %s",
-		cfg.certDir, caCertFile, filepath.Join(cfg.certDir, "git-treeline.crt"), cfg.updateCommand)
-	cmd := exec.Command("sudo", "-p",
-		"\nEnter your password (1 of 2): ",
-		"sh", "-c", script)
+// sudoRunCmd runs a single privileged command as argv. There is deliberately
+// no shell in the path: paths and names are passed as literal arguments so
+// quotes, spaces or metacharacters in them cannot become root commands.
+// Overridable in tests.
+var sudoRunCmd = func(prompt string, argv ...string) error {
+	cmd := exec.Command("sudo", append([]string{"-p", prompt}, argv...)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return err
+	return cmd.Run()
+}
+
+func linuxCACertFile(cfg linuxTrustConfig) string {
+	return filepath.Join(cfg.certDir, "git-treeline.crt")
+}
+
+// linuxTrustSteps returns the privileged commands, in order, that install the
+// CA into the system store for cfg.
+func linuxTrustSteps(cfg linuxTrustConfig, caCertFile string) [][]string {
+	return [][]string{
+		{"/bin/mkdir", "-p", cfg.certDir},
+		{"/bin/cp", caCertFile, linuxCACertFile(cfg)},
+		{cfg.updateCommand},
+	}
+}
+
+// linuxUntrustSteps returns the privileged commands, in order, that remove the
+// CA from the system store for cfg.
+func linuxUntrustSteps(cfg linuxTrustConfig) [][]string {
+	return [][]string{
+		{"/bin/rm", "-f", linuxCACertFile(cfg)},
+		{cfg.updateCommand},
+	}
+}
+
+func trustLinux(caCertFile string) error {
+	cfg := linuxTrustConfigs[detectLinuxDistro()]
+	// sudo caches credentials after the first step, so later steps normally
+	// do not prompt again.
+	for _, argv := range linuxTrustSteps(cfg, caCertFile) {
+		if err := sudoRunCmd("\nEnter your password (1 of 2): ", argv...); err != nil {
+			return err
+		}
 	}
 	// The system OpenSSL store above is what curl/wget/CLI tools consult.
 	// Browsers in the Chrome/Chromium/Brave and Firefox families do NOT use
@@ -578,16 +609,10 @@ func trustLinux(caCertFile string) error {
 func untrustLinux() error {
 	untrustNSS()
 	cfg := linuxTrustConfigs[detectLinuxDistro()]
-	certFile := filepath.Join(cfg.certDir, "git-treeline.crt")
-	script := fmt.Sprintf("/bin/rm -f '%s' && %s", certFile, cfg.updateCommand)
-	cmd := exec.Command("sudo", "-p",
-		"\nEnter your password to remove git-treeline CA: ",
-		"sh", "-c", script)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to remove CA from trust store: %w", err)
+	for _, argv := range linuxUntrustSteps(cfg) {
+		if err := sudoRunCmd("\nEnter your password to remove git-treeline CA: ", argv...); err != nil {
+			return fmt.Errorf("failed to remove CA from trust store: %w", err)
+		}
 	}
 	return nil
 }
