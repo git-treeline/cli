@@ -13,9 +13,11 @@
 package proxy
 
 import (
+	"encoding/pem"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -91,6 +93,41 @@ func TestIntegration_SystemTrust_AddRemove(t *testing.T) {
 		t.Fatalf("EnsureCA: %v", err)
 	}
 
+	openssl, err := exec.LookPath("openssl")
+	if err != nil {
+		t.Fatalf("openssl not found: %v", err)
+	}
+	cm, err := NewCertManager("localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := cm.issueCert("localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafPath := filepath.Join(t.TempDir(), "localhost.pem")
+	if err := os.WriteFile(leafPath, pem.EncodeToMemory(&pem.Block{
+		Type: "CERTIFICATE", Bytes: leaf.Certificate[0],
+	}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Each process reloads the system store; no test CA is passed to OpenSSL.
+	t.Setenv("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
+	t.Setenv("SSL_CERT_DIR", "/etc/ssl/certs")
+	verifyTrust := func(stage string, trusted bool) {
+		t.Helper()
+		out, err := exec.Command(openssl, "verify", "-purpose", "sslserver",
+			"-verify_hostname", "localhost", leafPath).CombinedOutput()
+		if trusted {
+			if err != nil {
+				t.Fatalf("%s: certificate should be trusted: %v\n%s", stage, err, out)
+			}
+		} else if err == nil || !strings.Contains(string(out), "unable to get local issuer certificate") {
+			t.Fatalf("%s: expected untrusted issuer error, got %v\n%s", stage, err, out)
+		}
+	}
+	verifyTrust("before install", false)
+
 	cfg := linuxTrustConfigs[detectLinuxDistro()]
 	installed := filepath.Join(cfg.certDir, "git-treeline.crt")
 	t.Cleanup(func() { _ = UntrustCA() })
@@ -102,9 +139,12 @@ func TestIntegration_SystemTrust_AddRemove(t *testing.T) {
 		t.Errorf("CA not copied into system store at %s: %v", installed, err)
 	}
 
+	verifyTrust("after install", true)
+
 	if err := UntrustCA(); err != nil {
 		t.Fatalf("UntrustCA: %v", err)
 	}
+	verifyTrust("after removal", false)
 	if _, err := os.Stat(installed); !os.IsNotExist(err) {
 		t.Errorf("CA still present in system store at %s after UntrustCA (err=%v)", installed, err)
 	}

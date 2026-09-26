@@ -1112,7 +1112,7 @@ func TestSupervisor_SIGHUPShutdown(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- sv.Run() }()
 
-	waitForSocket(t, sock, 2*time.Second)
+	waitForStatus(t, sock, "running", 2*time.Second)
 
 	// SIGHUP should trigger graceful shutdown identical to SIGINT/SIGTERM.
 	_ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP)
