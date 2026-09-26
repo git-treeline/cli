@@ -552,6 +552,13 @@ Aliases let you route non-gtl services through the router:
 			return nil
 		}
 
+		if err := proxy.ValidateAliasName(name); err != nil {
+			return cliErr(cmd, &CliError{
+				Message: err.Error(),
+				Hint:    "Alias names become subdomains, e.g. 'gtl serve alias redis-ui 8081'.",
+			})
+		}
+
 		var port int
 		if len(args) >= 2 {
 			var err error

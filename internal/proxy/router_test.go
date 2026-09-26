@@ -353,6 +353,71 @@ func TestRouterNotFound_EscapesSubdomain(t *testing.T) {
 	}
 }
 
+func TestValidateAliasName(t *testing.T) {
+	valid := []string{"redis-ui", "a", "A1", "my-app-2", "0x"}
+	for _, n := range valid {
+		if err := ValidateAliasName(n); err != nil {
+			t.Errorf("%q should be valid: %v", n, err)
+		}
+	}
+	invalid := []string{
+		"", "-redis", "redis-", "red_is", "red.is", "red is", "redis/ui",
+		`<script>alert(1)</script>`, `a"onmouseover="alert(1)`, "ünïcode",
+		strings.Repeat("a", 64),
+	}
+	for _, n := range invalid {
+		if err := ValidateAliasName(n); err == nil {
+			t.Errorf("%q should be rejected", n)
+		}
+	}
+}
+
+func TestRefreshRoutes_DropsInvalidAliasNames(t *testing.T) {
+	reg := testRegistry(t, nil)
+	router := NewRouter(0, reg).WithAliases(func() map[string]int {
+		return map[string]int{
+			"redis-ui":                   8081,
+			`<script>alert(1)</script>`: 8082,
+		}
+	})
+	router.Refresh()
+
+	routes := router.Routes()
+	if routes["redis-ui"] != 8081 {
+		t.Errorf("valid alias should be routed, got %v", routes)
+	}
+	if _, ok := routes[`<script>alert(1)</script>`]; ok {
+		t.Errorf("hostile alias name must not reach the route table: %v", routes)
+	}
+}
+
+// Even if a hostile key somehow reaches the route table (validation is a
+// separate layer), the HTML pages must not reflect it unescaped.
+func TestRouterPages_EscapeRouteKeys(t *testing.T) {
+	reg := testRegistry(t, nil)
+	router := NewRouter(0, reg)
+	hostile := `<script>alert(1)</script>`
+	router.mu.Lock()
+	router.routes[hostile] = 8082
+	router.mu.Unlock()
+
+	pages := map[string]func(w http.ResponseWriter){
+		"status":   func(w http.ResponseWriter) { router.serveStatusPage(w, nil) },
+		"notfound": func(w http.ResponseWriter) { router.serveNotFound(w, "nope") },
+	}
+	for name, serve := range pages {
+		rec := httptest.NewRecorder()
+		serve(rec)
+		body := rec.Body.String()
+		if strings.Contains(body, "<script>") {
+			t.Errorf("%s page reflected route key unescaped:\n%s", name, body)
+		}
+		if !strings.Contains(body, "&lt;script&gt;") {
+			t.Errorf("%s page should contain the escaped route key:\n%s", name, body)
+		}
+	}
+}
+
 func TestRouterLoopDetection(t *testing.T) {
 	reg := testRegistry(t, []registry.Allocation{
 		{"project": "salt", "branch": "main", "port": float64(3001), "ports": []any{float64(3001)}, "worktree": "/tmp/salt"},
