@@ -124,6 +124,7 @@ func TestDialWithSpawn_SpawnsWhenAbsent(t *testing.T) {
 	_ = f.Close()
 	_ = os.Remove(sock)
 	t.Cleanup(func() { _ = os.Remove(sock) })
+	t.Cleanup(func() { _ = os.Remove(daemonLogPath(sock)) })
 
 	fakeBin := writeFakeDaemonBinary(t, sock)
 
@@ -208,6 +209,59 @@ func writeFakeDaemonBinary(t *testing.T, sock string) string {
 		t.Fatal(err)
 	}
 	return bin
+}
+
+func TestDaemonLogPath_LivesBesideSocketInPrivateDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	got := daemonLogPath(SocketPath("prod"))
+	if filepath.Dir(got) != tunnel.ConfigDir() {
+		t.Errorf("log %q should live in the private tunnel dir %q", got, tunnel.ConfigDir())
+	}
+	if filepath.Dir(got) == os.TempDir() {
+		t.Errorf("log %q must not live directly in the shared temp dir", got)
+	}
+	if !strings.HasPrefix(filepath.Base(got), "gtl-tunnel-") || filepath.Ext(got) != ".log" {
+		t.Errorf("unexpected log leaf %q", got)
+	}
+}
+
+func TestOpenDaemonLog_RefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "gtl-tunnel-abc.log")
+	if err := os.Symlink(victim, logPath); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := openDaemonLog(logPath)
+	if err == nil {
+		_ = f.Close()
+		t.Fatal("expected open through a symlink to fail")
+	}
+	if !errors.Is(err, syscall.ELOOP) {
+		t.Errorf("expected ELOOP from O_NOFOLLOW, got %v", err)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "keep" {
+		t.Errorf("symlink target was modified: %q", got)
+	}
+}
+
+func TestOpenDaemonLog_CreatesPrivateFile(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "sub", "gtl-tunnel-abc.log")
+	f, err := openDaemonLog(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	if info, err := os.Stat(logPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("log mode = %v, want 0600", info)
+	}
+	if info, err := os.Stat(filepath.Dir(logPath)); err != nil || info.Mode().Perm() != 0o700 {
+		t.Errorf("log dir mode = %v, want 0700", info)
+	}
 }
 
 // TestStreamEvents_RendersAndStopsOnEOF feeds a synthetic event stream
