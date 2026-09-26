@@ -1092,15 +1092,23 @@ func (pc *ProjectConfig) migrateCommands() {
 }
 
 // rewriteSetupCommands converts the flat setup_commands key into a commands.setup block.
+//
+// Only the canonical two-space "  - item" layout is understood. If the block
+// uses any other shape (inline list, 0- or 4-space items, nested content) the
+// content is returned unchanged: stripping the header while leaving its items
+// behind would produce invalid YAML, and the in-memory migration already
+// covers the runtime behaviour.
 func rewriteSetupCommands(content string) string {
 	lines := strings.Split(content, "\n")
 	var out []string
 	inSetupCmds := false
+	found := false
 	var setupItems []string
 
 	for _, line := range lines {
 		if strings.HasPrefix(line, "setup_commands:") {
 			inSetupCmds = true
+			found = true
 			continue
 		}
 		if inSetupCmds {
@@ -1108,11 +1116,19 @@ func rewriteSetupCommands(content string) string {
 				setupItems = append(setupItems, line)
 				continue
 			}
+			// Anything indented or dash-led still belongs to the block but is
+			// not in the shape we can move. A key or blank line ends the block.
+			if strings.TrimSpace(line) != "" && (line[0] == ' ' || line[0] == '\t' || line[0] == '-') {
+				return content
+			}
 			inSetupCmds = false
 		}
 		out = append(out, line)
 	}
 
+	if found && len(setupItems) == 0 {
+		return content
+	}
 	if len(setupItems) > 0 {
 		out = appendCommandsBlock(out, "setup", setupItems)
 	}
