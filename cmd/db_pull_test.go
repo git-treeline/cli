@@ -220,14 +220,120 @@ func TestClassifyPullError_CorruptDump(t *testing.T) {
 
 func writeRegistry(t *testing.T, worktree string) {
 	t.Helper()
+	writeRegistryEntry(t, `{"worktree":"`+worktree+`","database":"club_feat","project":"club","database_adapter":"postgresql"}`)
+}
+
+// writeMainRegistry registers worktree as the project's main worktree, whose
+// database is the template itself (allocateMain).
+func writeMainRegistry(t *testing.T, worktree string) {
+	t.Helper()
+	writeRegistryEntry(t, `{"worktree":"`+worktree+`","database":"club_development","project":"club","database_adapter":"postgresql","main_worktree":true}`)
+}
+
+func writeRegistryEntry(t *testing.T, entry string) {
+	t.Helper()
 	reg := registry.New("")
 	if err := os.MkdirAll(filepath.Dir(reg.Path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	json := `{"version":1,"allocations":[{"worktree":"` + worktree +
-		`","database":"club_feat","project":"club","database_adapter":"postgresql"}]}`
+	json := `{"version":1,"allocations":[` + entry + `]}`
 	if err := os.WriteFile(reg.Path, []byte(json), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidatePullTarget(t *testing.T) {
+	cases := []struct {
+		name   string
+		info   dbInfo
+		reject bool
+	}{
+		{"feature worktree", dbInfo{target: "club_feat", template: "club_development"}, false},
+		{"no template configured", dbInfo{target: "club_feat"}, false},
+		{"main worktree flag", dbInfo{target: "club_development", template: "club_development", mainWorktree: true}, true},
+		{"main worktree flag without template", dbInfo{target: "club_dev", mainWorktree: true}, true},
+		{"target resolves to template", dbInfo{target: "club_development", template: "club_development"}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validatePullTarget(&c.info)
+			if c.reject && err == nil {
+				t.Fatal("expected rejection")
+			}
+			if !c.reject && err != nil {
+				t.Fatalf("unexpected rejection: %v", err)
+			}
+			if err != nil {
+				ce, ok := err.(*CliError)
+				if !ok || !strings.Contains(ce.Hint, "gtl db template update") {
+					t.Errorf("want *CliError pointing at template update, got %v", err)
+				}
+			}
+		})
+	}
+}
+
+// mainWorktreeFixture registers the cwd as the main worktree with a postgres
+// adapter, a template, and a staging source.
+func mainWorktreeFixture(t *testing.T) (wt string) {
+	t.Helper()
+	t.Setenv("GTL_HOME", t.TempDir())
+	wt = t.TempDir()
+	if err := os.WriteFile(filepath.Join(wt, ".treeline.yml"), []byte(`
+project: club
+database:
+  adapter: postgresql
+  template: club_development
+  sources:
+    staging:
+      via: env
+      var: STAGING_DATABASE_URL
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeMainRegistry(t, wt)
+	t.Setenv("STAGING_DATABASE_URL", "postgres://u:p@db.example.com:5432/club_staging")
+	t.Chdir(wt)
+	return wt
+}
+
+func TestDBPull_RejectsMainWorktree(t *testing.T) {
+	wt := mainWorktreeFixture(t)
+	dbPullForce = true
+	t.Cleanup(func() { dbPullForce = false })
+
+	err := runDBPull(dbPullCmd, "staging")
+	ce, ok := err.(*CliError)
+	if !ok {
+		t.Fatalf("want *CliError, got %T: %v", err, err)
+	}
+	if !strings.Contains(ce.Message, "main worktree") {
+		t.Errorf("message should explain the main-worktree guard: %q", ce.Message)
+	}
+	if _, err := os.Stat(filepath.Join(wt, "tmp", "gtl-db")); err == nil {
+		t.Error("rejected pull must not create tmp/gtl-db")
+	}
+}
+
+func TestDBRefresh_RejectsMainWorktree(t *testing.T) {
+	wt := mainWorktreeFixture(t)
+	dir, err := ensureDumpDir(wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "staging.dump"), []byte("PGDMP"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dbRefreshForce = true
+	t.Cleanup(func() { dbRefreshForce = false })
+
+	err = runDBRefresh(dbRefreshCmd, []string{"staging"})
+	ce, ok := err.(*CliError)
+	if !ok {
+		t.Fatalf("want *CliError, got %T: %v", err, err)
+	}
+	if !strings.Contains(ce.Message, "main worktree") {
+		t.Errorf("message should explain the main-worktree guard: %q", ce.Message)
 	}
 }
 

@@ -60,6 +60,9 @@ func runDBPull(cmd *cobra.Command, env string) error {
 	if info.adapterName == "sqlite" {
 		return cliErr(cmd, errPullNotPostgres())
 	}
+	if err := validatePullTarget(info); err != nil {
+		return cliErr(cmd, err)
+	}
 
 	pc := config.LoadProjectConfigReadOnly(info.worktreeDir)
 	spec, err := buildSourceSpec(pc, env)
@@ -131,6 +134,9 @@ func runDBRefresh(cmd *cobra.Command, args []string) error {
 	}
 	if info.adapterName == "sqlite" {
 		return cliErr(cmd, errPullNotPostgres())
+	}
+	if err := validatePullTarget(info); err != nil {
+		return cliErr(cmd, err)
 	}
 
 	pc := config.LoadProjectConfig(info.worktreeDir)
@@ -305,6 +311,21 @@ func errPullNotPostgres() error {
 	return &CliError{
 		Message: "gtl db pull/refresh supports the postgresql adapter only.",
 		Hint:    "This worktree's database.adapter is not postgresql.",
+	}
+}
+
+// validatePullTarget guards `gtl db pull` and `gtl db refresh`: both drop and
+// recreate the worktree database, but on the main worktree that database IS the
+// template (allocateMain), so the drop would destroy the clone source for every
+// other worktree. The same holds for any allocation whose database resolves to
+// the template name.
+func validatePullTarget(info *dbInfo) error {
+	if !info.mainWorktree && (info.template == "" || info.target != info.template) {
+		return nil
+	}
+	return &CliError{
+		Message: fmt.Sprintf("db pull/refresh operates on the worktree's cloned database, but the main worktree uses the template (%s) directly.", info.target),
+		Hint:    "Run this from a feature-branch worktree instead, or use 'gtl db template update' to refresh the template.",
 	}
 }
 
