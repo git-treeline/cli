@@ -33,11 +33,29 @@ func TestServeAlias_RejectsHostileName(t *testing.T) {
 
 func TestServeAlias_AcceptsPlainName(t *testing.T) {
 	t.Setenv("GTL_HOME", t.TempDir())
-	if err := serveAliasCmd.RunE(serveAliasCmd, []string{"redis-ui", "8081"}); err != nil {
+	if err := serveAliasCmd.RunE(serveAliasCmd, []string{"Redis-UI", "8081"}); err != nil {
 		t.Fatalf("plain alias name should be accepted: %v", err)
 	}
 	if got := config.LoadUserConfig("").RouterAliases()["redis-ui"]; got != 8081 {
 		t.Errorf("alias not saved, got %d", got)
+	}
+}
+
+func TestServeAliasRemove_FindsLegacyMixedCaseAlias(t *testing.T) {
+	t.Setenv("GTL_HOME", t.TempDir())
+	uc := config.LoadUserConfig("")
+	uc.Set("router.aliases.RedisUI", float64(8081))
+	if err := uc.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	serveAliasRemove = true
+	t.Cleanup(func() { serveAliasRemove = false })
+	if err := serveAliasCmd.RunE(serveAliasCmd, []string{"redisui"}); err != nil {
+		t.Fatalf("remove should match legacy mixed-case alias: %v", err)
+	}
+	if got := config.LoadUserConfig("").RouterAliases(); len(got) != 0 {
+		t.Errorf("alias should be removed, got %v", got)
 	}
 }
 

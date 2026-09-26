@@ -529,7 +529,7 @@ Aliases let you route non-gtl services through the router:
 			return nil
 		}
 
-		name := args[0]
+		name := strings.ToLower(args[0])
 		if serveAliasRemove {
 			aliases, _ := config.Dig(uc.Data, "router", "aliases").(map[string]any)
 			if aliases == nil {
@@ -538,13 +538,14 @@ Aliases let you route non-gtl services through the router:
 					Hint:    "Run 'gtl serve alias' to list existing aliases.",
 				})
 			}
-			if _, exists := aliases[name]; !exists {
+			key, exists := findAliasKey(aliases, name)
+			if !exists {
 				return cliErr(cmd, &CliError{
 					Message: fmt.Sprintf("Alias %q not found.", name),
 					Hint:    "Run 'gtl serve alias' to list existing aliases.",
 				})
 			}
-			delete(aliases, name)
+			delete(aliases, key)
 			if err := uc.Save(); err != nil {
 				return fmt.Errorf("failed to save config: %w", err)
 			}
@@ -574,6 +575,14 @@ Aliases let you route non-gtl services through the router:
 			port = detected
 		}
 
+		aliases, _ := config.Dig(uc.Data, "router", "aliases").(map[string]any)
+		if aliases != nil {
+			for key := range aliases {
+				if strings.ToLower(key) == name {
+					delete(aliases, key)
+				}
+			}
+		}
 		uc.Set("router.aliases."+name, float64(port))
 		if err := uc.Save(); err != nil {
 			return fmt.Errorf("failed to save config: %w", err)
@@ -582,6 +591,18 @@ Aliases let you route non-gtl services through the router:
 		fmt.Println("The router will pick this up on next refresh (~5s).")
 		return nil
 	},
+}
+
+func findAliasKey(aliases map[string]any, name string) (string, bool) {
+	if _, exists := aliases[name]; exists {
+		return name, true
+	}
+	for key := range aliases {
+		if strings.ToLower(key) == name {
+			return key, true
+		}
+	}
+	return "", false
 }
 
 // detectAliasPort resolves the port for the current directory's allocation.

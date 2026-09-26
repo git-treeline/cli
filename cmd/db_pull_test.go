@@ -251,6 +251,7 @@ func TestValidatePullTarget(t *testing.T) {
 		{"feature worktree", dbInfo{target: "club_feat", template: "club_development"}, false},
 		{"no template configured", dbInfo{target: "club_feat"}, false},
 		{"main worktree flag", dbInfo{target: "club_development", template: "club_development", mainWorktree: true}, true},
+		{"legacy main repo fallback", dbInfo{target: "club_old_development", template: "club_development", isMainRepo: true}, true},
 		{"main worktree flag without template", dbInfo{target: "club_dev", mainWorktree: true}, true},
 		{"target resolves to template", dbInfo{target: "club_development", template: "club_development"}, true},
 	}

@@ -320,7 +320,7 @@ func errPullNotPostgres() error {
 // other worktree. The same holds for any allocation whose database resolves to
 // the template name.
 func validatePullTarget(info *dbInfo) error {
-	if !info.mainWorktree && (info.template == "" || info.target != info.template) {
+	if !info.mainWorktree && !info.isMainRepo && (info.template == "" || info.target != info.template) {
 		return nil
 	}
 	return &CliError{

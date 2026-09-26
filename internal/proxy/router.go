@@ -28,13 +28,18 @@ import (
 )
 
 // aliasNameRe is the shape an alias name must have to be a safe DNS label:
-// alphanumerics and hyphens, no leading or trailing hyphen.
-var aliasNameRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$`)
+// lowercase alphanumerics and hyphens, no leading or trailing hyphen.
+var aliasNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+func canonicalAliasName(name string) string {
+	return strings.ToLower(name)
+}
 
 // ValidateAliasName rejects alias names that are not a plain DNS label. Names
 // are used as subdomains and rendered into the router's HTML pages, so
-// anything outside [a-zA-Z0-9-] is refused rather than escaped case by case.
+// anything outside [a-z0-9-] is refused rather than escaped case by case.
 func ValidateAliasName(name string) error {
+	name = canonicalAliasName(name)
 	if len(name) > 63 || !aliasNameRe.MatchString(name) {
 		return fmt.Errorf("invalid alias name %q: use letters, digits and hyphens only, not starting or ending with a hyphen", name)
 	}
@@ -381,6 +386,7 @@ func (r *Router) refreshRoutes() {
 	// be hand-edited, so names are re-checked here rather than trusted.
 	for _, src := range r.aliasSources {
 		for name, port := range src() {
+			name = canonicalAliasName(name)
 			if err := ValidateAliasName(name); err != nil {
 				r.rlog("skipping alias: %v", err)
 				continue

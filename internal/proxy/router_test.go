@@ -391,6 +391,22 @@ func TestRefreshRoutes_DropsInvalidAliasNames(t *testing.T) {
 	}
 }
 
+func TestRefreshRoutes_NormalizesAliasNames(t *testing.T) {
+	reg := testRegistry(t, nil)
+	router := NewRouter(0, reg).WithAliases(func() map[string]int {
+		return map[string]int{"RedisUI": 8081}
+	})
+	router.Refresh()
+
+	routes := router.Routes()
+	if routes["redisui"] != 8081 {
+		t.Errorf("alias should be canonicalized to lowercase, got %v", routes)
+	}
+	if _, ok := routes["RedisUI"]; ok {
+		t.Errorf("mixed-case alias must not remain in the route table: %v", routes)
+	}
+}
+
 // Even if a hostile key somehow reaches the route table (validation is a
 // separate layer), the HTML pages must not reflect it unescaped.
 func TestRouterPages_EscapeRouteKeys(t *testing.T) {
