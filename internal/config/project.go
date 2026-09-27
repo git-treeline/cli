@@ -77,6 +77,7 @@ type ProjectConfig struct {
 	Data        map[string]any
 	loadErr     error
 	readOnly    bool
+	quiet       bool
 	// sawPatternKey records that the file on disk still spells the primary
 	// database key as `pattern`, so migrateDatabaseName knows to rewrite it.
 	sawPatternKey bool
@@ -93,8 +94,18 @@ func LoadProjectConfigReadOnly(projectRoot string) *ProjectConfig {
 	return loadProjectConfig(projectRoot, true)
 }
 
+// LoadProjectConfigReadOnlyQuiet is for checked effects whose diagnostics must
+// not echo configuration values. Migrations remain in memory only.
+func LoadProjectConfigReadOnlyQuiet(projectRoot string) *ProjectConfig {
+	return loadProjectConfigOptions(projectRoot, true, true)
+}
+
 func loadProjectConfig(projectRoot string, readOnly bool) *ProjectConfig {
-	pc := &ProjectConfig{ProjectRoot: projectRoot, readOnly: readOnly}
+	return loadProjectConfigOptions(projectRoot, readOnly, false)
+}
+
+func loadProjectConfigOptions(projectRoot string, readOnly, quiet bool) *ProjectConfig {
+	pc := &ProjectConfig{ProjectRoot: projectRoot, readOnly: readOnly, quiet: quiet}
 	pc.Data = pc.load()
 	pc.migrateDatabaseName()
 	pc.migrateDefaultBranch()
@@ -1361,7 +1372,9 @@ func (pc *ProjectConfig) load() map[string]any {
 		return copyMap(ProjectDefaults)
 	}
 
-	WarnUnknownKeys(yamlData, projectKnownKeys, ProjectConfigFile)
+	if !pc.quiet {
+		WarnUnknownKeys(yamlData, projectKnownKeys, ProjectConfigFile)
+	}
 
 	// Fold the legacy `pattern` key into `name` before the defaults are merged
 	// in: the defaults supply `name`, so a post-merge fold could not tell a

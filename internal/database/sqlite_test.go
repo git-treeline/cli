@@ -429,3 +429,26 @@ func TestSQLite_Rename_MissingSource_ReturnsError(t *testing.T) {
 		t.Errorf("target should not be created, stat err=%v", statErr)
 	}
 }
+
+func TestSQLiteDropReportsCompanionFailure(t *testing.T) {
+	for _, suffix := range []string{"-wal", "-shm"} {
+		t.Run(suffix, func(t *testing.T) {
+			target := filepath.Join(t.TempDir(), "fixture.db")
+			if err := os.WriteFile(target, []byte("disposable fixture bytes"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(target+suffix, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(target+suffix, "blocker"), []byte("fixture"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := (&SQLite{}).Drop(target); err == nil {
+				t.Fatal("companion failure acknowledged success")
+			}
+			if _, err := os.Stat(target); !os.IsNotExist(err) {
+				t.Fatal("fixture did not exercise partial deletion", err)
+			}
+		})
+	}
+}

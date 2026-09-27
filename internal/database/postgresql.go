@@ -86,11 +86,16 @@ func (pg *PostgreSQL) ListDatabases() ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to list databases: %w", err)
 	}
-	return parsePsqlListNames(string(out)), nil
+	return parsePsqlListNamesChecked(string(out))
 }
 
 // parsePsqlListNames extracts the database names from psql -lqt output.
 func parsePsqlListNames(output string) []string {
+	names, _ := parsePsqlListNamesChecked(output)
+	return names
+}
+
+func parsePsqlListNamesChecked(output string) ([]string, error) {
 	var names []string
 	scanner := bufio.NewScanner(strings.NewReader(output))
 	for scanner.Scan() {
@@ -102,7 +107,10 @@ func parsePsqlListNames(output string) []string {
 			names = append(names, name)
 		}
 	}
-	return names
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("database listing incomplete")
+	}
+	return names, nil
 }
 
 func (pg *PostgreSQL) Clone(template, target string) error {

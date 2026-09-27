@@ -1630,3 +1630,32 @@ func TestReadOnlyConfigMatchesWritableOracle(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadProjectConfigReadOnlyQuietPreservesConfigAndSilence(t *testing.T) {
+	root := t.TempDir()
+	name := filepath.Join(root, ProjectConfigFile)
+	original := []byte("project: fixture\nprivate_unknown_key: private-value\nports_needed: 2\ndatabase:\n  pattern: fixture_database\n")
+	if err := os.WriteFile(name, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	captured, err := os.CreateTemp(t.TempDir(), "output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer captured.Close()
+	stdout, stderr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = captured, captured
+	defer func() { os.Stdout, os.Stderr = stdout, stderr }()
+	pc := LoadProjectConfigReadOnlyQuiet(root)
+	os.Stdout, os.Stderr = stdout, stderr
+	if pc.LoadError() != nil || pc.Data["port_count"] != 2 || Dig(pc.Data, "database", "name") != "fixture_database" {
+		t.Fatal("quiet loader lost in-memory compatibility")
+	}
+	if info, err := captured.Stat(); err != nil || info.Size() != 0 {
+		t.Fatal("quiet loader printed configuration", err)
+	}
+	after, err := os.ReadFile(name)
+	if err != nil || string(after) != string(original) {
+		t.Fatal("quiet loader rewrote config", err)
+	}
+}

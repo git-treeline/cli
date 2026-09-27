@@ -635,3 +635,12 @@ func TestPostgreSQL_ListDatabases_Failure(t *testing.T) {
 		t.Error("expected error when psql fails, got nil")
 	}
 }
+
+func TestPostgreSQLListDatabasesRejectsTruncatedScanner(t *testing.T) {
+	pg := &PostgreSQL{execOutput: func(string, ...string) ([]byte, error) {
+		return []byte("fixture | owner\n" + strings.Repeat("x", 70*1024) + " | owner\n"), nil
+	}}
+	if names, err := pg.ListDatabases(); err == nil || names != nil {
+		t.Fatalf("truncated inventory accepted: %v %v", names, err)
+	}
+}

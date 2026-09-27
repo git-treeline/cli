@@ -112,9 +112,10 @@ func (s *SQLite) Drop(target string) error {
 		return err
 	}
 	// SQLite WAL mode companion files
-	_ = removeIfExists(target + "-wal")
-	_ = removeIfExists(target + "-shm")
-	return nil
+	if err := removeIfExists(target + "-wal"); err != nil {
+		return err
+	}
+	return removeIfExists(target + "-shm")
 }
 
 func (s *SQLite) Rename(oldPath, newPath string) error {
