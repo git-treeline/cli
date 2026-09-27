@@ -541,7 +541,7 @@ func snapshot(a Allocation) (*CleanupSnapshot, error) {
 	if v, ok := a["port"]; ok && !integer(v, 1, 65535) {
 		return nil, fmt.Errorf("invalid cleanup port")
 	}
-	if v, ok := a["redis_db"]; ok && !integer(v, 0, 2147483647) {
+	if v, ok := a["redis_db"]; ok && v != nil && !integer(v, 0, 2147483647) {
 		return nil, fmt.Errorf("invalid cleanup Redis index")
 	}
 	if v, ok := a["ports"]; ok {

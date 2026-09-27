@@ -22,6 +22,10 @@ type Allocator struct {
 	UserConfig    *config.UserConfig
 	ProjectConfig *config.ProjectConfig
 	Registry      *registry.Registry
+	// FreshTarget and FreshLocks are provided only by the supported creation
+	// sequence, immediately after creating a previously absent worktree.
+	FreshTarget *registry.TargetIdentity
+	FreshLocks  *registry.LifecycleLocks
 	// SupervisorLive reports whether the given worktree has its own live
 	// supervisor (its control socket responds). Used during reuse so a busy
 	// allocated port held by the worktree's own dev server isn't mistaken for a
@@ -192,7 +196,11 @@ func (al *Allocator) Allocate(worktreePath, worktreeName string, mainWorktree bo
 	if len(branch) > 0 {
 		b = branch[0]
 	}
-	if existing := al.reuseExisting(worktreePath, worktreeName, mainWorktree, b); existing != nil {
+	if al.FreshTarget != nil || al.FreshLocks != nil {
+		if al.FreshTarget == nil || al.FreshLocks == nil || al.DryRun || mainWorktree || al.FreshTarget.Path != worktreePath {
+			return nil, fmt.Errorf("invalid fresh allocation context")
+		}
+	} else if existing := al.reuseExisting(worktreePath, worktreeName, mainWorktree, b); existing != nil {
 		return existing, nil
 	}
 	if mainWorktree {
@@ -435,8 +443,14 @@ func (al *Allocator) allocateNew(worktreePath, worktreeName, branch string) (*Al
 		})
 	}
 
+	allocate := func(compute func(registry.UsedResources) (registry.Allocation, error)) (registry.Allocation, error) {
+		if al.FreshTarget != nil {
+			return al.Registry.EnrollFreshAllocationTx(al.FreshLocks, *al.FreshTarget, compute)
+		}
+		return al.Registry.AllocateTx(worktreePath, compute)
+	}
 	var alloc *Allocation
-	if _, err := al.Registry.AllocateTx(worktreePath, func(used registry.UsedResources) (registry.Allocation, error) {
+	if _, err := allocate(func(used registry.UsedResources) (registry.Allocation, error) {
 		a, berr := build(used)
 		if berr != nil {
 			return nil, berr

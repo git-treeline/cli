@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -64,6 +67,15 @@ func withRuntimeTargetLock(locks *LifecycleLocks, target TargetIdentity, fn func
 // creation sequence; this API must not be used to adopt an existing worktree's
 // legacy runtime. Existing allocation paths and supplied identities are refused.
 func (r *Registry) EnrollFreshAllocation(locks *LifecycleLocks, target TargetIdentity, entry Allocation) (Allocation, error) {
+	return r.EnrollFreshAllocationTx(locks, target, func(UsedResources) (Allocation, error) { return entry, nil })
+}
+
+// EnrollFreshAllocationTx selects resources and certifies fresh enrollment in
+// one registry transaction, under the caller's creation lifecycle lock.
+func (r *Registry) EnrollFreshAllocationTx(locks *LifecycleLocks, target TargetIdentity, compute func(UsedResources) (Allocation, error)) (Allocation, error) {
+	if compute == nil {
+		return nil, fmt.Errorf("fresh allocation computation is required")
+	}
 	var result Allocation
 	err := withRuntimeTargetLock(locks, target, func() error {
 		return r.registryTransaction(func(data *RegistryData) error {
@@ -78,6 +90,10 @@ func (r *Registry) EnrollFreshAllocation(locks *LifecycleLocks, target TargetIde
 			}
 			if allocationAt(*data, target.Path) != nil {
 				return fmt.Errorf("fresh enrollment target is already allocated")
+			}
+			entry, err := compute(UsedResources{Ports: allocationsUsedPorts(data.Allocations), RedisDbs: allocationsUsedRedisDbs(data.Allocations)})
+			if err != nil {
+				return err
 			}
 			if _, exists := entry["allocation_generation"]; exists {
 				return fmt.Errorf("fresh enrollment cannot supply generation")
@@ -96,8 +112,14 @@ func (r *Registry) EnrollFreshAllocation(locks *LifecycleLocks, target TargetIde
 			if allocation == nil {
 				return fmt.Errorf("fresh allocation is required")
 			}
+			if err := verifyTarget(target, false); err != nil {
+				return err
+			}
 			if path := GetString(allocation, "worktree"); path != "" && resolvePath(path) != target.Path {
 				return fmt.Errorf("fresh allocation target mismatch")
+			}
+			if allocation["allocated_at"] == nil {
+				allocation["allocated_at"] = time.Now().UTC().Format(time.RFC3339)
 			}
 			allocation["worktree"] = target.Path
 			allocation["allocation_generation"] = uuid.NewString()
@@ -149,4 +171,38 @@ func (r *Registry) RegisterRuntime(locks *LifecycleLocks, target TargetIdentity,
 		return nil, err
 	}
 	return result, nil
+}
+
+// CaptureReleaseTarget captures the canonical directory and Git-common identity
+// without trusting inherited Git redirection or adopting runtime ownership.
+func CaptureReleaseTarget(path string) (TargetIdentity, error) {
+	canonical, err := CanonicalLifecycleTarget(path)
+	if err != nil {
+		return TargetIdentity{}, err
+	}
+	directory, err := directoryIdentity(canonical)
+	if err != nil {
+		return TargetIdentity{}, err
+	}
+	target := TargetIdentity{Path: canonical, Directory: directory}
+	raw, gitErr := identityGit(canonical, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if gitErr == nil {
+		commonPath := strings.TrimSuffix(string(raw), "\n")
+		if commonPath == string(raw) || !filepath.IsAbs(commonPath) {
+			return TargetIdentity{}, fmt.Errorf("Git common identity unavailable")
+		}
+		commonPath, err = filepath.EvalSymlinks(commonPath)
+		if err != nil {
+			return TargetIdentity{}, err
+		}
+		commonDirectory, err := directoryIdentity(commonPath)
+		if err != nil {
+			return TargetIdentity{}, err
+		}
+		target.Common = &CommonIdentity{Path: commonPath, DirectoryIdentity: commonDirectory}
+	}
+	if err := VerifyReleaseTarget(target); err != nil {
+		return TargetIdentity{}, err
+	}
+	return target, nil
 }

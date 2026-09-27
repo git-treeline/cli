@@ -3,7 +3,10 @@ package registry
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -189,5 +192,106 @@ func TestMalformedRuntimeBindingRefuses(t *testing.T) {
 		if _, err := AllocationRuntimeBinding(Allocation{"runtime_binding": value}); err == nil {
 			t.Fatalf("accepted malformed binding %#v", value)
 		}
+	}
+}
+
+func TestFreshAllocationTxUsesCurrentResourcesAndRefusesAdoption(t *testing.T) {
+	root, dir := lifecycleFixture(t)
+	target, err := CaptureReleaseTarget(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locks := acquireForTest(t, dir, root)
+	reg := New(filepath.Join(t.TempDir(), "registry.json"))
+	if err := reg.Allocate(Allocation{"worktree": filepath.Join(root, "other"), "port": 4100, "redis_db": 2}); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	entry, err := reg.EnrollFreshAllocationTx(locks, target, func(used UsedResources) (Allocation, error) {
+		calls++
+		if !slices.Equal(used.Ports, []int{4100}) || !slices.Equal(used.RedisDbs, []int{2}) {
+			t.Fatalf("stale resources: %+v", used)
+		}
+		return Allocation{"port": 4101, "redis_db": 3}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := AllocationRuntimeBinding(entry)
+	if err != nil || binding.Kind != "never_started" || GetString(entry, "allocated_at") == "" {
+		t.Fatal("fresh allocation missing retained identity", err)
+	}
+	before, _ := os.ReadFile(reg.Path)
+	if _, err := reg.EnrollFreshAllocationTx(locks, target, func(UsedResources) (Allocation, error) { calls++; return Allocation{}, nil }); err == nil || calls != 1 {
+		t.Fatal("existing allocation computed or adopted")
+	}
+	after, _ := os.ReadFile(reg.Path)
+	if string(before) != string(after) {
+		t.Fatal("refused adoption changed registry")
+	}
+}
+
+func TestFreshAllocationTxFailureNeverEnrollsOrMigrates(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprint(legacy), func(t *testing.T) {
+			root, dir := lifecycleFixture(t)
+			target, err := CaptureReleaseTarget(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			locks := acquireForTest(t, dir, root)
+			reg := New(filepath.Join(t.TempDir(), "registry.json"))
+			if legacy {
+				if err := os.WriteFile(reg.Path, []byte(`{"version":3,"allocations":[]}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, _ := os.ReadFile(reg.Path)
+			calls := 0
+			if _, err := reg.EnrollFreshAllocationTx(locks, target, func(UsedResources) (Allocation, error) {
+				calls++
+				return nil, fmt.Errorf("injected computation failure")
+			}); err == nil {
+				t.Fatal("failure accepted")
+			}
+			if legacy && calls != 0 {
+				t.Fatal("legacy store computed a fresh allocation")
+			}
+			after, _ := os.ReadFile(reg.Path)
+			if string(before) != string(after) {
+				t.Fatal("failed computation changed store")
+			}
+		})
+	}
+}
+
+func TestCaptureReleaseTargetUsesGitIdentityAndIgnoresRedirection(t *testing.T) {
+	_, _ = lifecycleFixture(t)
+	main, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseFixtureGit(t, main, "init", "-q")
+	releaseFixtureGit(t, main, "commit", "--allow-empty", "-qm", "fixture")
+	linked := filepath.Join(t.TempDir(), "linked")
+	releaseFixtureGit(t, main, "worktree", "add", "-qb", "linked", linked)
+	linked, err = filepath.EvalSymlinks(linked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "missing"))
+	t.Setenv("GIT_WORK_TREE", t.TempDir())
+	target, err := CaptureReleaseTarget(linked)
+	if err != nil || target.Path != linked || target.Common == nil || target.Common.Path != filepath.Join(main, ".git") {
+		t.Fatalf("identity=%+v err=%v", target, err)
+	}
+	if err := os.Mkdir(filepath.Join(linked, "nested"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CaptureReleaseTarget(filepath.Join(linked, "nested")); err == nil {
+		t.Fatal("nested path accepted as worktree root")
+	}
+	if _, err := CaptureReleaseTarget(filepath.Join(linked, "missing")); err == nil {
+		t.Fatal("missing target accepted")
 	}
 }

@@ -1,6 +1,7 @@
 package allocator
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/registry"
+	"github.com/google/uuid"
 )
 
 func testAllocator(t *testing.T, portsNeeded int, yamlExtra string) (*Allocator, *registry.Registry) {
@@ -1580,5 +1582,150 @@ func TestAllocate_ListFormExtrasStayUnnamed(t *testing.T) {
 	}
 	if entry := reg.Find("/wt/feature-branch"); entry["database_extra"] != nil {
 		t.Errorf("expected no database_extra in the registry for a positional list, got %v", entry["database_extra"])
+	}
+}
+
+func freshAllocatorFixture(t *testing.T) (*Allocator, *registry.Registry, string) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	al, reg := testAllocator(t, 1, "")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	// Reserved branch ports avoid probing or binding any host TCP sockets.
+	if err := os.WriteFile(configPath, []byte(`{"port":{"base":4000,"increment":10,"reservations":{"test/fresh":4100}},"redis":{"strategy":"database","databases":16,"url":"redis://localhost:6379"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	al.UserConfig = config.LoadUserConfig(configPath)
+	root, err := registry.CanonicalLifecycleTarget(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := registry.CaptureReleaseTarget(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locks, err := registry.AcquireLifecycleLocks(context.Background(), []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = locks.Close() })
+	al.FreshTarget, al.FreshLocks = &target, locks
+	al.SupervisorLive = func(string) bool { t.Fatal("fresh allocation probed a legacy supervisor"); return false }
+	return al, reg, root
+}
+
+func TestFreshAllocationPersistsResourcesAndNeverStartedAtomically(t *testing.T) {
+	al, reg, root := freshAllocatorFixture(t)
+	if err := reg.Allocate(registry.Allocation{"worktree": filepath.Join(root, "other"), "port": 4200, "redis_db": 1}); err != nil {
+		t.Fatal(err)
+	}
+	alloc, err := al.Allocate(root, "fresh", false, "fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alloc.Port != 4100 || alloc.RedisDB != 2 || alloc.Reused {
+		t.Fatalf("allocation=%+v", alloc)
+	}
+	retained, err := reg.FindForRelease(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := registry.AllocationRuntimeBinding(retained)
+	if err != nil || binding.Kind != "never_started" || registry.GetString(retained, "allocation_generation") == "" {
+		t.Fatal("fresh enrollment missing", err)
+	}
+	if got := registry.ExtractPorts(retained); !slices.Equal(got, alloc.Ports) {
+		t.Fatal("computed allocation differs from retained resources")
+	}
+	before, _ := os.ReadFile(reg.Path)
+	if _, err := al.Allocate(root, "fresh", false, "fresh"); err == nil {
+		t.Fatal("fresh context silently reused existing allocation")
+	}
+	after, _ := os.ReadFile(reg.Path)
+	if string(before) != string(after) {
+		t.Fatal("refused fresh reuse changed registry")
+	}
+}
+
+func TestFreshAllocationRefusesExistingLegacyAndConflictingResources(t *testing.T) {
+	for _, fixture := range []string{"existing", "legacy_store", "reserved_port", "missing_lock", "main", "dry_run", "mismatched_target"} {
+		t.Run(fixture, func(t *testing.T) {
+			al, reg, root := freshAllocatorFixture(t)
+			main := false
+			switch fixture {
+			case "existing":
+				if err := reg.Allocate(registry.Allocation{"worktree": root, "port": 4100}); err != nil {
+					t.Fatal(err)
+				}
+			case "legacy_store":
+				if err := os.WriteFile(reg.Path, []byte(`{"version":3,"allocations":[]}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "reserved_port":
+				if err := reg.Allocate(registry.Allocation{"worktree": filepath.Join(root, "other"), "port": 4100}); err != nil {
+					t.Fatal(err)
+				}
+			case "missing_lock":
+				al.FreshLocks = nil
+			case "main":
+				main = true
+			case "dry_run":
+				al.DryRun = true
+			case "mismatched_target":
+				root = filepath.Join(root, "other")
+			}
+			before, _ := os.ReadFile(reg.Path)
+			if _, err := al.Allocate(root, "fresh", main, "fresh"); err == nil {
+				t.Fatal("invalid fresh enrollment accepted")
+			}
+			after, _ := os.ReadFile(reg.Path)
+			if string(before) != string(after) {
+				t.Fatal("refusal changed registry")
+			}
+		})
+	}
+}
+
+func TestOrdinaryAllocationCannotInventFreshRuntimeOwnership(t *testing.T) {
+	al, reg, root := freshAllocatorFixture(t)
+	al.FreshTarget, al.FreshLocks = nil, nil
+	if _, err := al.Allocate(root, "fresh", false, "fresh"); err != nil {
+		t.Fatal(err)
+	}
+	retained, err := reg.FindForRelease(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := registry.AllocationRuntimeBinding(retained)
+	if err != nil || binding.Kind != "unknown" {
+		t.Fatal("ordinary setup invented freshness", err)
+	}
+}
+
+func TestFreshAllocationPrefixedRedisCanPrepareRelease(t *testing.T) {
+	al, reg, root := freshAllocatorFixture(t)
+	al.UserConfig.Data["redis"].(map[string]any)["strategy"] = "prefixed"
+	alloc, err := al.Allocate(root, "fresh", false, "fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value, present := alloc.ToRegistryEntry()["redis_db"]; !present || value != nil {
+		t.Fatal("fixture did not exercise the allocator's null Redis DB shape")
+	}
+	retained, err := reg.FindForRelease(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := registry.AllocationRuntimeBinding(retained)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, _, err := reg.PrepareRelease(registry.ReleaseRequest{
+		OperationID: uuid.NewString(), Target: *al.FreshTarget,
+		Allocation:     registry.AllocationRef{Kind: "allocated", Generation: registry.GetString(retained, "allocation_generation")},
+		RuntimeBinding: &binding, HooksDigest: strings.Repeat("0", 64),
+	})
+	if err != nil || op.Snapshot == nil || op.Snapshot.RedisDB != nil {
+		t.Fatalf("prefixed cleanup snapshot=%+v error=%v", op.Snapshot, err)
 	}
 }
