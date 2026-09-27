@@ -64,7 +64,7 @@ type Allocation map[string]any
 // currentVersion is the registry schema version this build writes. load()
 // migrates older data forward in memory (see migrate); the bumped version is
 // persisted on the next save, so upgrading never requires wiping the file.
-const currentVersion = 2
+const currentVersion = 3
 
 // RepoRef identifies one endpoint of a relationship by durable coordinates:
 // the GitHub remote identity (owner/name) plus a branch. It deliberately does
@@ -116,9 +116,10 @@ func canonicalEdge(a, b RepoRef) (RepoRef, RepoRef) {
 
 // RegistryData is the JSON structure stored in registry.json.
 type RegistryData struct {
-	Version     int          `json:"version"`
-	Allocations []Allocation `json:"allocations"`
-	Edges       []Edge       `json:"edges,omitempty"`
+	Version           int                `json:"version"`
+	Allocations       []Allocation       `json:"allocations"`
+	Edges             []Edge             `json:"edges,omitempty"`
+	ReleaseOperations []ReleaseOperation `json:"release_operations,omitempty"`
 }
 
 // Registry manages persistent allocation state in a JSON file.
@@ -175,53 +176,84 @@ func (r *Registry) FindStrict(worktreePath string) (Allocation, error) {
 // ReleasePreflight validates the original envelope before migration can turn
 // missing fields into empty allocation state. It does not write the registry.
 func (r *Registry) ReleasePreflight() ([]Allocation, error) {
-	raw, err := os.ReadFile(r.Path)
+	data, err := r.readReleaseStore()
+	return data.Allocations, err
+}
+
+func (r *Registry) readReleaseStore() (RegistryData, error) {
+	file, err := os.Open(r.Path)
 	if errors.Is(err, os.ErrNotExist) {
-		return []Allocation{}, nil
+		return RegistryData{Version: currentVersion, Allocations: []Allocation{}}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("reading release registry: %w", err)
+		return RegistryData{}, fmt.Errorf("reading release registry: %w", err)
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, maxReleaseStoreBytes+1))
+	if err != nil {
+		return RegistryData{}, err
+	}
+	if len(raw) > maxReleaseStoreBytes {
+		return RegistryData{}, fmt.Errorf("registry capacity exceeded")
 	}
 	envelope, err := releaseObject(raw)
 	if err != nil {
-		return nil, fmt.Errorf("invalid release registry: %w", err)
+		return RegistryData{}, fmt.Errorf("invalid release registry: %w", err)
 	}
 	for key := range envelope {
-		if key != "version" && key != "allocations" && key != "edges" {
-			return nil, fmt.Errorf("unknown release registry field %q", key)
+		if key != "version" && key != "allocations" && key != "edges" && key != "release_operations" {
+			return RegistryData{}, fmt.Errorf("unknown release registry field %q", key)
 		}
 	}
 	if version, present := envelope["version"]; present {
 		var declared int
 		if err := json.Unmarshal(version, &declared); err != nil || declared < 1 || declared > currentVersion {
-			return nil, fmt.Errorf("unsupported release registry version")
+			return RegistryData{}, fmt.Errorf("unsupported release registry version")
 		}
 	}
 	var rows []json.RawMessage
 	if err := json.Unmarshal(envelope["allocations"], &rows); err != nil || rows == nil {
-		return nil, fmt.Errorf("release registry requires an allocations array")
+		return RegistryData{}, fmt.Errorf("release registry requires an allocations array")
 	}
 	seen := make(map[string]bool)
 	for _, row := range rows {
 		fields, err := releaseObject(row)
 		if err != nil {
-			return nil, fmt.Errorf("invalid release allocation: %w", err)
+			return RegistryData{}, fmt.Errorf("invalid release allocation: %w", err)
 		}
 		var target string
 		if err := json.Unmarshal(fields["worktree"], &target); err != nil || !filepath.IsAbs(target) || strings.ContainsRune(target, 0) {
-			return nil, fmt.Errorf("release allocation requires an absolute worktree path")
+			return RegistryData{}, fmt.Errorf("release allocation requires an absolute worktree path")
 		}
 		resolved := resolvePath(target)
 		if seen[resolved] {
-			return nil, fmt.Errorf("ambiguous duplicate release allocation for %q", resolved)
+			return RegistryData{}, fmt.Errorf("ambiguous duplicate release allocation for %q", resolved)
 		}
 		seen[resolved] = true
 	}
 	var data RegistryData
-	if err := json.Unmarshal(raw, &data); err != nil {
-		return nil, fmt.Errorf("invalid release registry: %w", err)
+	if ops, ok := envelope["release_operations"]; ok {
+		var records []json.RawMessage
+		if err := json.Unmarshal(ops, &records); err != nil {
+			return RegistryData{}, err
+		}
+		for _, raw := range records {
+			var record ReleaseOperation
+			if err := exactReleaseRecord(raw, &record); err != nil {
+				return RegistryData{}, err
+			}
+		}
 	}
-	return data.Allocations, nil
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return RegistryData{}, fmt.Errorf("invalid release registry: %w", err)
+	}
+	if _, present := envelope["release_operations"]; present && data.Version < 3 {
+		return RegistryData{}, fmt.Errorf("release operations require schema 3")
+	}
+	if err := validateReleaseStore(data); err != nil {
+		return RegistryData{}, err
+	}
+	return data, nil
 }
 
 func releaseObject(raw []byte) (map[string]json.RawMessage, error) {
@@ -340,6 +372,9 @@ func (r *Registry) AllocateTx(worktree string, compute func(used UsedResources) 
 	resolved := resolvePath(worktree)
 	var result Allocation
 	err := r.withLockE(func(data *RegistryData) error {
+		if err := reservationFor(data, resolved); err != nil {
+			return err
+		}
 		filtered := make([]Allocation, 0, len(data.Allocations))
 		var links map[string]any
 		for _, a := range data.Allocations {
@@ -461,6 +496,9 @@ func (r *Registry) ReleaseMany(worktreePaths []string) (int, error) {
 
 // UpdateField sets a single field on the allocation matching worktreePath.
 func (r *Registry) UpdateField(worktreePath, key, value string) error {
+	if key == "allocation_generation" || key == "worktree" {
+		return fmt.Errorf("immutable enrollment field")
+	}
 	resolved := resolvePath(worktreePath)
 	return r.withLock(func(data *RegistryData) {
 		for _, a := range data.Allocations {
@@ -805,6 +843,10 @@ func (r *Registry) withLock(fn func(data *RegistryData)) error {
 // returns nil. Callers that must abort the transaction (leaving the file
 // untouched) return a non-nil error from fn.
 func (r *Registry) withLockE(fn func(data *RegistryData) error) error {
+	return r.registryTransaction(fn, false)
+}
+
+func (r *Registry) registryTransaction(fn func(data *RegistryData) error, release bool) error {
 	if err := os.MkdirAll(filepath.Dir(r.Path), platform.DirMode); err != nil {
 		return err
 	}
@@ -837,12 +879,26 @@ func (r *Registry) withLockE(fn func(data *RegistryData) error) error {
 	}
 	defer func() { _ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) }()
 
-	data, err := r.load()
+	data, err := r.readReleaseStore()
 	if err != nil {
 		return err
 	}
+	before := cloneReleaseData(data)
 	if err := fn(&data); err != nil {
 		return err
+	}
+	if !release {
+		if err := protectReservations(before, data); err != nil {
+			return err
+		}
+		preserveGenerations(before, &data)
+	}
+	upgradeEnrollments(&data)
+	if err := validateReleaseStore(data); err != nil {
+		return err
+	}
+	if sameJSON(before, data) {
+		return nil
 	}
 	return r.save(data)
 }
@@ -858,6 +914,11 @@ func (r *Registry) load() (RegistryData, error) {
 	var data RegistryData
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return RegistryData{}, fmt.Errorf("registry is corrupt (%s): %w — fix or delete the file", r.Path, err)
+	}
+	if data.Version == 3 {
+		if err := validateReleaseStore(data); err != nil {
+			return RegistryData{}, err
+		}
 	}
 	migrate(&data)
 	return data, nil
@@ -878,8 +939,8 @@ func migrate(data *RegistryData) {
 	if data.Edges == nil {
 		data.Edges = []Edge{}
 	}
-	if data.Version < currentVersion {
-		data.Version = currentVersion
+	if data.Version < 2 {
+		data.Version = 2
 	}
 }
 
@@ -897,6 +958,9 @@ func (r *Registry) save(data RegistryData) error {
 	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return err
+	}
+	if len(raw)+1 > maxReleaseStoreBytes {
+		return fmt.Errorf("registry capacity exceeded")
 	}
 	return platform.AtomicWriteFile(r.Path, append(raw, '\n'), platform.PrivateFileMode)
 }
