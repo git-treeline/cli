@@ -38,7 +38,7 @@ func TestRelatedJSONReadOnlyLegacyAndMissingState(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := relatedFixture(t, "project: fixture\n"+legacy, false)
 			before := snapshotIntrospection(t, f.base)
-			out, stderr, err := runIntrospection(t, f, "related", "--json")
+			out, stderr, err := runIntrospection(t, f, "related", "--json", "--read-only")
 			if err != nil || strings.TrimSpace(out) != "[]" || stderr != "" {
 				t.Fatalf("related: out=%q stderr=%q err=%v", out, stderr, err)
 			}

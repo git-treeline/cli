@@ -17,6 +17,7 @@ var relatedJSON bool
 
 func init() {
 	relatedCmd.Flags().BoolVar(&relatedJSON, "json", false, "Output as JSON")
+	relatedCmd.Flags().Bool("read-only", false, "Require non-writing JSON inspection (host compatibility guard)")
 	rootCmd.AddCommand(relatedCmd)
 }
 
