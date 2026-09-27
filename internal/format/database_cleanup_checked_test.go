@@ -234,3 +234,15 @@ func TestCheckedDatabaseCleanupProtectedOnlyHasNoEffect(t *testing.T) {
 		t.Fatalf("protected databases: %v %v %v", attempted, err, drop.drops)
 	}
 }
+
+func TestCheckedDatabaseCleanupEmptySnapshotNeedsNoConnection(t *testing.T) {
+	root, revision, snapshot := checkedCleanupFixture(t, "postgresql")
+	snapshot.Databases = nil
+	attempted, err := DropDatabasesChecked(context.Background(), root, snapshot, nil, DatabaseCleanupCheck{ConfigRevision: revision, BeforeDrop: func() error { return nil }, NewAdapter: func(string, []string) (database.Adapter, error) {
+		t.Fatal("empty allocation opened database connection")
+		return nil, nil
+	}})
+	if err != nil || attempted {
+		t.Fatal(attempted, err)
+	}
+}

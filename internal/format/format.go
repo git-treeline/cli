@@ -328,6 +328,9 @@ func DropDatabasesChecked(ctx context.Context, root string, snapshot registry.Cl
 	if err := recheck(); err != nil {
 		return false, err
 	}
+	if len(names) == 0 {
+		return false, nil
+	}
 	pc := config.LoadProjectConfigReadOnlyQuiet(root)
 	if pc.LoadError() != nil || pc.Validate() != nil || !checkedDatabaseConfig(pc) {
 		return false, ErrDatabaseCleanupPlan
