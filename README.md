@@ -302,9 +302,15 @@ reported `gtl release status <operation-id>` to inspect its JSON outcome, and
 completed phases; it refuses to repeat a hook or cleanup whose outcome is unknown.
 Changed target identities or bound configuration also block execution.
 
-The development host contract is `gtl release start` with a bounded JSON
-[`ReleaseRequest`](internal/registry/release_operations.go) on stdin, followed by
-the same status/resume commands. Its explicit policies independently select
+The development host contract begins with
+`gtl release inspect PATH --operation-id UUID`, which returns a
+[`ReleaseRequest`](internal/registry/release_operations.go) without starting
+cleanup or retaining an operation. Explicit `--drop-db`, `--remove-worktree`,
+`--force-dirty` and `--ignore-hook-failure` flags set the requested policies.
+The host must retain that exact request before submitting it to
+`gtl release start` as bounded JSON on stdin. Use the same status/resume commands
+after a lost response; do not inspect again to replace an interrupted request.
+Its explicit policies independently select
 database cleanup, directory removal, dirty removal and hook-failure override.
 Submitting a request does not silently enable any of them. JSON responses use
 schema 1 and include the retained operation and its phase outcomes.

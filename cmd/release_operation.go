@@ -10,7 +10,7 @@ import (
 )
 
 func init() {
-	releaseCmd.AddCommand(newReleaseStatusCommand(""), newReleaseStartCommand("", productionReleaseExecutor), newReleaseResumeCommand("", productionReleaseExecutor))
+	releaseCmd.AddCommand(newReleaseInspectCommand(""), newReleaseStatusCommand(""), newReleaseStartCommand("", productionReleaseExecutor), newReleaseResumeCommand("", productionReleaseExecutor))
 }
 
 type releaseStatus struct {
