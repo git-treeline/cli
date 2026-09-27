@@ -406,3 +406,51 @@ func TestLifecycleReservationOutcomesAndRegistryLockIndependence(t *testing.T) {
 		t.Fatal("uncertain release admitted after reopen")
 	}
 }
+
+func TestLifecycleRetainDestinationThroughForeground(t *testing.T) {
+	root, dir := lifecycleFixture(t)
+	source, target := filepath.Join(root, "source"), filepath.Join(root, "target")
+	locks := acquireForTest(t, dir, source, target)
+	for _, keys := range [][]string{nil, {filepath.Join(root, "unheld")}, {target, filepath.Join(root, "unheld")}} {
+		if err := locks.Retain(keys); err == nil {
+			t.Fatal("invalid retained set accepted")
+		}
+		if !slices.Equal(locks.Paths(), []string{source, target}) {
+			t.Fatal("invalid retain changed held set")
+		}
+	}
+	if err := locks.Retain([]string{target}); err != nil {
+		t.Fatal(err)
+	}
+	if err := locks.Retain([]string{target, target}); err != nil {
+		t.Fatal(err)
+	}
+	foreground := func() {
+		// A sibling operation can acquire the source after setup, but release of
+		// this destination stays excluded throughout the foreground callback.
+		other := acquireForTest(t, dir, source)
+		_ = other.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+		defer cancel()
+		if got, err := acquireLifecycleLocks(ctx, []string{target}, dir); !errors.Is(err, context.DeadlineExceeded) || got != nil {
+			t.Fatalf("foreground destination lost exclusion: %v", err)
+		}
+	}
+	foreground()
+	if err := locks.Close(); err != nil {
+		t.Fatal(err)
+	}
+	acquireForTest(t, dir, target)
+	if err := locks.Retain([]string{target}); err == nil {
+		t.Fatal("retain after close accepted")
+	}
+	primary := acquireForTest(t, dir, source, source)
+	if err := primary.Retain([]string{source}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	if got, err := acquireLifecycleLocks(ctx, []string{source}, dir); !errors.Is(err, context.DeadlineExceeded) || got != nil {
+		t.Fatalf("source==target released its only lock: %v", err)
+	}
+}

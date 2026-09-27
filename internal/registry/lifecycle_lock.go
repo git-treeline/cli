@@ -101,22 +101,58 @@ func resolveLifecycleTargets(paths []string) ([]string, error) {
 // LifecycleLocks protects a canonical target set. It is separate from the
 // registry transaction lock and must be acquired before entering a transaction.
 type LifecycleLocks struct {
-	paths []string
-	files []*os.File
-	once  sync.Once
-	err   error
+	paths  []string
+	files  []*os.File
+	mu     sync.Mutex
+	closed bool
+	err    error
 }
 
-func (l *LifecycleLocks) Paths() []string { return slices.Clone(l.paths) }
+func (l *LifecycleLocks) Paths() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.paths)
+}
+
+// Retain releases source locks while keeping an exact subset of already-held
+// canonical keys. It never resolves aliases or acquires another lock.
+func (l *LifecycleLocks) Retain(paths []string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed || len(paths) == 0 {
+		return fmt.Errorf("no active lifecycle locks to retain")
+	}
+	for _, path := range paths {
+		if !slices.Contains(l.paths, path) {
+			return fmt.Errorf("cannot retain a lifecycle target that is not held")
+		}
+	}
+	var keptPaths []string
+	var keptFiles []*os.File
+	for i, path := range l.paths {
+		if slices.Contains(paths, path) {
+			keptPaths = append(keptPaths, path)
+			keptFiles = append(keptFiles, l.files[i])
+		} else {
+			l.err = errors.Join(l.err, syscall.Flock(int(l.files[i].Fd()), syscall.LOCK_UN), l.files[i].Close())
+		}
+	}
+	l.paths, l.files = keptPaths, keptFiles
+	return l.err
+}
 
 // Close releases locks without unlinking their files; removing a lock file can
 // split concurrent callers across different inodes and break exclusion.
 func (l *LifecycleLocks) Close() error {
-	l.once.Do(func() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.closed {
+		l.closed = true
 		for i := len(l.files) - 1; i >= 0; i-- {
 			l.err = errors.Join(l.err, syscall.Flock(int(l.files[i].Fd()), syscall.LOCK_UN), l.files[i].Close())
 		}
-	})
+		l.paths, l.files = nil, nil
+	}
 	return l.err
 }
 

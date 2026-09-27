@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/style"
@@ -47,8 +46,16 @@ safe to capture, e.g.: wt=$(gtl claim agent/some-branch)`,
 		if err != nil {
 			return fmt.Errorf("getting working directory: %w", err)
 		}
-		absPath, _ := filepath.Abs(cwd)
-		mainRepo := worktree.DetectMainRepo(absPath)
+		admission, err := admitCreation(cmd.Context(), func() (creationSelection, error) {
+			return discoverCreation(cwd, branch, false, func(source string, pc *config.ProjectConfig, uc *config.UserConfig) string {
+				return resolveWorktreePath(claimPath, source, pc.Project(), branch, uc)
+			})
+		})
+		if err != nil {
+			return err
+		}
+		defer admission.locks.Close()
+		mainRepo := admission.source
 		pc := config.LoadProjectConfig(mainRepo)
 		uc := config.LoadUserConfig("")
 
@@ -59,7 +66,7 @@ safe to capture, e.g.: wt=$(gtl claim agent/some-branch)`,
 
 		// Already checked out somewhere: ensure it has an allocation and bring
 		// it up to date. This is what makes re-claiming the same branch safe.
-		if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
+		if existingWT := admission.existing; existingWT != "" {
 			fmt.Fprintln(os.Stderr, style.Actionf("Branch '%s' already checked out at %s", branch, existingWT))
 			if pc.Exists() {
 				if _, err := ensureWorktreeAllocation(existingWT, mainRepo, uc, os.Stderr, false); err != nil {
@@ -75,15 +82,14 @@ safe to capture, e.g.: wt=$(gtl claim agent/some-branch)`,
 			return cliErr(cmd, errClaimBranchNotFound(branch))
 		}
 
-		projectName := pc.Project()
-		wtPath := resolveWorktreePath(claimPath, mainRepo, projectName, branch, uc)
+		wtPath := admission.target
 
 		if err := ensureGitignored(mainRepo, wtPath, os.Stderr); err != nil {
 			return err
 		}
 
 		fmt.Fprintln(os.Stderr, style.Actionf("Checking out branch '%s'", branch))
-		if err := worktree.Create(wtPath, branch, false, ""); err != nil {
+		if err := worktree.CreateWithOptions(wtPath, branch, false, "", worktree.CreateOptions{DeferSetup: true}); err != nil {
 			return cliErr(cmd, err)
 		}
 

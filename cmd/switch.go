@@ -88,13 +88,17 @@ Must be run from inside a worktree (not the main repo).`,
 // updates the registry, and refreshes the environment. Shared by gtl switch
 // and gtl review (when switching in place).
 func switchWorktreeBranch(absPath, mainRepo, branch string, runSetup bool) error {
+	return switchWorktreeBranchWithOptions(absPath, mainRepo, branch, runSetup, worktree.CheckoutOptions{})
+}
+
+func switchWorktreeBranchWithOptions(absPath, mainRepo, branch string, runSetup bool, opts worktree.CheckoutOptions) error {
 	fmt.Println(style.Actionf("Fetching origin/%s...", branch))
-	if err := worktree.Fetch("origin", branch); err != nil {
+	if err := worktree.FetchInRepo(mainRepo, "origin", branch); err != nil {
 		fmt.Fprintln(os.Stderr, style.Warnf("fetch failed (%s), trying local checkout", err))
 	}
 
 	fmt.Println(style.Actionf("Checking out '%s'...", branch))
-	if err := worktree.Checkout(branch); err != nil {
+	if err := worktree.CheckoutInRepoWithOptions(absPath, branch, opts); err != nil {
 		return err
 	}
 

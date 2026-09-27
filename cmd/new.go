@@ -58,16 +58,26 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		}
 		absPath, _ := filepath.Abs(cwd)
 		mainRepo := worktree.DetectMainRepo(absPath)
-		var pc *config.ProjectConfig
-		if newDryRun {
-			pc = config.LoadProjectConfigReadOnly(mainRepo)
-		} else {
-			pc = config.LoadProjectConfig(mainRepo)
-		}
+		pc := config.LoadProjectConfigReadOnly(mainRepo)
 		uc := config.LoadUserConfig("")
+		var admission *creationAdmission
+		if !newDryRun {
+			admission, err = admitCreation(cmd.Context(), func() (creationSelection, error) {
+				return discoverCreation(cwd, branch, false, func(source string, pc *config.ProjectConfig, uc *config.UserConfig) string {
+					return resolveWorktreePath(newPath, source, pc.Project(), branch, uc)
+				})
+			})
+			if err != nil {
+				return err
+			}
+			defer admission.locks.Close()
+			mainRepo = admission.source
+			pc = config.LoadProjectConfig(mainRepo)
+			uc = config.LoadUserConfig("")
+		}
 
 		if isInWorktree(absPath, mainRepo) && !newForce && !newDryRun {
-			wtPath := resolveWorktreePath(newPath, mainRepo, pc.Project(), branch, uc)
+			wtPath := admission.target
 
 			fmt.Println()
 			fmt.Printf("You're in worktree '%s'. The new worktree will be created at:\n", filepath.Base(absPath))
@@ -95,24 +105,29 @@ Otherwise a new branch is created from --base (or the current branch).`,
 						return err
 					}
 					pc = config.LoadProjectConfig(mainRepo)
+					if err := admission.recheck(); err != nil {
+						return err
+					}
 				} else {
 					// User declined — create worktree only, no allocation
-					return createWorktreeOnly(mainRepo, branch, uc, pc)
+					return createWorktreeOnly(branch, pc, admission)
 				}
 			} else {
 				// Not a server project — create worktree only, no allocation
-				return createWorktreeOnly(mainRepo, branch, uc, pc)
+				return createWorktreeOnly(branch, pc, admission)
 			}
 		}
 
 		warnServeNotInstalled()
 
 		projectName := pc.Project()
-		wtPath := resolveWorktreePath(newPath, mainRepo, projectName, branch, uc)
-
 		if newDryRun {
 			return printNewDryRun(branch, mainRepo, pc, uc, false)
 		}
+		if err := admission.recheck(); err != nil {
+			return err
+		}
+		wtPath := admission.target
 
 		if err := ensureGitignored(mainRepo, wtPath, os.Stdout); err != nil {
 			return err
@@ -120,7 +135,7 @@ Otherwise a new branch is created from --base (or the current branch).`,
 
 		// If the branch is already in a worktree, ensure it has an allocation
 		// and treat the command as resumable.
-		if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
+		if existingWT := admission.existing; existingWT != "" {
 			fmt.Println(style.Actionf("Branch '%s' already checked out at %s", branch, existingWT))
 			if newNoSetup {
 				fmt.Printf("\n  cd %s\n", existingWT)
@@ -141,6 +156,9 @@ Otherwise a new branch is created from --base (or the current branch).`,
 				}
 			}
 
+			if err := admission.retainForStart(newStart); err != nil {
+				return err
+			}
 			if handled, err := maybeStartServer(newStart, pc, existingWT); handled {
 				return err
 			}
@@ -154,13 +172,13 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		if existing {
 			_ = worktree.Fetch("origin", branch) // non-fatal: branch may only exist locally
 			fmt.Println(style.Actionf("Checking out existing branch '%s'", branch))
-			if err := worktree.CreateWithOptions(wtPath, branch, false, "", worktree.CreateOptions{DeferSetup: newNoSetup}); err != nil {
+			if err := worktree.CreateWithOptions(wtPath, branch, false, "", worktree.CreateOptions{DeferSetup: true}); err != nil {
 				return err
 			}
 		} else {
 			base := resolveBase(pc)
 			fmt.Println(style.Actionf("Creating branch '%s' from '%s'", branch, base))
-			if err := worktree.CreateWithOptions(wtPath, branch, true, base, worktree.CreateOptions{DeferSetup: newNoSetup}); err != nil {
+			if err := worktree.CreateWithOptions(wtPath, branch, true, base, worktree.CreateOptions{DeferSetup: true}); err != nil {
 				return err
 			}
 		}
@@ -179,7 +197,11 @@ Otherwise a new branch is created from --base (or the current branch).`,
 
 		maybeOpenInBrowser(newOpen, uc, alloc.Port, projectName, alloc.Branch)
 
-		if handled, err := maybeStartServer(newStart, config.LoadProjectConfig(wtPath), wtPath); handled {
+		startConfig := config.LoadProjectConfig(wtPath)
+		if err := admission.retainForStart(newStart); err != nil {
+			return err
+		}
+		if handled, err := maybeStartServer(newStart, startConfig, wtPath); handled {
 			return err
 		}
 
@@ -247,13 +269,13 @@ func completeBranches(cmd *cobra.Command, args []string, toComplete string) ([]s
 
 // createWorktreeOnly creates a worktree without any port/database allocation.
 // Used for non-server projects or when user declines full setup.
-func createWorktreeOnly(mainRepo, branch string, uc *config.UserConfig, pc *config.ProjectConfig) error {
-	wtPath := resolveWorktreePath(newPath, mainRepo, pc.Project(), branch, uc)
-	if newDryRun {
-		return printNewDryRun(branch, mainRepo, pc, uc, true)
+func createWorktreeOnly(branch string, pc *config.ProjectConfig, admission *creationAdmission) error {
+	if err := admission.recheck(); err != nil {
+		return err
 	}
+	mainRepo, wtPath := admission.source, admission.target
 
-	if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
+	if existingWT := admission.existing; existingWT != "" {
 		fmt.Println(style.Actionf("Branch '%s' already checked out at %s", branch, existingWT))
 		fmt.Println()
 		fmt.Printf("  cd %s\n", existingWT)
@@ -269,13 +291,13 @@ func createWorktreeOnly(mainRepo, branch string, uc *config.UserConfig, pc *conf
 	if existing {
 		_ = worktree.Fetch("origin", branch)
 		fmt.Println(style.Actionf("Checking out existing branch '%s'", branch))
-		if err := worktree.CreateWithOptions(wtPath, branch, false, "", worktree.CreateOptions{DeferSetup: newNoSetup}); err != nil {
+		if err := worktree.CreateWithOptions(wtPath, branch, false, "", worktree.CreateOptions{DeferSetup: true}); err != nil {
 			return err
 		}
 	} else {
 		base := resolveBase(pc)
 		fmt.Println(style.Actionf("Creating branch '%s' from '%s'", branch, base))
-		if err := worktree.CreateWithOptions(wtPath, branch, true, base, worktree.CreateOptions{DeferSetup: newNoSetup}); err != nil {
+		if err := worktree.CreateWithOptions(wtPath, branch, true, base, worktree.CreateOptions{DeferSetup: true}); err != nil {
 			return err
 		}
 	}
