@@ -1573,3 +1573,60 @@ func TestValidate_DatabasePatternAndExtra(t *testing.T) {
 		})
 	}
 }
+
+func TestReadOnlyConfigMatchesWritableOracle(t *testing.T) {
+	families := map[string]string{
+		"database":     "database:\n  pattern: legacy_{worktree}\n",
+		"branch":       "default_branch: release\n",
+		"commands":     "setup_commands:\n  - bin/setup\nstart_command: bin/dev\n",
+		"env_simple":   "env_file:\n  target: .env.test\n  source: .env.test\n",
+		"env_extended": "env_file:\n  target: .env.test\n  source: .env.seed\n",
+		"env_inline":   "env_file: {target: .env.test, source: .env.seed}\n",
+		"editor":       "editor:\n  vscode_title: Legacy\n",
+		"ports":        "ports_needed: 4\n",
+		"modern":       "merge_target: main\ncommands: {start: bin/run}\nenv_file: .env.modern\nport_count: 2\n",
+		"conflicts":    "database: {pattern: old, name: modern}\ndefault_branch: old\nmerge_target: modern\nsetup_commands: [old]\nstart_command: old\ncommands: {start: modern, setup: [modern]}\nenv_file: {target: .env.old, path: .env.modern}\neditor: {vscode_title: old, title: modern}\nports_needed: 8\nport_count: 2\n",
+	}
+	families["combined"] = families["database"] + families["branch"] + families["commands"] + families["env_extended"] + families["editor"] + families["ports"]
+	for name, legacy := range families {
+		t.Run(name, func(t *testing.T) {
+			original, oracle := t.TempDir(), t.TempDir()
+			content := []byte("project: fixture\n" + legacy)
+			path := filepath.Join(original, ProjectConfigFile)
+			for _, dir := range []string{original, oracle} {
+				if err := os.WriteFile(filepath.Join(dir, ProjectConfigFile), content, 0640); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := LoadProjectConfig(oracle)
+			for range 2 {
+				got := LoadProjectConfigReadOnly(original)
+				if got.LoadError() != nil {
+					t.Fatal(got.LoadError())
+				}
+				if !reflect.DeepEqual(got.Data, want.Data) {
+					t.Fatalf("readonly=%#v\nwritable=%#v", got.Data, want.Data)
+				}
+			}
+			after, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entries, err := os.ReadDir(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != string(content) || before.Mode() != after.Mode() || !os.SameFile(before, after) || len(entries) != 1 {
+				t.Fatal("readonly changed bytes, mode, inode, or entries")
+			}
+		})
+	}
+}

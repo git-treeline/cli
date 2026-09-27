@@ -14,6 +14,7 @@ import (
 var routesJSON bool
 
 func init() {
+	routesCmd.Flags().Bool("read-only", false, "Read JSON without modifying configuration or state")
 	routesCmd.Flags().BoolVar(&routesJSON, "json", false, "Output as JSON")
 	rootCmd.AddCommand(routesCmd)
 }
@@ -30,7 +31,8 @@ Examples:
   gtl routes --json       # structured output for scripting`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		alloc, err := currentAllocation()
+		readOnly, _ := readOnlyIntrospection(cmd)
+		alloc, err := currentAllocationWith(readOnly)
 		if err != nil {
 			return cliErr(cmd, err)
 		}
@@ -40,8 +42,19 @@ Examples:
 			return cliErr(cmd, errNoAllocationNoPorts(alloc.Path))
 		}
 
-		pc := config.LoadProjectConfig(alloc.Path)
+		var pc *config.ProjectConfig
+		if readOnly {
+			pc = config.LoadProjectConfigReadOnly(alloc.Path)
+		} else {
+			pc = config.LoadProjectConfig(alloc.Path)
+		}
+		if readOnly && pc.LoadError() != nil {
+			return pc.LoadError()
+		}
 		uc := config.LoadUserConfig("")
+		if readOnly && uc.LoadError() != nil {
+			return uc.LoadError()
+		}
 
 		project := pc.Project()
 		branch := format.GetStr(fa, "branch")

@@ -939,7 +939,7 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl release [PATH]` | `--drop-db` `--remove-worktree` `--project` `--all` `--force`/`-f` `--dry-run` | Free allocated resources (confirms before releasing unless `--force`) |
 | `gtl port` | `--json` | Print the allocated port for the current worktree |
 | `gtl refresh` | `--dry-run` `--force`/`-f` | Re-allocate all worktrees with current reservations; restarts supervised servers |
-| `gtl doctor` | `--json` | Check config, allocation, runtime, and diagnostics |
+| `gtl doctor` | `--json` `--fix` `--read-only` | Check config, allocation, runtime, and diagnostics |
 | `gtl update` | `--check` `--json` | Update git-treeline via the package manager it was installed with (Homebrew or `go install`); `--check` only reports |
 | `gtl status` | `--project` `--json` `--check` `--watch` `--interval` | Show allocations across projects |
 | `gtl worktrees` | aliases: `wt` | Interactive TUI picker for worktrees (grouped by project) |
@@ -950,9 +950,9 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl restart` | | Restart the server process in the original terminal |
 | `gtl open` | | Open current worktree in browser (prefers serve HTTPS URL) |
 | `gtl clone <url>` | (passthrough to git) | Clone + detect framework + init + setup in one step |
-| `gtl env` / `gtl env show` | `--json` `--template` | Print env file with Treeline-managed key annotations |
+| `gtl env` / `gtl env show` | `--json` `--template` `--read-only` | Print env file with Treeline-managed key annotations |
 | `gtl env sync` | | Re-sync env file and editor settings from `.treeline.yml` |
-| `gtl routes` | `--json` | Show routing URLs for the current worktree (all ports + tunnel) |
+| `gtl routes` | `--json` `--read-only` | Show routing URLs for the current worktree (all ports + tunnel) |
 | `gtl resolve <project> [branch]` | `--json` | Look up another project's allocated URL |
 | `gtl link <project> <branch>` | `--restart` `--json` | Override resolve target for a project |
 | `gtl unlink <project>` | | Revert resolve override to same-branch default |
@@ -985,6 +985,14 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl dashboard` | aliases: `dash`, `ui` | Interactive TUI for monitoring and managing all worktrees |
 | `gtl mcp` | | MCP server for AI agents (started automatically by your editor) |
 | `gtl version` | | Print version |
+
+`routes`, `env`, `env show`, and `doctor` accept `--json --read-only` for
+non-writing introspection: no configuration migrations, state-directory changes,
+update checks, or lifecycle hooks. This flag requires JSON and cannot combine
+with `--fix` or `--template`; it does not apply to `env sync` or lifecycle commands.
+Malformed or unreadable configuration and registry files fail instead of silently
+using defaults. Missing files keep their usual defaults or missing-allocation
+behavior. Runtime health probes still run; this is not an offline mode.
 
 ## Acknowledgments
 

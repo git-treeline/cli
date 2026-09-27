@@ -917,3 +917,27 @@ func TestUserConfig_CorruptRefusesSaveToAvoidDataLoss(t *testing.T) {
 		t.Errorf("corrupt config was overwritten:\n got: %s\nwant: %s", after, original)
 	}
 }
+
+func TestUserConfigLoadError(t *testing.T) {
+	for _, kind := range []string{"missing", "valid", "malformed", "directory"} {
+		t.Run(kind, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			switch kind {
+			case "valid":
+				os.WriteFile(path, []byte(`{"router":{"port":43210}}`), 0600)
+			case "malformed":
+				os.WriteFile(path, []byte(`{`), 0600)
+			case "directory":
+				os.Mkdir(path, 0700)
+			}
+			uc := LoadUserConfig(path)
+			bad := kind == "malformed" || kind == "directory"
+			if (uc.LoadError() != nil) != bad {
+				t.Fatalf("load error=%v", uc.LoadError())
+			}
+			if bad && uc.RouterPort() != 3001 {
+				t.Fatal("ordinary default behavior changed")
+			}
+		})
+	}
+}

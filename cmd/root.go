@@ -19,19 +19,43 @@ var rootCmd = &cobra.Command{
 	Use:           "git-treeline",
 	Short:         "Worktree environment manager — ports, databases, and Redis across parallel development environments",
 	SilenceErrors: true,
-	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		readOnly, err := readOnlyIntrospection(cmd)
+		if err != nil || readOnly {
+			return err
+		}
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		if dryRun {
 			maybeWarnStaleRouter(cmd)
-			return
+			return nil
 		}
 		_ = platform.EnsureConfigDir()
 		maybeWarnStaleRouter(cmd)
 		maybeCheckForUpdate(cmd)
+		return nil
 	},
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
-		printUpdateNotice()
+		if readOnly, _ := readOnlyIntrospection(cmd); !readOnly {
+			printUpdateNotice()
+		}
 	},
+}
+
+// readOnlyIntrospection validates the local flag before any root-hook effects.
+func readOnlyIntrospection(cmd *cobra.Command) (bool, error) {
+	readOnly, _ := cmd.Flags().GetBool("read-only")
+	if !readOnly {
+		return false, nil
+	}
+	allowed := cmd.Name() == "routes" || cmd.Name() == "doctor" || cmd.Name() == "env" ||
+		(cmd.Name() == "show" && cmd.Parent() != nil && cmd.Parent().Name() == "env")
+	jsonOutput, _ := cmd.Flags().GetBool("json")
+	fix, _ := cmd.Flags().GetBool("fix")
+	template, _ := cmd.Flags().GetBool("template")
+	if !allowed || !jsonOutput || fix || template {
+		return false, fmt.Errorf("--read-only requires routes, env, env show, or doctor with --json and without --fix or --template")
+	}
+	return true, nil
 }
 
 // commandsThatSelfRepair are commands the user runs to FIX a stale router —

@@ -155,6 +155,21 @@ func (r *Registry) Find(worktreePath string) Allocation {
 	return nil
 }
 
+// FindStrict preserves read errors rather than treating them as an absent allocation.
+func (r *Registry) FindStrict(worktreePath string) (Allocation, error) {
+	data, err := r.load()
+	if err != nil {
+		return nil, err
+	}
+	resolved := resolvePath(worktreePath)
+	for _, a := range data.Allocations {
+		if resolvePath(GetString(a, "worktree")) == resolved {
+			return a, nil
+		}
+	}
+	return nil, nil
+}
+
 func (r *Registry) FindByProject(project string) []Allocation {
 	var result []Allocation
 	for _, a := range r.Allocations() {
@@ -422,10 +437,11 @@ func (r *Registry) RemoveLink(worktreePath, project string) error {
 // GetLinks returns the active resolve overrides for a worktree as a map of
 // project name to branch. Returns nil if the worktree has no links.
 func (r *Registry) GetLinks(worktreePath string) map[string]string {
-	alloc := r.Find(worktreePath)
-	if alloc == nil {
-		return nil
-	}
+	return LinksFromAllocation(r.Find(worktreePath))
+}
+
+// LinksFromAllocation projects links from an already-read allocation.
+func LinksFromAllocation(alloc Allocation) map[string]string {
 	raw, _ := alloc["links"].(map[string]any)
 	if raw == nil {
 		return nil

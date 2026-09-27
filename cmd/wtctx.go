@@ -22,6 +22,10 @@ type wtAlloc struct {
 // currentAllocation resolves the allocation for the current working
 // directory. Returns errNoAllocation if nothing is registered for it.
 func currentAllocation() (*wtAlloc, error) {
+	return currentAllocationWith(false)
+}
+
+func currentAllocationWith(readOnly bool) (*wtAlloc, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, err
@@ -29,7 +33,15 @@ func currentAllocation() (*wtAlloc, error) {
 	absPath, _ := filepath.Abs(cwd)
 
 	reg := registry.New("")
-	entry := reg.Find(absPath)
+	var entry registry.Allocation
+	if readOnly {
+		entry, err = reg.FindStrict(absPath)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		entry = reg.Find(absPath)
+	}
 	if entry == nil {
 		return nil, errNoAllocation(absPath)
 	}
