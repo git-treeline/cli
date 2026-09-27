@@ -21,6 +21,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // errStopInProgress is returned by startChildLocked when a stop is mid-flight
@@ -36,6 +38,9 @@ var ErrSettledShutdownUnknown = errors.New("supervisor shutdown is not acknowled
 
 const settledShutdownCommand = "shutdown-settled-v1"
 const settledShutdownAcknowledgement = "settled-v1"
+const generationShutdownCommand = "shutdown-settled-v2"
+const generationShutdownAcknowledgement = "settled-v2"
+const generationStatusCommand = "runtime-status-v1"
 
 // SocketPath returns a short, deterministic socket path in a private,
 // per-user directory under /tmp. It does not create that directory.
@@ -191,6 +196,19 @@ type Supervisor struct {
 	// retains terminal ownership; a client timeout never cancels this callback.
 	// Nil preserves legacy shutdown behavior and disables shutdown-settled-v1.
 	ShutdownComplete func() error
+	// RuntimeGeneration is an optional canonical UUID configured before Run.
+	// The first validation freezes it for the lifetime of this supervisor.
+	RuntimeGeneration string
+	// ShutdownRequested runs once before child stop, serialized with shutdown.
+	// A bound request supplies its operation UUID; ordinary shutdown/signals
+	// supply an empty string. Failure prevents child stop and retains ownership.
+	ShutdownRequested func(operationID string) error
+
+	generationOnce      sync.Once
+	runtimeGeneration   string
+	generationErr       error
+	shutdownOperationID string // protected by mu
+	shutdownFinished    bool   // protected by mu
 
 	mu           sync.Mutex
 	opMu         sync.Mutex // serializes lifecycle/configure operations
@@ -285,6 +303,9 @@ func New(command, dir, socketPath string) *Supervisor {
 }
 
 func (s *Supervisor) Run() error {
+	if err := s.prepareRuntimeGeneration(); err != nil {
+		return err
+	}
 	if err := EnsureSocketDir(s.SocketPath); err != nil {
 		return fmt.Errorf("preparing supervisor socket directory: %w", err)
 	}
@@ -537,11 +558,18 @@ func (s *Supervisor) shutdown() error {
 }
 
 func (s *Supervisor) shutdownWithStop(stopLocked func() error) error {
+	return s.shutdownOperationWithStop("", stopLocked)
+}
+
+func (s *Supervisor) shutdownOperationWithStop(operationID string, stopLocked func() error) error {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 	s.mu.Lock()
 	if s.terminal {
 		err := s.shutdownErr
+		if operationID != "" && operationID != s.shutdownOperationID {
+			err = ErrSettledShutdownUnknown
+		}
 		s.mu.Unlock()
 		if s.ShutdownComplete != nil {
 			return err
@@ -549,19 +577,38 @@ func (s *Supervisor) shutdownWithStop(stopLocked func() error) error {
 		return errSupervisorShuttingDown
 	}
 	s.terminal = true
+	s.shutdownOperationID = operationID
 	s.shutdownErr = ErrSettledShutdownUnknown
-	err := stopLocked()
+	s.mu.Unlock()
+	var err error
+	if s.ShutdownRequested != nil {
+		err = s.requestShutdown(operationID)
+	}
+	s.mu.Lock()
+	if err == nil {
+		err = stopLocked()
+	}
 	s.mu.Unlock()
 	if err == nil && s.ShutdownComplete != nil {
 		err = s.completeShutdown()
 	}
 	s.mu.Lock()
 	s.shutdownErr = err
+	s.shutdownFinished = true
 	if s.ShutdownComplete == nil || err == nil {
 		s.shutdownOnce.Do(func() { close(s.done) })
 	}
 	s.mu.Unlock()
 	return err
+}
+
+func (s *Supervisor) requestShutdown(operationID string) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = ErrSettledShutdownUnknown
+		}
+	}()
+	return s.ShutdownRequested(operationID)
 }
 
 func (s *Supervisor) completeShutdown() (err error) {
@@ -664,7 +711,7 @@ func (s *Supervisor) handleConn(conn net.Conn) {
 	// CloseWrite: they write once and never signal EOF, so ReadAll blocks until
 	// the 5s deadline, then hands back the same bytes today's single read saw —
 	// correct, just ~5s later. New clients CloseWrite and return immediately.
-	rawBytes, _ := io.ReadAll(conn)
+	rawBytes, readErr := io.ReadAll(conn)
 	_ = conn.SetReadDeadline(time.Time{})
 	if len(rawBytes) == 0 {
 		return
@@ -679,6 +726,11 @@ func (s *Supervisor) handleConn(conn net.Conn) {
 	// hung goroutine from holding s.mu indefinitely if the client disappears.
 	if cmd != "wait-ready" {
 		_ = conn.SetWriteDeadline(time.Now().Add(s.ConnWriteDeadline))
+	}
+
+	if err := s.prepareRuntimeGeneration(); err != nil {
+		_, _ = fmt.Fprint(conn, "error: invalid runtime generation configuration")
+		return
 	}
 
 	switch cmd {
@@ -731,6 +783,10 @@ func (s *Supervisor) handleConn(conn net.Conn) {
 		}
 		_, _ = fmt.Fprint(conn, "ok")
 	case settledShutdownCommand:
+		if s.runtimeGeneration != "" {
+			_, _ = fmt.Fprint(conn, "error: runtime generation required")
+			return
+		}
 		if s.ShutdownComplete == nil {
 			_, _ = fmt.Fprint(conn, "unsupported: "+settledShutdownCommand)
 			return
@@ -740,6 +796,40 @@ func (s *Supervisor) handleConn(conn net.Conn) {
 			return
 		}
 		_, _ = fmt.Fprint(conn, settledShutdownAcknowledgement)
+	case generationShutdownCommand:
+		fields := strings.Split(string(rawBytes), ":")
+		if readErr != nil || len(fields) != 3 || fields[0] != generationShutdownCommand || !canonicalRuntimeUUID(fields[1]) || !canonicalRuntimeUUID(fields[2]) || fields[1] != s.runtimeGeneration {
+			_, _ = fmt.Fprint(conn, "error: runtime generation or operation mismatch")
+			return
+		}
+		if s.ShutdownComplete == nil {
+			_, _ = fmt.Fprint(conn, "unsupported: "+generationShutdownCommand)
+			return
+		}
+		if err := s.shutdownOperationWithStop(fields[2], s.stopChildLocked); err != nil {
+			_, _ = fmt.Fprint(conn, "error: shutdown not settled")
+			return
+		}
+		_, _ = fmt.Fprint(conn, generationShutdownAcknowledgement+":"+fields[1]+":"+fields[2])
+	case generationStatusCommand:
+		fields := strings.Split(string(rawBytes), ":")
+		if readErr != nil || len(fields) != 2 || fields[0] != generationStatusCommand || !canonicalRuntimeUUID(fields[1]) || fields[1] != s.runtimeGeneration {
+			_, _ = fmt.Fprint(conn, "error: runtime generation mismatch")
+			return
+		}
+		s.mu.Lock()
+		state := "owned"
+		if s.terminal {
+			state = "stopping"
+			if s.shutdownFinished {
+				state = "failed"
+				if s.shutdownErr == nil {
+					state = "settled"
+				}
+			}
+		}
+		s.mu.Unlock()
+		_, _ = fmt.Fprint(conn, generationStatusCommand+":"+fields[1]+":"+state)
 	case "status":
 		s.mu.Lock()
 		running := s.childPGID > 1 && processGroupAlive(s.childPGID)
@@ -947,4 +1037,62 @@ func settledShutdownResult(response string, err error) error {
 	default:
 		return ErrSettledShutdownUnknown
 	}
+}
+
+// prepareRuntimeGeneration snapshots launch configuration before socket or process effects.
+func (s *Supervisor) prepareRuntimeGeneration() error {
+	s.generationOnce.Do(func() {
+		s.runtimeGeneration = s.RuntimeGeneration
+		if s.runtimeGeneration != "" && (!canonicalRuntimeUUID(s.runtimeGeneration) || s.ShutdownComplete == nil) {
+			s.generationErr = errors.New("tracked supervisor requires canonical runtime UUID and shutdown completion")
+		}
+	})
+	return s.generationErr
+}
+
+func canonicalRuntimeUUID(value string) bool {
+	id, err := uuid.Parse(value)
+	return err == nil && id != uuid.Nil && id.String() == value
+}
+
+// ShutdownSettledGeneration requires an acknowledgement bound to the exact
+// runtime and operation. It never falls back to an unbound shutdown command.
+func ShutdownSettledGeneration(socketPath, generation, operationID string, timeout time.Duration) error {
+	if !canonicalRuntimeUUID(generation) || !canonicalRuntimeUUID(operationID) {
+		return ErrSettledShutdownUnknown
+	}
+	response, err := SendWithTimeout(socketPath, generationShutdownCommand+":"+generation+":"+operationID, timeout)
+	return generationShutdownResult(response, generation, operationID, err)
+}
+
+func generationShutdownResult(response, generation, operationID string, err error) error {
+	if err != nil || !canonicalRuntimeUUID(generation) || !canonicalRuntimeUUID(operationID) {
+		return ErrSettledShutdownUnknown
+	}
+	if response == generationShutdownAcknowledgement+":"+generation+":"+operationID {
+		return nil
+	}
+	return ErrSettledShutdownUnknown
+}
+
+// RuntimeGenerationStatus reports only this owner's lifecycle state, without
+// inspecting processes. It is not a substitute for a durable completion receipt.
+func RuntimeGenerationStatus(socketPath, generation string) (string, error) {
+	if !canonicalRuntimeUUID(generation) {
+		return "", ErrSettledShutdownUnknown
+	}
+	response, err := Send(socketPath, generationStatusCommand+":"+generation)
+	return generationStatusResult(response, generation, err)
+}
+
+func generationStatusResult(response, generation string, err error) (string, error) {
+	if err != nil || !canonicalRuntimeUUID(generation) {
+		return "", ErrSettledShutdownUnknown
+	}
+	for _, state := range []string{"owned", "stopping", "settled", "failed"} {
+		if response == generationStatusCommand+":"+generation+":"+state {
+			return state, nil
+		}
+	}
+	return "", ErrSettledShutdownUnknown
 }

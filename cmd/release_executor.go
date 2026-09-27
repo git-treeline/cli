@@ -16,6 +16,8 @@ type releaseExecutor struct {
 	Acquire   func(context.Context, []string) (*registry.LifecycleLocks, error)
 	Preflight func(context.Context, registry.ReleaseOperation) registry.PhaseResult
 	RunPhase  func(context.Context, registry.ReleaseOperation, registry.ReleasePhase) registry.PhaseResult
+	// RecoverSupervisor only observes a durable exact-generation outcome. It must never send shutdown or replay hooks.
+	RecoverSupervisor func(context.Context, registry.ReleaseOperation) bool
 }
 
 type releaseExecutionError struct{ Code string }
@@ -37,6 +39,10 @@ func (e *releaseExecutor) run(ctx context.Context, intent registry.ReleaseReques
 		return nil, releaseRefusal("executor_unconfigured")
 	}
 	// The caller and adapters cannot change the binding held by this invocation.
+	if intent.RuntimeBinding != nil {
+		binding := *intent.RuntimeBinding
+		intent.RuntimeBinding = &binding
+	}
 	if intent.Target.Common != nil {
 		common := *intent.Target.Common
 		intent.Target.Common = &common
@@ -80,6 +86,22 @@ func (e *releaseExecutor) run(ctx context.Context, intent registry.ReleaseReques
 			return op, nil
 		}
 		if op.Outcome() == "uncertain" {
+			recovered := false
+			if e.RecoverSupervisor != nil && ctx.Err() == nil {
+				for _, phase := range op.Phases {
+					if phase.Name == registry.PhaseSupervisor && phase.State == "started" && e.RecoverSupervisor(ctx, cloneReleaseOperation(*op)) {
+						updated, err := e.Registry.RecordReleasePhase(registry.PhaseToken{OperationID: op.OperationID, Phase: phase.Name, Attempt: phase.Attempt}, registry.PhaseResult{State: "completed", Code: "ok"})
+						if err != nil {
+							return e.latest(intent.OperationID, "receipt_unavailable")
+						}
+						op, recovered = &updated, true
+						break
+					}
+				}
+			}
+			if recovered {
+				continue
+			}
 			return op, releaseRefusal("uncertain")
 		}
 		if ctx.Err() != nil {
@@ -136,6 +158,11 @@ func (e *releaseExecutor) run(ctx context.Context, intent registry.ReleaseReques
 		result := e.RunPhase(ctx, cloneReleaseOperation(*started), next)
 		if !validReleaseEffectResult(result, next, intent.Policy) {
 			result = registry.PhaseResult{State: "uncertain", Code: "unknown"}
+		}
+		if next == registry.PhaseSupervisor && result.State == "uncertain" {
+			// Keep the original attempt eligible for read-only receipt recovery;
+			// BeginReleasePhase still refuses another dispatch of this attempt.
+			return started, releaseRefusal("uncertain")
 		}
 		updated, err := e.Registry.RecordReleasePhase(token, result)
 		if err != nil {
