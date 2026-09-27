@@ -11,6 +11,7 @@ import (
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/runtimeowner"
+	"github.com/git-treeline/cli/internal/service"
 	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/supervisor"
 	"github.com/google/uuid"
@@ -95,7 +96,45 @@ func TestTrackedStartConnectsFreshAllocationHooksOwnerAndCompletion(t *testing.T
 	if !reflect.DeepEqual(order, []string{"before-12345", "observe", "run", "after-12345"}) {
 		t.Fatal(order)
 	}
-
+	allocation, err := e.Registry.FindForRelease(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := registry.AllocationRuntimeBinding(allocation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := loadReleaseHookPlan(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent.RuntimeBinding, intent.HooksDigest = &binding, plan.digest()
+	intent.DatabaseConfigRevision = commandDatabaseRevision(t, root)
+	hosts := filepath.Join(t.TempDir(), "hosts")
+	if err := os.WriteFile(hosts, []byte("127.0.0.1 localhost\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	factoryCalls := 0
+	factory := func(reg *registry.Registry) (*releaseExecutor, error) {
+		factoryCalls++
+		runtime := releaseRuntimeAdapter{Registry: reg, Outcomes: store,
+			Probe:    func(context.Context, runtimeowner.Owner) bool { t.Fatal("completed runtime probed"); return false },
+			Shutdown: func(context.Context, string, string) error { t.Fatal("completed shutdown repeated"); return nil },
+		}
+		d := &releaseDriver{registry: reg, runtime: runtime, databases: releaseDatabasesAdapter{Registry: reg}, hooks: releaseHooksAdapter{Registry: reg, RunHook: effects.hook}, hosts: releaseHostsAdapter{Registry: reg, Domain: "example.test", Read: func() (service.ManagedHostsSnapshot, error) { return service.ReadManagedHostsStrict(hosts) }}}
+		return &releaseExecutor{Registry: reg, Acquire: registry.AcquireLifecycleLocks, Preflight: d.preflight, RunPhase: d.run, RecoverSupervisor: runtime.Recover}, nil
+	}
+	first, err := executePublicRelease(t, newReleaseStartCommand(e.Registry.Path, factory), publicRequestJSON(t, intent))
+	if err != nil || first.Outcome != "completed" {
+		t.Fatal(first, err)
+	}
+	again, err := executePublicRelease(t, newReleaseResumeCommand(e.Registry.Path, factory), "", intent.OperationID)
+	if err != nil || !reflect.DeepEqual(first, again) || factoryCalls != 1 || len(order) != 4 {
+		t.Fatal("release retry repeated effects", again, err)
+	}
+	if allocation, err := e.Registry.FindForRelease(root); err != nil || allocation != nil {
+		t.Fatal("release did not retire allocation", err)
+	}
 }
 
 func TestTrackedStartRefusesTargetOrConfigurationChangedByHook(t *testing.T) {

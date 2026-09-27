@@ -296,7 +296,9 @@ func TestLifecycleReleaseAcceptedStopsAtFixtureHook(t *testing.T) {
 				t.Fatal(err)
 			}
 			reg := registry.New("")
-			commandLifecycleAllocate(t, reg, target)
+			if err := reg.Allocate(registry.Allocation{"worktree": target, "project": "lifecycle_fixture"}); err != nil {
+				t.Fatal(err)
+			}
 			before, _ := os.ReadFile(reg.Path)
 			releaseForce = false
 			input, err := os.CreateTemp(t.TempDir(), "confirmation")

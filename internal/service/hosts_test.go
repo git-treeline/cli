@@ -416,3 +416,31 @@ func TestHostsNamesRejectRecordInjection(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestStrictManagedHostsWritePreflightDoesNotChangeFile(t *testing.T) {
+	path, _ := strictHostsFixture(t)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := ReadManagedHostsStrict(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckManagedHostsWrite(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != string(before) {
+		t.Fatal("preflight wrote hosts", err)
+	}
+	if err := os.Rename(path, path+".prior"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, before, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckManagedHostsWrite(snapshot); !errors.Is(err, ErrHostsChanged) {
+		t.Fatal("replacement accepted", err)
+	}
+}

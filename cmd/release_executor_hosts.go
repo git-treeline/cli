@@ -103,12 +103,19 @@ func (a releaseHostsAdapter) Run(ctx context.Context, op registry.ReleaseOperati
 }
 
 func (a releaseHostsAdapter) desired(domain string) ([]string, error) {
+	return a.desiredExcluding(domain, nil)
+}
+
+func (a releaseHostsAdapter) desiredExcluding(domain string, retiring *registry.ReleaseOperation) ([]string, error) {
 	allocs, err := a.Registry.ReleasePreflight()
 	if err != nil {
 		return nil, err
 	}
 	var hosts []string
 	for _, alloc := range allocs {
+		if retiring != nil && retiring.Allocation.Kind == "allocated" && registry.GetString(alloc, "worktree") == retiring.Target.Path && registry.GetString(alloc, "allocation_generation") == retiring.Allocation.Generation {
+			continue
+		}
 		project, projectOK := alloc["project"].(string)
 		branch, branchOK := alloc["branch"].(string)
 		_, hasProject := alloc["project"]

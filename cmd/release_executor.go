@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"slices"
 
 	"github.com/git-treeline/cli/internal/registry"
 )
@@ -13,6 +14,7 @@ import (
 // It does not advertise a capability or supply best-effort cleanup adapters.
 type releaseExecutor struct {
 	Registry  *registry.Registry
+	HeldLocks *registry.LifecycleLocks
 	Acquire   func(context.Context, []string) (*registry.LifecycleLocks, error)
 	Preflight func(context.Context, registry.ReleaseOperation) registry.PhaseResult
 	RunPhase  func(context.Context, registry.ReleaseOperation, registry.ReleasePhase) registry.PhaseResult
@@ -51,14 +53,19 @@ func (e *releaseExecutor) run(ctx context.Context, intent registry.ReleaseReques
 	if acquire == nil {
 		acquire = acquireCommandLifecycleLocks
 	}
-	locks, err := acquire(ctx, []string{intent.Target.Path})
-	if err != nil {
-		return nil, releaseRefusal("execution_lock_unavailable")
+	locks := e.HeldLocks
+	if locks != nil {
+		if !slices.Contains(locks.Paths(), intent.Target.Path) {
+			return nil, releaseRefusal("execution_lock_unavailable")
+		}
+	} else {
+		var err error
+		locks, err = acquire(ctx, []string{intent.Target.Path})
+		if err != nil || locks == nil {
+			return nil, releaseRefusal("execution_lock_unavailable")
+		}
+		defer locks.Close()
 	}
-	if locks == nil {
-		return nil, releaseRefusal("execution_lock_unavailable")
-	}
-	defer locks.Close()
 
 	op, err := e.Registry.GetRelease(intent.OperationID)
 	if err != nil {

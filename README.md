@@ -296,6 +296,25 @@ git worktree remove ../myapp-feature-auth
 
 For bulk cleanup: `gtl release --project myapp --drop-db` or `gtl release --all --drop-db`.
 
+Tracked allocations retain an operation ID when release cannot finish. Use the
+reported `gtl release status <operation-id>` to inspect its JSON outcome, and
+`gtl release resume <operation-id>` to continue that same request. Resume skips
+completed phases; it refuses to repeat a hook or cleanup whose outcome is unknown.
+Changed target identities or bound configuration also block execution.
+
+The development host contract is `gtl release start` with a bounded JSON
+[`ReleaseRequest`](internal/registry/release_operations.go) on stdin, followed by
+the same status/resume commands. Its explicit policies independently select
+database cleanup, directory removal, dirty removal and hook-failure override.
+Submitting a request does not silently enable any of them. JSON responses use
+schema 1 and include the retained operation and its phase outcomes.
+
+Tracked execution requires registry schema 4 and a fresh supported worktree
+creation/start sequence. Legacy ownership is not inferred from a missing process
+or socket; structured release refuses unknown runtime ownership. Mixed old/new
+lifecycle writers and automatic live migration are not supported. Host rollout
+must require a compatible CLI before enabling this contract.
+
 ### 14. Refresh after config changes
 
 ```bash

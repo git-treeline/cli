@@ -415,3 +415,23 @@ func SyncManagedHostsNoninteractive(expected ManagedHostsSnapshot, hosts []strin
 	}
 	return nil
 }
+
+// CheckManagedHostsWrite checks access to the same file without changing it.
+// The actual writer still revalidates bytes and identity under its own lock.
+func CheckManagedHostsWrite(expected ManagedHostsSnapshot) error {
+	if expected.info == nil || expected.start < 0 {
+		return ErrHostsChanged
+	}
+	file, info, err := openManagedHostsFile(expected.path, os.O_RDWR)
+	if errors.Is(err, os.ErrPermission) {
+		return ErrHostsPrivilegeRequired
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if !os.SameFile(expected.info, info) {
+		return ErrHostsChanged
+	}
+	return nil
+}

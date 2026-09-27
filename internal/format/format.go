@@ -268,6 +268,7 @@ var ErrDatabaseCleanupPlan = errors.New("database_cleanup_plan_unavailable")
 var ErrDatabaseCleanupEffect = errors.New("database_cleanup_effect_unknown")
 
 type DatabaseCleanupCheck struct {
+	ValidateOnly   bool
 	ConfigRevision string
 	BeforeDrop     func() error
 	NewAdapter     func(string, []string) (database.Adapter, error)
@@ -391,6 +392,9 @@ func DropDatabasesChecked(ctx context.Context, root string, snapshot registry.Cl
 			}
 			targets = append(targets, target)
 		}
+	}
+	if check.ValidateOnly {
+		return false, recheck()
 	}
 	for _, target := range targets {
 		if err := recheck(); err != nil {

@@ -246,3 +246,15 @@ func TestCheckedDatabaseCleanupEmptySnapshotNeedsNoConnection(t *testing.T) {
 		t.Fatal(attempted, err)
 	}
 }
+
+func TestCheckedDatabaseCleanupPreflightHasNoEffects(t *testing.T) {
+	root, revision, snapshot := checkedCleanupFixture(t, "postgresql")
+	drop := &checkedDropFake{}
+	adapter := &checkedListFake{drop, func() ([]string, error) { return []string{"app", "app_test"}, nil }}
+	check := checkedOptions(revision, adapter)
+	check.ValidateOnly = true
+	attempted, err := DropDatabasesChecked(context.Background(), root, snapshot, nil, check)
+	if err != nil || attempted || len(drop.drops) != 0 {
+		t.Fatal(attempted, err, drop.drops)
+	}
+}

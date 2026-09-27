@@ -1,0 +1,186 @@
+package cmd
+
+import (
+	"context"
+	"errors"
+	"reflect"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/format"
+	"github.com/git-treeline/cli/internal/proxy"
+	"github.com/git-treeline/cli/internal/registry"
+	"github.com/git-treeline/cli/internal/runtimeowner"
+	"github.com/git-treeline/cli/internal/service"
+	"github.com/git-treeline/cli/internal/supervisor"
+	"github.com/git-treeline/cli/internal/worktree"
+)
+
+type releaseDriver struct {
+	registry        *registry.Registry
+	runtime         releaseRuntimeAdapter
+	databases       releaseDatabasesAdapter
+	hooks           releaseHooksAdapter
+	hosts           releaseHostsAdapter
+	checkHosts      func(service.ManagedHostsSnapshot) error
+	validateRemoval func(string) (string, error)
+	remove          func(context.Context, registry.ReleaseOperation) registry.PhaseResult
+}
+
+func productionReleaseExecutor(reg *registry.Registry) (*releaseExecutor, error) {
+	uc := config.LoadUserConfig("")
+	if uc.LoadError() != nil || !releaseHostsDomainValid(uc.RouterDomain()) {
+		return nil, releaseRefusal("config_unavailable")
+	}
+	d := &releaseDriver{registry: reg, databases: releaseDatabasesAdapter{Registry: reg}, hooks: releaseHooksAdapter{Registry: reg, RunHook: RunCheckedHook}, hosts: releaseHostsAdapter{Registry: reg, Domain: uc.RouterDomain()}, checkHosts: service.CheckManagedHostsWrite, validateRemoval: worktree.ValidateRemoval, remove: releaseWorktreePhase}
+	d.runtime = releaseRuntimeAdapter{Registry: reg, Probe: func(ctx context.Context, owner runtimeowner.Owner) bool {
+		return ctx.Err() == nil && runtimeowner.VerifyOwner(owner)
+	}}
+	return &releaseExecutor{Registry: reg, Preflight: d.preflight, RunPhase: d.run, RecoverSupervisor: func(ctx context.Context, op registry.ReleaseOperation) bool { return d.runtimeFor(op).Recover(ctx, op) }}, nil
+}
+
+func (d *releaseDriver) runtimeFor(op registry.ReleaseOperation) releaseRuntimeAdapter {
+	a := d.runtime
+	if a.Outcomes == nil {
+		a.Outcomes = runtimeOutcomeStore(supervisor.SocketPath(op.Target.Path))
+	}
+	if a.Shutdown == nil {
+		a.Shutdown = func(ctx context.Context, generation, operation string) error {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return supervisor.ShutdownSettledGeneration(supervisor.SocketPath(op.Target.Path), generation, operation, 30*time.Second)
+		}
+	}
+	return a
+}
+
+func remainingReleasePhase(op registry.ReleaseOperation, name registry.ReleasePhase) bool {
+	for _, p := range op.Phases {
+		if p.Name == name {
+			return p.State != "completed"
+		}
+	}
+	return false
+}
+
+func (d *releaseDriver) preflight(ctx context.Context, op registry.ReleaseOperation) registry.PhaseResult {
+	blocked := registry.PhaseResult{State: "blocked", Code: "failed"}
+	if ctx.Err() != nil || d.registry == nil || registry.VerifyReleaseTarget(op.Target) != nil {
+		return blocked
+	}
+	current, err := d.registry.GetRelease(op.OperationID)
+	if err != nil || current == nil || !reflect.DeepEqual(*current, op) {
+		return blocked
+	}
+	if remainingReleasePhase(op, registry.PhaseWorktree) {
+		if d.validateRemoval == nil {
+			return blocked
+		}
+		if _, err := d.validateRemoval(op.Target.Path); err != nil {
+			return registry.PhaseResult{State: "blocked", Code: "identity_changed"}
+		}
+	}
+	if op.Allocation.Kind == "unallocated" {
+		return registry.PhaseResult{State: "completed", Code: "ok"}
+	}
+	if op.Snapshot == nil || op.RuntimeBinding == nil {
+		return blocked
+	}
+	if remainingReleasePhase(op, registry.PhasePreHook) || remainingReleasePhase(op, registry.PhasePostHook) {
+		plan, err := loadReleaseHookPlan(op.Target.Path)
+		if err != nil || plan.digest() != op.HooksDigest {
+			return registry.PhaseResult{State: "blocked", Code: "config_changed"}
+		}
+		if (len(plan.pre) > 0 || len(plan.post) > 0) && d.hooks.RunHook == nil {
+			return blocked
+		}
+	}
+	if remainingReleasePhase(op, registry.PhaseSupervisor) && op.RuntimeBinding.Kind != "never_started" {
+		a := d.runtimeFor(op)
+		record, ok := a.record(ctx, op)
+		if !ok || record.Owner == nil {
+			return blocked
+		}
+		if record.State != runtimeowner.Completed && (record.State != runtimeowner.Owned || a.Probe == nil || !a.Probe(ctx, *record.Owner)) {
+			return blocked
+		}
+	}
+	if remainingReleasePhase(op, registry.PhaseDatabases) {
+		keep, err := d.databases.survivors(op)
+		if err != nil {
+			return blocked
+		}
+		_, err = format.DropDatabasesChecked(ctx, op.Target.Path, *op.Snapshot, keep, format.DatabaseCleanupCheck{ConfigRevision: op.DatabaseConfigRevision, ValidateOnly: true, NewAdapter: d.databases.NewAdapter, BeforeDrop: func() error {
+			if registry.VerifyReleaseTarget(op.Target) != nil {
+				return errors.New("target changed")
+			}
+			return nil
+		}})
+		if err != nil {
+			if errors.Is(err, format.ErrDatabaseCleanupConfig) {
+				return registry.PhaseResult{State: "blocked", Code: "config_changed"}
+			}
+			return blocked
+		}
+	}
+	if remainingReleasePhase(op, registry.PhaseHosts) {
+		domain := strings.ToLower(d.hosts.Domain)
+		if !releaseHostsDomainValid(domain) {
+			return registry.PhaseResult{State: "blocked", Code: "config_changed"}
+		}
+		desired, err := d.hosts.desiredExcluding(domain, &op)
+		if err != nil {
+			return blocked
+		}
+		read := d.hosts.Read
+		if read == nil {
+			read = func() (service.ManagedHostsSnapshot, error) { return service.ReadManagedHostsStrict("") }
+		}
+		snapshot, err := read()
+		if err != nil {
+			return blocked
+		}
+		released := strings.ToLower(proxy.RouteKey(op.Snapshot.Project, op.Snapshot.Branch) + "." + domain)
+		// Unknown managed aliases may reflect changed routing configuration.
+		// Do not certify cleanup using a newly selected domain after restart.
+		managed := normalizedReleaseHosts(snapshot.Hostnames())
+		for _, host := range managed {
+			if host != released && !slices.Contains(desired, host) {
+				return registry.PhaseResult{State: "blocked", Code: "config_changed"}
+			}
+		}
+		if op.Snapshot.Project != "" && slices.Contains(managed, released) && !slices.Equal(managed, desired) {
+			if d.checkHosts == nil {
+				return blocked
+			}
+			if err := d.checkHosts(snapshot); err != nil {
+				if errors.Is(err, service.ErrHostsPrivilegeRequired) {
+					return registry.PhaseResult{State: "blocked", Code: "privilege_required"}
+				}
+				return blocked
+			}
+		}
+	}
+	return registry.PhaseResult{State: "completed", Code: "ok"}
+}
+
+func (d *releaseDriver) run(ctx context.Context, op registry.ReleaseOperation, phase registry.ReleasePhase) registry.PhaseResult {
+	switch phase {
+	case registry.PhasePreHook, registry.PhasePostHook:
+		return d.hooks.Run(ctx, op, phase)
+	case registry.PhaseSupervisor:
+		return d.runtimeFor(op).Run(ctx, op)
+	case registry.PhaseDatabases:
+		return d.databases.Run(ctx, op)
+	case registry.PhaseHosts:
+		return d.hosts.Run(ctx, op)
+	case registry.PhaseWorktree:
+		if d.remove != nil {
+			return d.remove(ctx, op)
+		}
+	}
+	return registry.PhaseResult{State: "blocked", Code: "failed"}
+}

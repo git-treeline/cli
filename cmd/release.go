@@ -86,8 +86,9 @@ func runReleaseSingleContext(ctx context.Context, args []string) error {
 	}
 
 	reg := registry.New("")
+	var locks *registry.LifecycleLocks
 	if !releaseDryRun {
-		locks, err := acquireCommandLifecycleLocks(ctx, []string{absPath})
+		locks, err = acquireCommandLifecycleLocks(ctx, []string{absPath})
 		if err != nil {
 			return err
 		}
@@ -164,6 +165,14 @@ func runReleaseSingleContext(ctx context.Context, args []string) error {
 
 	if !confirm.Prompt("Release?", releaseForce, nil) {
 		fmt.Println("Aborted.")
+		return nil
+	}
+
+	if handled, err := releaseTrackedAllocation(ctx, reg, locks, alloc, releaseDropDB, releaseRemoveWorktree, releaseForce); handled {
+		if err != nil {
+			return err
+		}
+		fmt.Printf("==> Released resources for %s\n", filepath.Base(absPath))
 		return nil
 	}
 
@@ -305,13 +314,9 @@ func runReleaseBatch(project string, all bool) error {
 	return nil
 }
 
-// releaseAndTeardown is the shared destructive tail of every batch release
-// path (release --project/--all, prune --merged): pre_release hooks, optional
-// DB drop, registry removal, runtime teardown (supervisor + hosts), optional
-// worktree dir removal, then post_release hooks. Kept in one place so the two
-// commands cannot drift on ordering — DBs drop while the registry entries
-// still exist (their metadata identifies the DBs), and teardown runs after
-// removal so the hosts re-sync reflects the new route set.
+// releaseAndTeardown shares batch admission across release and prune. Tracked
+// allocations use the retained release executor; legacy allocations alone
+// continue through the compatibility teardown below.
 func releaseAndTeardown(reg *registry.Registry, allocs []registry.Allocation, dropDB, removeWT, force bool) (int, error) {
 	if len(allocs) == 0 {
 		return 0, nil
@@ -359,9 +364,16 @@ func releaseAndTeardown(reg *registry.Registry, allocs []registry.Allocation, dr
 			}
 		}
 	}
+	allocs, trackedCount, err := releaseTrackedAllocations(context.Background(), reg, locks, allocs, dropDB, removeWT, force)
+	if err != nil {
+		return trackedCount, err
+	}
+	if len(allocs) == 0 {
+		return trackedCount, nil
+	}
 	allocs, postHooks := runPreReleaseHooks(allocs, force, runReleaseHook)
 	if len(allocs) == 0 {
-		return 0, nil
+		return trackedCount, nil
 	}
 
 	if dropDB {
@@ -372,7 +384,7 @@ func releaseAndTeardown(reg *registry.Registry, allocs []registry.Allocation, dr
 			releasing[registry.GetString(a, "worktree")] = true
 		}
 		if err := format.DropDatabases(formatAllocs, keptDatabaseNames(reg.Allocations(), releasing)); err != nil {
-			return 0, err
+			return trackedCount, err
 		}
 	}
 
@@ -385,7 +397,7 @@ func releaseAndTeardown(reg *registry.Registry, allocs []registry.Allocation, dr
 
 	count, err := reg.ReleaseMany(paths)
 	if err != nil {
-		return 0, err
+		return trackedCount, err
 	}
 
 	teardownRuntimeState(allocs)
@@ -393,7 +405,7 @@ func releaseAndTeardown(reg *registry.Registry, allocs []registry.Allocation, dr
 	if removeWT {
 		for _, p := range paths {
 			if err := removeWorktreeDir(p, force); err != nil {
-				return count, err
+				return trackedCount + count, err
 			}
 		}
 	}
@@ -403,7 +415,7 @@ func releaseAndTeardown(reg *registry.Registry, allocs []registry.Allocation, dr
 			fmt.Fprintf(os.Stderr, "Warning: %s\n", err)
 		}
 	}
-	return count, nil
+	return trackedCount + count, nil
 }
 
 // releaseHookEntry pairs a worktree with its post_release commands, captured
