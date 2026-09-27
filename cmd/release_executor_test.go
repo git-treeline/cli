@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/git-treeline/cli/internal/format"
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/google/uuid"
 )
@@ -25,10 +26,10 @@ func releaseExecutorFixture(t *testing.T) (*releaseExecutor, registry.ReleaseReq
 		t.Fatal(err)
 	}
 	intent := registry.ReleaseRequest{
-		OperationID: uuid.NewString(),
-		Target:      registry.TargetIdentity{Path: root, Directory: commandDirectoryIdentity(t, root)},
-		Allocation:  registry.AllocationRef{Kind: "allocated", Generation: registry.GetString(alloc, "allocation_generation")},
-		Policy:      registry.ReleasePolicy{DropDatabases: true}, HooksDigest: strings.Repeat("0", 64),
+		OperationID:    uuid.NewString(),
+		Target:         registry.TargetIdentity{Path: root, Directory: commandDirectoryIdentity(t, root)},
+		Allocation:     registry.AllocationRef{Kind: "allocated", Generation: registry.GetString(alloc, "allocation_generation")},
+		RuntimeBinding: &registry.RuntimeBinding{Kind: "never_started"}, DatabaseConfigRevision: commandDatabaseRevision(t, root), Policy: registry.ReleasePolicy{DropDatabases: true}, HooksDigest: strings.Repeat("0", 64),
 	}
 	executor := &releaseExecutor{
 		Registry: reg,
@@ -396,4 +397,13 @@ func TestReleaseExecutorUnallocatedGitOnly(t *testing.T) {
 	if _, err := e.Start(context.Background(), intent); err == nil || calls != 1 {
 		t.Fatal("missing path without receipt accepted")
 	}
+}
+
+func commandDatabaseRevision(t *testing.T, root string) string {
+	t.Helper()
+	revision, err := format.DatabaseCleanupConfigRevision(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return revision
 }

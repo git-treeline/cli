@@ -47,11 +47,13 @@ type ReleasePolicy struct {
 	IgnoreHookFailure bool `json:"ignore_hook_failure"`
 }
 type ReleaseRequest struct {
-	OperationID string         `json:"operation_id"`
-	Target      TargetIdentity `json:"target"`
-	Allocation  AllocationRef  `json:"allocation"`
-	Policy      ReleasePolicy  `json:"policy"`
-	HooksDigest string         `json:"hooks_digest"`
+	OperationID            string          `json:"operation_id"`
+	Target                 TargetIdentity  `json:"target"`
+	Allocation             AllocationRef   `json:"allocation"`
+	Policy                 ReleasePolicy   `json:"policy"`
+	HooksDigest            string          `json:"hooks_digest"`
+	DatabaseConfigRevision string          `json:"database_config_revision,omitempty"`
+	RuntimeBinding         *RuntimeBinding `json:"runtime_binding,omitempty"`
 }
 type CleanupSnapshot struct {
 	MainWorktree    bool     `json:"main_worktree"`
@@ -142,8 +144,14 @@ func requiredPhases(r ReleaseRequest) []ReleasePhase {
 	}
 	return p
 }
-func validRequest(r ReleaseRequest) bool {
+func validLegacyRequest(r ReleaseRequest) bool {
 	return canonicalUUID(r.OperationID) && validTarget(r.Target) && validDigest(r.HooksDigest) && (!r.Policy.ForceDirty || r.Policy.RemoveWorktree) && (r.Allocation.Kind == "allocated" && canonicalUUID(r.Allocation.Generation) || r.Allocation.Kind == "unallocated" && r.Allocation.Generation == "" && r.Policy.RemoveWorktree && !r.Policy.DropDatabases && !r.Policy.IgnoreHookFailure) && (!r.Policy.RemoveWorktree || r.Target.Common != nil)
+}
+func validRequest(r ReleaseRequest) bool {
+	return validLegacyRequest(r) && (r.Policy.DropDatabases && validDigest(r.DatabaseConfigRevision) || !r.Policy.DropDatabases && r.DatabaseConfigRevision == "") && (r.Allocation.Kind == "unallocated" && r.RuntimeBinding == nil || r.Allocation.Kind == "allocated" && r.RuntimeBinding != nil && validRuntimeBinding(*r.RuntimeBinding) && r.RuntimeBinding.Kind != "unknown")
+}
+func validStoredRequest(r ReleaseRequest) bool {
+	return validRequest(r) || r.RuntimeBinding == nil && r.DatabaseConfigRevision == "" && validLegacyRequest(r)
 }
 func (o ReleaseOperation) Outcome() string {
 	all := true
@@ -187,13 +195,16 @@ func validateReleaseStore(data RegistryData) error {
 			return fmt.Errorf("release operations require schema 3")
 		}
 		for _, a := range data.Allocations {
+			if _, ok := a["runtime_binding"]; ok {
+				return fmt.Errorf("runtime bindings require schema 4")
+			}
 			if _, ok := a["allocation_generation"]; ok {
 				return fmt.Errorf("enrollment identities require schema 3")
 			}
 		}
 		return nil
 	}
-	if data.Version != 3 || len(data.ReleaseOperations) > maxReleaseOperations {
+	if (data.Version != 3 && data.Version != 4) || len(data.ReleaseOperations) > maxReleaseOperations {
 		return fmt.Errorf("unsupported release store or capacity")
 	}
 	generations := map[string]bool{}
@@ -203,12 +214,22 @@ func validateReleaseStore(data RegistryData) error {
 			return fmt.Errorf("invalid enrollment generation")
 		}
 		generations[g] = true
+		if data.Version == 4 {
+			if _, present := a["runtime_binding"]; !present {
+				return fmt.Errorf("missing runtime binding")
+			}
+			if _, err := AllocationRuntimeBinding(a); err != nil {
+				return err
+			}
+		} else if _, present := a["runtime_binding"]; present {
+			return fmt.Errorf("runtime bindings require schema 4")
+		}
 	}
 	ids := map[string]bool{}
 	reservations := map[string]bool{}
 	reservedDirectories := map[DirectoryIdentity]bool{}
 	for _, o := range data.ReleaseOperations {
-		if !validRequest(o.ReleaseRequest) || ids[o.OperationID] || o.Revision == 0 {
+		if !validStoredRequest(o.ReleaseRequest) || data.Version == 3 && (o.RuntimeBinding != nil || o.DatabaseConfigRevision != "") || ids[o.OperationID] || o.Revision == 0 {
 			return fmt.Errorf("invalid release operation")
 		}
 		ids[o.OperationID] = true
@@ -296,6 +317,12 @@ func validateReleaseStore(data RegistryData) error {
 				} else if a == nil || GetString(a, "allocation_generation") != o.Allocation.Generation || resolvePath(GetString(a, "worktree")) != o.Target.Path {
 					return fmt.Errorf("reserved enrollment changed")
 				} else {
+					if o.RuntimeBinding != nil {
+						binding, err := AllocationRuntimeBinding(a)
+						if err != nil || binding != *o.RuntimeBinding {
+							return fmt.Errorf("reserved runtime binding changed")
+						}
+					}
 					expected, err := snapshot(a)
 					if err != nil || !reflect.DeepEqual(expected, o.Snapshot) {
 						return fmt.Errorf("reserved cleanup snapshot changed")
@@ -357,12 +384,18 @@ func preserveGenerations(before RegistryData, after *RegistryData) {
 	for _, a := range after.Allocations {
 		old := allocationAt(before, resolvePath(GetString(a, "worktree")))
 		if old != nil {
+			if binding, ok := old["runtime_binding"]; ok {
+				a["runtime_binding"] = binding
+			} else {
+				delete(a, "runtime_binding")
+			}
 			if g := GetString(old, "allocation_generation"); g != "" {
 				a["allocation_generation"] = g
 			} else {
 				delete(a, "allocation_generation")
 			}
 		} else {
+			delete(a, "runtime_binding")
 			delete(a, "allocation_generation")
 		}
 	}
@@ -373,7 +406,16 @@ func upgradeEnrollments(d *RegistryData) {
 			a["allocation_generation"] = uuid.NewString()
 		}
 	}
-	d.Version = 3
+	if d.Version < 3 {
+		d.Version = 3
+	}
+	if d.Version == 4 {
+		for _, a := range d.Allocations {
+			if _, present := a["runtime_binding"]; !present {
+				a["runtime_binding"] = RuntimeBinding{Kind: "unknown"}
+			}
+		}
+	}
 }
 
 func directoryIdentity(p string) (DirectoryIdentity, error) {
@@ -545,6 +587,8 @@ func findOperation(d *RegistryData, id string) (*ReleaseOperation, error) {
 	return nil, fmt.Errorf("release operation not found")
 }
 
+// EnrollAllocation is explicit development enrollment. It upgrades the store
+// without adopting legacy runtime ownership: absent bindings become unknown.
 func (r *Registry) EnrollAllocation(target TargetIdentity, expected Allocation) (Allocation, error) {
 	var result Allocation
 	err := r.registryTransaction(func(d *RegistryData) error {
@@ -558,6 +602,7 @@ func (r *Registry) EnrollAllocation(target TargetIdentity, expected Allocation) 
 		if a == nil || !sameJSON(a, expected) {
 			return fmt.Errorf("enrollment snapshot changed")
 		}
+		d.Version = 4
 		upgradeEnrollments(d)
 		result = allocationAt(*d, target.Path)
 		return nil
@@ -571,7 +616,7 @@ func (r *Registry) PrepareRelease(input ReleaseRequest) (ReleaseOperation, bool,
 	var result ReleaseOperation
 	existing := false
 	err := r.registryTransaction(func(d *RegistryData) error {
-		if !validRequest(input) {
+		if d.Version != 4 || !validRequest(input) {
 			return fmt.Errorf("invalid release request")
 		}
 		for _, o := range d.ReleaseOperations {
@@ -602,6 +647,10 @@ func (r *Registry) PrepareRelease(input ReleaseRequest) (ReleaseOperation, bool,
 		if input.Allocation.Kind == "allocated" {
 			if a == nil || GetString(a, "allocation_generation") != input.Allocation.Generation {
 				return fmt.Errorf("allocation generation changed")
+			}
+			binding, err := AllocationRuntimeBinding(a)
+			if err != nil || input.RuntimeBinding == nil || binding != *input.RuntimeBinding {
+				return fmt.Errorf("runtime binding changed")
 			}
 		} else if a != nil {
 			return fmt.Errorf("target is allocated")
@@ -650,6 +699,9 @@ func (r *Registry) ListReleases() ([]ReleaseOperation, error) {
 	return d.ReleaseOperations, nil
 }
 func verifyOperation(d RegistryData, o ReleaseOperation) error {
+	if !validRequest(o.ReleaseRequest) {
+		return fmt.Errorf("legacy release requires retained completion bindings")
+	}
 	if err := verifyTarget(o.Target, phaseComplete(o, PhaseWorktree)); err != nil {
 		return err
 	}
@@ -706,6 +758,9 @@ func (r *Registry) recordPhase(token PhaseToken, result PhaseResult, retire bool
 		o, e := findOperation(d, token.OperationID)
 		if e != nil {
 			return e
+		}
+		if !validRequest(o.ReleaseRequest) {
+			return fmt.Errorf("legacy release requires retained completion bindings")
 		}
 		if !validPhaseResult(*o, token.Phase, result) || !canonicalUUID(token.Attempt) {
 			return fmt.Errorf("invalid phase result")

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -47,9 +48,16 @@ func commandLifecycleRoot(t *testing.T) string {
 
 func commandLifecycleAllocate(t *testing.T, reg *registry.Registry, root string) {
 	t.Helper()
-	if err := reg.Allocate(registry.Allocation{"worktree": root, "project": "lifecycle_fixture"}); err != nil {
-		t.Fatal(err)
+	target := registry.TargetIdentity{Path: root, Directory: commandDirectoryIdentity(t, root)}
+	command := exec.Command("git", "-c", "core.fsmonitor=false", "-C", root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if raw, err := command.Output(); err == nil {
+		common, err := filepath.EvalSymlinks(strings.TrimSpace(string(raw)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		target.Common = &registry.CommonIdentity{Path: common, DirectoryIdentity: commandDirectoryIdentity(t, common)}
 	}
+	commandFreshEnrollment(t, reg, target, registry.Allocation{"worktree": root, "project": "lifecycle_fixture"})
 }
 
 func commandDirectoryIdentity(t *testing.T, path string) registry.DirectoryIdentity {
@@ -76,7 +84,7 @@ func commandLifecycleReserve(t *testing.T, reg *registry.Registry, root, common 
 	_, _, err = reg.PrepareRelease(registry.ReleaseRequest{
 		OperationID: id, Target: target,
 		Allocation:  registry.AllocationRef{Kind: "allocated", Generation: registry.GetString(alloc, "allocation_generation")},
-		HooksDigest: strings.Repeat("0", 64),
+		HooksDigest: strings.Repeat("0", 64), RuntimeBinding: &registry.RuntimeBinding{Kind: "never_started"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -339,4 +347,18 @@ func TestLifecycleReleaseDryRunAndEmptyBatchDoNotAcquire(t *testing.T) {
 		t.Fatalf("empty batch: %d %v", count, err)
 	}
 	commandLifecycleUnchanged(t, reg, before, target)
+}
+
+func commandFreshEnrollment(t *testing.T, reg *registry.Registry, target registry.TargetIdentity, allocation registry.Allocation) registry.Allocation {
+	t.Helper()
+	locks, err := registry.AcquireLifecycleLocks(context.Background(), []string{target.Path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locks.Close()
+	enrolled, err := reg.EnrollFreshAllocation(locks, target, allocation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return enrolled
 }

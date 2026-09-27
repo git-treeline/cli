@@ -61,10 +61,9 @@ const lockTimeout = 5 * time.Second
 // "worktree", "port", "ports", "database", "database_adapter", "project", etc.
 type Allocation map[string]any
 
-// currentVersion is the registry schema version this build writes. load()
-// migrates older data forward in memory (see migrate); the bumped version is
-// persisted on the next save, so upgrading never requires wiping the file.
-const currentVersion = 3
+// currentVersion is the schema for new registries. Legacy ordinary writes
+// retain schema 3; schema 4 enrollment is explicit and never adopts a runtime.
+const currentVersion = 4
 
 // RepoRef identifies one endpoint of a relationship by durable coordinates:
 // the GitHub remote identity (owner/name) plus a branch. It deliberately does
@@ -217,6 +216,9 @@ func (r *Registry) readReleaseStore() (RegistryData, error) {
 	}
 	seen := make(map[string]bool)
 	for _, row := range rows {
+		if err := uniqueReleaseKeys(row); err != nil {
+			return RegistryData{}, err
+		}
 		fields, err := releaseObject(row)
 		if err != nil {
 			return RegistryData{}, fmt.Errorf("invalid release allocation: %w", err)
@@ -496,7 +498,7 @@ func (r *Registry) ReleaseMany(worktreePaths []string) (int, error) {
 
 // UpdateField sets a single field on the allocation matching worktreePath.
 func (r *Registry) UpdateField(worktreePath, key, value string) error {
-	if key == "allocation_generation" || key == "worktree" {
+	if key == "allocation_generation" || key == "worktree" || key == "runtime_binding" {
 		return fmt.Errorf("immutable enrollment field")
 	}
 	resolved := resolvePath(worktreePath)
@@ -915,7 +917,7 @@ func (r *Registry) load() (RegistryData, error) {
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return RegistryData{}, fmt.Errorf("registry is corrupt (%s): %w — fix or delete the file", r.Path, err)
 	}
-	if data.Version == 3 {
+	if data.Version == 3 || data.Version == 4 {
 		if err := validateReleaseStore(data); err != nil {
 			return RegistryData{}, err
 		}
@@ -962,7 +964,14 @@ func (r *Registry) save(data RegistryData) error {
 	if len(raw)+1 > maxReleaseStoreBytes {
 		return fmt.Errorf("registry capacity exceeded")
 	}
-	return platform.AtomicWriteFile(r.Path, append(raw, '\n'), platform.PrivateFileMode)
+	if err := platform.AtomicWriteFile(r.Path, append(raw, '\n'), platform.PrivateFileMode); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(r.Path))
+	if err != nil {
+		return err
+	}
+	return errors.Join(dir.Sync(), dir.Close())
 }
 
 // GetString extracts a string field from an allocation.

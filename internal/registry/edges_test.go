@@ -206,8 +206,8 @@ func TestMigrate_V1RegistryGainsEdges(t *testing.T) {
 	if err := json.Unmarshal(raw, &data); err != nil {
 		t.Fatal(err)
 	}
-	if data.Version != currentVersion {
-		t.Errorf("expected version %d after migration, got %d", currentVersion, data.Version)
+	if data.Version != 3 {
+		t.Errorf("expected legacy write to remain schema 3, got %d", data.Version)
 	}
 	if len(data.Allocations) != 2 {
 		t.Errorf("expected 2 allocations to survive migration, got %d", len(data.Allocations))

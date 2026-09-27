@@ -15,18 +15,14 @@ import (
 	"github.com/git-treeline/cli/internal/registry"
 )
 
-// ConfigRevision must come from a trusted preflight that established the
-// intended database connection identity. Public release preparation does not
-// retain that binding yet, so this adapter is deliberately not wired there.
 type releaseDatabasesAdapter struct {
-	Registry       *registry.Registry
-	ConfigRevision string
-	NewAdapter     func(string, []string) (database.Adapter, error)
+	Registry   *registry.Registry
+	NewAdapter func(string, []string) (database.Adapter, error)
 }
 
 func (a releaseDatabasesAdapter) Run(ctx context.Context, op registry.ReleaseOperation) registry.PhaseResult {
 	blocked := registry.PhaseResult{State: "blocked", Code: "failed"}
-	if a.Registry == nil || ctx.Err() != nil || !op.Policy.DropDatabases || op.Allocation.Kind != "allocated" || op.Snapshot == nil || len(a.ConfigRevision) != 64 {
+	if a.Registry == nil || ctx.Err() != nil || !op.Policy.DropDatabases || op.Allocation.Kind != "allocated" || op.Snapshot == nil || len(op.DatabaseConfigRevision) != 64 {
 		return blocked
 	}
 	op = cloneReleaseOperation(op)
@@ -44,7 +40,7 @@ func (a releaseDatabasesAdapter) Run(ctx context.Context, op registry.ReleaseOpe
 		return blocked
 	}
 	attempted, err := format.DropDatabasesChecked(ctx, op.Target.Path, *op.Snapshot, keep, format.DatabaseCleanupCheck{
-		ConfigRevision: a.ConfigRevision, NewAdapter: a.NewAdapter,
+		ConfigRevision: op.DatabaseConfigRevision, NewAdapter: a.NewAdapter,
 		BeforeDrop: func() error {
 			current, err := a.Registry.GetRelease(op.OperationID)
 			if err != nil || current == nil || !reflect.DeepEqual(*current, op) {

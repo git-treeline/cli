@@ -36,6 +36,7 @@ func TestReleaseWorktreePhaseStrictRemoval(t *testing.T) {
 	intent.Target.Common.DirectoryIdentity = commandDirectoryIdentity(t, filepath.Join(main, ".git"))
 	intent.Allocation = registry.AllocationRef{Kind: "allocated", Generation: registry.GetString(allocation, "allocation_generation")}
 	intent.HooksDigest = strings.Repeat("0", 64)
+	intent.RuntimeBinding = &registry.RuntimeBinding{Kind: "never_started"}
 	postHookSeen, removeCalls := false, 0
 	executor := &releaseExecutor{Registry: reg,
 		Acquire: func(context.Context, []string) (*registry.LifecycleLocks, error) {

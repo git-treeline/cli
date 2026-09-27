@@ -67,8 +67,11 @@ func releaseDatabaseFixture(t *testing.T) (releaseDatabasesAdapter, registry.Rel
 	if err != nil {
 		t.Fatal(err)
 	}
+	if op.DatabaseConfigRevision != revision {
+		t.Fatal("fixture did not retain database revision")
+	}
 	fake := &releaseDatabaseFake{}
-	return releaseDatabasesAdapter{Registry: reg, ConfigRevision: revision, NewAdapter: func(string, []string) (database.Adapter, error) { return fake, nil }}, op, fake
+	return releaseDatabasesAdapter{Registry: reg, NewAdapter: func(string, []string) (database.Adapter, error) { return fake, nil }}, op, fake
 }
 
 func TestReleaseDatabasesAdapterUsesRetainedSnapshotAndStrictSurvivors(t *testing.T) {
@@ -104,9 +107,9 @@ func TestReleaseDatabasesAdapterRefusesUnboundInputs(t *testing.T) {
 			ctx := context.Background()
 			switch kind {
 			case "no revision":
-				adapter.ConfigRevision = ""
+				op.DatabaseConfigRevision = ""
 			case "wrong revision":
-				adapter.ConfigRevision = strings.Repeat("0", 64)
+				op.DatabaseConfigRevision = strings.Repeat("0", 64)
 			case "no policy":
 				op.Policy.DropDatabases = false
 			case "no allocation":

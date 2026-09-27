@@ -28,6 +28,7 @@ func releaseHooksFixture(t *testing.T, phase registry.ReleasePhase, ignore bool)
 		t.Fatal(err)
 	}
 	intent.HooksDigest, intent.Policy.IgnoreHookFailure = plan.digest(), ignore
+	intent.DatabaseConfigRevision = commandDatabaseRevision(t, intent.Target.Path)
 	op, _, err := e.Registry.PrepareRelease(intent)
 	if err != nil {
 		t.Fatal(err)
@@ -253,6 +254,7 @@ func TestReleaseHooksAdapterUncertainResumeNeverReplays(t *testing.T) {
 		t.Fatal(err)
 	}
 	intent.HooksDigest = plan.digest()
+	intent.DatabaseConfigRevision = commandDatabaseRevision(t, intent.Target.Path)
 	calls := 0
 	a := releaseHooksAdapter{Registry: e.Registry, RunHook: func(context.Context, string, string) checkedHookOutcome { calls++; return hookUncertain }}
 	e.RunPhase = a.Run
@@ -280,6 +282,7 @@ func TestReleaseHooksAdapterEmptyPlanNeedsNoRunner(t *testing.T) {
 		t.Fatal(err)
 	}
 	intent.HooksDigest = plan.digest()
+	intent.DatabaseConfigRevision = commandDatabaseRevision(t, intent.Target.Path)
 	a := releaseHooksAdapter{Registry: e.Registry}
 	var calls []registry.ReleasePhase
 	e.RunPhase = func(ctx context.Context, op registry.ReleaseOperation, phase registry.ReleasePhase) registry.PhaseResult {
@@ -321,7 +324,7 @@ func TestReleaseHooksAdapterRechecksGitAssociation(t *testing.T) {
 		Target: registry.TargetIdentity{Path: linked, Directory: commandDirectoryIdentity(t, linked),
 			Common: &registry.CommonIdentity{Path: common, DirectoryIdentity: commandDirectoryIdentity(t, common)}},
 		Allocation:  registry.AllocationRef{Kind: "allocated", Generation: registry.GetString(allocation, "allocation_generation")},
-		HooksDigest: plan.digest(),
+		HooksDigest: plan.digest(), RuntimeBinding: &registry.RuntimeBinding{Kind: "never_started"},
 	})
 	if err != nil {
 		t.Fatal(err)

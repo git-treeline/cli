@@ -3,7 +3,6 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -108,20 +107,9 @@ func TestReleaseStatusRetainsInterruptedAndCompletedEvidence(t *testing.T) {
 		Dev: strconv.FormatUint(uint64(stat.Dev), 10), Ino: strconv.FormatUint(stat.Ino, 10),
 	}}
 	reg := registry.New(filepath.Join(t.TempDir(), "registry.json"))
-	raw := fmt.Sprintf(`{"version":2,"allocations":[{"worktree":%q,"project":"fixture","env":{"token":"never-in-receipt"}}]}`, root)
-	if err := os.WriteFile(reg.Path, []byte(raw), 0600); err != nil {
-		t.Fatal(err)
-	}
-	a, err := reg.FindForRelease(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a, err = reg.EnrollAllocation(target, a)
-	if err != nil {
-		t.Fatal(err)
-	}
+	a := commandFreshEnrollment(t, reg, target, registry.Allocation{"worktree": root, "project": "fixture", "env": map[string]any{"token": "never-in-receipt"}})
 	request := registry.ReleaseRequest{OperationID: uuid.NewString(), Target: target,
-		Allocation: registry.AllocationRef{Kind: "allocated", Generation: registry.GetString(a, "allocation_generation")}, HooksDigest: strings.Repeat("0", 64)}
+		Allocation: registry.AllocationRef{Kind: "allocated", Generation: registry.GetString(a, "allocation_generation")}, HooksDigest: strings.Repeat("0", 64), RuntimeBinding: &registry.RuntimeBinding{Kind: "never_started"}}
 	op, _, err := reg.PrepareRelease(request)
 	if err != nil {
 		t.Fatal(err)

@@ -49,11 +49,8 @@ func releaseRegistryFixture(t *testing.T) (*Registry, TargetIdentity, Allocation
 func enrolledRequest(t *testing.T) (*Registry, ReleaseRequest) {
 	t.Helper()
 	reg, target, legacy := releaseRegistryFixture(t)
-	a, err := reg.EnrollAllocation(target, legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return reg, ReleaseRequest{OperationID: uuid.NewString(), Target: target, Allocation: AllocationRef{Kind: "allocated", Generation: GetString(a, "allocation_generation")}, HooksDigest: strings.Repeat("0", 64)}
+	a := freshFixtureEnrollment(t, reg, target, legacy)
+	return reg, ReleaseRequest{OperationID: uuid.NewString(), Target: target, Allocation: AllocationRef{Kind: "allocated", Generation: GetString(a, "allocation_generation")}, HooksDigest: strings.Repeat("0", 64), RuntimeBinding: &RuntimeBinding{Kind: "never_started"}}
 }
 func operation(t *testing.T, r *Registry, id string) ReleaseOperation {
 	t.Helper()
@@ -299,7 +296,10 @@ func TestReleaseRegistryReplacementAndMissingPathNeverComplete(t *testing.T) {
 }
 
 func TestReleaseRegistryUnallocatedGitOnlyOperation(t *testing.T) {
-	reg, _, _ := releaseRegistryFixture(t)
+	reg, enrollmentTarget, legacy := releaseRegistryFixture(t)
+	if _, err := reg.EnrollAllocation(enrollmentTarget, legacy); err != nil {
+		t.Fatal(err)
+	}
 	base := t.TempDir()
 	git := func(root string, args ...string) {
 		t.Helper()
@@ -662,13 +662,10 @@ func allocatedRemovalRequest(t *testing.T) (*Registry, ReleaseRequest, string) {
 		t.Fatal(err)
 	}
 	target.Common = &CommonIdentity{common, identity}
-	allocation, err = reg.EnrollAllocation(target, allocation)
-	if err != nil {
-		t.Fatal(err)
-	}
+	allocation = freshFixtureEnrollment(t, reg, target, allocation)
 	return reg, ReleaseRequest{OperationID: uuid.NewString(), Target: target,
-		Allocation: AllocationRef{Kind: "allocated", Generation: GetString(allocation, "allocation_generation")},
-		Policy:     ReleasePolicy{RemoveWorktree: true}, HooksDigest: strings.Repeat("0", 64)}, base
+		Allocation:     AllocationRef{Kind: "allocated", Generation: GetString(allocation, "allocation_generation")},
+		RuntimeBinding: &RuntimeBinding{Kind: "never_started"}, Policy: ReleasePolicy{RemoveWorktree: true}, HooksDigest: strings.Repeat("0", 64)}, base
 }
 
 func releaseFixtureGit(t *testing.T, root string, args ...string) {
@@ -685,6 +682,9 @@ func TestReleaseRegistryAllocatedRemovalWaitsForHostsAndPostHook(t *testing.T) {
 		t.Run(fmt.Sprintf("databases=%t", drop), func(t *testing.T) {
 			reg, request, base := allocatedRemovalRequest(t)
 			request.Policy.DropDatabases = drop
+			if drop {
+				request.DatabaseConfigRevision = strings.Repeat("a", 64)
+			}
 			prepared, _, err := reg.PrepareRelease(request)
 			if err != nil {
 				t.Fatal(err)
@@ -761,6 +761,9 @@ func TestReleaseRegistryPriorAllocatedRemovalOrderRefusesWithoutRewrite(t *testi
 		t.Run(fmt.Sprintf("databases=%t", drop), func(t *testing.T) {
 			reg, request, _ := allocatedRemovalRequest(t)
 			request.Policy.DropDatabases = drop
+			if drop {
+				request.DatabaseConfigRevision = strings.Repeat("a", 64)
+			}
 			if _, _, err := reg.PrepareRelease(request); err != nil {
 				t.Fatal(err)
 			}
@@ -798,4 +801,19 @@ func TestReleaseRegistryPriorAllocatedRemovalOrderRefusesWithoutRewrite(t *testi
 			}
 		})
 	}
+}
+
+func freshFixtureEnrollment(t *testing.T, reg *Registry, target TargetIdentity, allocation Allocation) Allocation {
+	t.Helper()
+	if err := os.Remove(reg.Path); err != nil {
+		t.Fatal(err)
+	}
+	_, lockDir := lifecycleFixture(t)
+	locks := acquireForTest(t, lockDir, target.Path)
+	defer locks.Close()
+	result, err := reg.EnrollFreshAllocation(locks, target, allocation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
