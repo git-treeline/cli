@@ -31,6 +31,12 @@ var errStopInProgress = errors.New("stop in progress")
 
 var errSupervisorShuttingDown = errors.New("supervisor is shutting down")
 
+var ErrSettledShutdownUnsupported = errors.New("settled supervisor shutdown unsupported")
+var ErrSettledShutdownUnknown = errors.New("supervisor shutdown is not acknowledged as settled")
+
+const settledShutdownCommand = "shutdown-settled-v1"
+const settledShutdownAcknowledgement = "settled-v1"
+
 // SocketPath returns a short, deterministic socket path in a private,
 // per-user directory under /tmp. It does not create that directory.
 func SocketPath(worktreePath string) string {
@@ -179,6 +185,12 @@ type Supervisor struct {
 	// teardown. Tests shorten them; production uses the defaults below.
 	StopTimeout time.Duration
 	KillTimeout time.Duration
+	// ShutdownComplete is configured before Run and called once, synchronously,
+	// after the child group stops. It must settle its tracked cleanup before
+	// returning and must not reenter supervisor lifecycle operations. A failure
+	// retains terminal ownership; a client timeout never cancels this callback.
+	// Nil preserves legacy shutdown behavior and disables shutdown-settled-v1.
+	ShutdownComplete func() error
 
 	mu           sync.Mutex
 	opMu         sync.Mutex // serializes lifecycle/configure operations
@@ -190,6 +202,7 @@ type Supervisor struct {
 	listener     net.Listener
 	done         chan struct{}
 	shutdownOnce sync.Once
+	shutdownErr  error // immutable terminal outcome, protected by mu
 }
 
 // configureRequest is deliberately a complete replacement, not a patch: a
@@ -355,13 +368,27 @@ func (s *Supervisor) Run() error {
 		return err
 	}
 
+	return s.waitForShutdown(sigs)
+}
+
+func (s *Supervisor) waitForShutdown(sigs <-chan os.Signal) error {
 	for {
 		select {
 		case <-s.done:
-			return nil
+			if s.ShutdownComplete == nil {
+				return nil
+			}
+			s.mu.Lock()
+			err := s.shutdownErr
+			s.mu.Unlock()
+			return err
 		case sig := <-sigs:
 			s.Log("\n==> Received %s, shutting down...", sig)
-			return s.shutdown()
+			err := s.shutdown()
+			if s.ShutdownComplete != nil && err != nil {
+				continue
+			}
+			return err
 		}
 	}
 }
@@ -503,22 +530,47 @@ func (s *Supervisor) startChild() error {
 	return s.startChildLocked()
 }
 
-// shutdown marks the supervisor terminal before stopping its child and closing
-// done, all while opMu is held. Requests already accepted by the listener can
-// therefore never start a replacement child after shutdown begins.
+// shutdown keeps lifecycle ownership through group teardown and strict cleanup.
+// A strict failure leaves Run and its lifetime lock active with a cached refusal.
 func (s *Supervisor) shutdown() error {
+	return s.shutdownWithStop(s.stopChildLocked)
+}
+
+func (s *Supervisor) shutdownWithStop(stopLocked func() error) error {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 	s.mu.Lock()
 	if s.terminal {
+		err := s.shutdownErr
 		s.mu.Unlock()
+		if s.ShutdownComplete != nil {
+			return err
+		}
 		return errSupervisorShuttingDown
 	}
 	s.terminal = true
-	err := s.stopChildLocked()
-	s.shutdownOnce.Do(func() { close(s.done) })
+	s.shutdownErr = ErrSettledShutdownUnknown
+	err := stopLocked()
+	s.mu.Unlock()
+	if err == nil && s.ShutdownComplete != nil {
+		err = s.completeShutdown()
+	}
+	s.mu.Lock()
+	s.shutdownErr = err
+	if s.ShutdownComplete == nil || err == nil {
+		s.shutdownOnce.Do(func() { close(s.done) })
+	}
 	s.mu.Unlock()
 	return err
+}
+
+func (s *Supervisor) completeShutdown() (err error) {
+	defer func() {
+		if recover() != nil {
+			err = ErrSettledShutdownUnknown
+		}
+	}()
+	return s.ShutdownComplete()
 }
 
 // stopChildLocked sends SIGTERM to the child process group and waits for the
@@ -678,6 +730,16 @@ func (s *Supervisor) handleConn(conn net.Conn) {
 			return
 		}
 		_, _ = fmt.Fprint(conn, "ok")
+	case settledShutdownCommand:
+		if s.ShutdownComplete == nil {
+			_, _ = fmt.Fprint(conn, "unsupported: "+settledShutdownCommand)
+			return
+		}
+		if err := s.shutdown(); err != nil {
+			_, _ = fmt.Fprint(conn, "error: shutdown not settled")
+			return
+		}
+		_, _ = fmt.Fprint(conn, settledShutdownAcknowledgement)
 	case "status":
 		s.mu.Lock()
 		running := s.childPGID > 1 && processGroupAlive(s.childPGID)
@@ -864,4 +926,25 @@ func SendWithTimeout(socketPath, command string, timeout time.Duration) (string,
 		return "", err
 	}
 	return sendRawWithTimeout(socketPath, command, timeout)
+}
+
+// ShutdownSettled accepts only the stronger protocol's exact acknowledgement.
+// Legacy "ok", missing sockets and lost replies never establish completion.
+func ShutdownSettled(socketPath string, timeout time.Duration) error {
+	response, err := SendWithTimeout(socketPath, settledShutdownCommand, timeout)
+	return settledShutdownResult(response, err)
+}
+
+func settledShutdownResult(response string, err error) error {
+	if err != nil {
+		return ErrSettledShutdownUnknown
+	}
+	switch response {
+	case settledShutdownAcknowledgement:
+		return nil
+	case "unsupported: " + settledShutdownCommand, "unknown command: " + settledShutdownCommand:
+		return ErrSettledShutdownUnsupported
+	default:
+		return ErrSettledShutdownUnknown
+	}
 }
