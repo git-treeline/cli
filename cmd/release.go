@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -66,21 +67,35 @@ var releaseCmd = &cobra.Command{
 			return cliErr(cmd, runReleaseBatch("", true))
 		}
 
-		return cliErr(cmd, runReleaseSingle(args))
+		return cliErr(cmd, runReleaseSingleContext(cmd.Context(), args))
 	},
 }
 
 func runReleaseSingle(args []string) error {
+	return runReleaseSingleContext(context.Background(), args)
+}
+
+func runReleaseSingleContext(ctx context.Context, args []string) error {
 	path := "."
 	if len(args) > 0 {
 		path = args[0]
 	}
-	absPath, err := filepath.Abs(path)
+	absPath, err := registry.CanonicalLifecycleTarget(path)
 	if err != nil {
 		return err
 	}
 
 	reg := registry.New("")
+	if !releaseDryRun {
+		locks, err := acquireCommandLifecycleLocks(ctx, []string{absPath})
+		if err != nil {
+			return err
+		}
+		defer locks.Close()
+	}
+	if err := reg.CheckReleaseReservations([]string{absPath}); err != nil {
+		return fmt.Errorf("cannot read release allocation: %w", err)
+	}
 	alloc, err := reg.FindForRelease(absPath)
 	if err != nil {
 		return fmt.Errorf("cannot read release allocation: %w", err)
@@ -298,6 +313,21 @@ func runReleaseBatch(project string, all bool) error {
 // still exist (their metadata identifies the DBs), and teardown runs after
 // removal so the hosts re-sync reflects the new route set.
 func releaseAndTeardown(reg *registry.Registry, allocs []registry.Allocation, dropDB, removeWT, force bool) (int, error) {
+	if len(allocs) == 0 {
+		return 0, nil
+	}
+	targets := make([]string, 0, len(allocs))
+	for _, allocation := range allocs {
+		targets = append(targets, registry.GetString(allocation, "worktree"))
+	}
+	locks, err := acquireCommandLifecycleLocks(context.Background(), targets)
+	if err != nil {
+		return 0, err
+	}
+	defer locks.Close()
+	if err := reg.CheckReleaseReservations(targets); err != nil {
+		return 0, err
+	}
 	current, err := reg.ReleasePreflight()
 	if err != nil {
 		return 0, err

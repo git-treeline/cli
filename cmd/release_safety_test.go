@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,11 @@ import (
 
 func releaseSafetyEnvironment(t *testing.T) {
 	t.Helper()
+	previousAcquire := acquireCommandLifecycleLocks
+	acquireCommandLifecycleLocks = func(context.Context, []string) (*registry.LifecycleLocks, error) {
+		return &registry.LifecycleLocks{}, nil
+	}
+	t.Cleanup(func() { acquireCommandLifecycleLocks = previousAcquire })
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("GTL_HOME", t.TempDir())

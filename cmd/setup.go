@@ -8,9 +8,11 @@ import (
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/detect"
+	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/style"
 	"github.com/git-treeline/cli/internal/templates"
+	"github.com/git-treeline/cli/internal/worktree"
 	"github.com/spf13/cobra"
 )
 
@@ -62,27 +64,50 @@ var setupCmd = &cobra.Command{
 			path = args[0]
 		}
 
-		setupAbs, _ := filepath.Abs(path)
+		setupAbs, err := filepath.Abs(path)
+		if err != nil {
+			return err
+		}
+		mainRepo := setupMainRepo
 		if !setupDryRun {
+			setupAbs, err = registry.CanonicalLifecycleTarget(path)
+			if err != nil {
+				return err
+			}
+			if mainRepo == "" {
+				mainRepo = worktree.DetectMainRepo(setupAbs)
+			}
+			mainRepo, err = registry.CanonicalLifecycleTarget(mainRepo)
+			if err != nil {
+				return err
+			}
+			targets := []string{setupAbs, mainRepo}
+			locks, err := acquireCommandLifecycleLocks(cmd.Context(), targets)
+			if err != nil {
+				return err
+			}
+			defer locks.Close()
+			if err := registry.New(setup.RegistryPath).CheckReleaseReservations(targets); err != nil {
+				return cliErr(cmd, err)
+			}
 			if err := checkDriftOrAbortForSetup(setupAbs); err != nil {
 				return cliErr(cmd, err)
 			}
 		}
 
 		uc := config.LoadUserConfig("")
-		s := setup.NewWithOptions(path, setupMainRepo, uc, setup.Options{DryRun: setupDryRun})
+		s := setup.NewWithOptions(setupAbs, mainRepo, uc, setup.Options{DryRun: setupDryRun})
 		if _, err := s.Run(); err != nil {
 			return err
 		}
 
-		absPath, _ := filepath.Abs(path)
 		var pc *config.ProjectConfig
 		if setupDryRun {
-			pc = config.LoadProjectConfigReadOnly(absPath)
+			pc = config.LoadProjectConfigReadOnly(setupAbs)
 		} else {
-			pc = config.LoadProjectConfig(absPath)
+			pc = config.LoadProjectConfig(setupAbs)
 		}
-		printSetupDiagnostics(absPath, pc)
+		printSetupDiagnostics(setupAbs, pc)
 
 		return nil
 	},
