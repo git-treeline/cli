@@ -96,7 +96,7 @@ safe to capture, e.g.: wt=$(gtl claim agent/some-branch)`,
 		if pc.Exists() && !claimNoSetup {
 			// Same adopt path 'gtl new' uses for an existing branch: run setup,
 			// rolling the worktree back if it fails.
-			if _, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stderr, false); err != nil {
+			if _, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stderr, false, admission.locks); err != nil {
 				return err
 			}
 		} else {

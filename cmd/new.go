@@ -159,7 +159,7 @@ Otherwise a new branch is created from --base (or the current branch).`,
 			if err := admission.retainForStart(newStart); err != nil {
 				return err
 			}
-			if handled, err := maybeStartServer(newStart, pc, existingWT); handled {
+			if handled, err := maybeStartServer(newStart, pc, existingWT, admission.locks); handled {
 				return err
 			}
 
@@ -190,7 +190,7 @@ Otherwise a new branch is created from --base (or the current branch).`,
 			return nil
 		}
 
-		alloc, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stdout, newStrict)
+		alloc, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stdout, newStrict, admission.locks)
 		if err != nil {
 			return err
 		}
@@ -201,7 +201,7 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		if err := admission.retainForStart(newStart); err != nil {
 			return err
 		}
-		if handled, err := maybeStartServer(newStart, startConfig, wtPath); handled {
+		if handled, err := maybeStartServer(newStart, startConfig, wtPath, admission.locks); handled {
 			return err
 		}
 

@@ -284,9 +284,12 @@ func TestCreationLifecycleLocalCreationSuppressesOnlyAutomaticSetup(t *testing.T
 					t.Fatal(err)
 				}
 				calls := 0
-				acquireCommandLifecycleLocks = func(context.Context, []string) (*registry.LifecycleLocks, error) {
+				acquireCommandLifecycleLocks = func(ctx context.Context, paths []string) (*registry.LifecycleLocks, error) {
 					calls++
-					return &registry.LifecycleLocks{}, nil
+					if ctx == nil {
+						ctx = context.Background()
+					}
+					return registry.AcquireLifecycleLocks(ctx, paths)
 				}
 				if err := runCreationCommand(command); err != nil {
 					t.Fatal(err)

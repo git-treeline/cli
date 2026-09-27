@@ -63,7 +63,7 @@ func TestRuntimeHandoffCapturesExactRawPlanAndPort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(raw, []byte("5433")) || !bytes.Contains(raw, []byte("{port_2}")) {
+	if bytes.Contains(raw, []byte(`"second-a 5433"`)) || !bytes.Contains(raw, []byte(`"second-a {port_2}"`)) {
 		t.Fatal("persisted expanded command")
 	}
 	decoded, err := decodeRuntimeHandoff(raw)

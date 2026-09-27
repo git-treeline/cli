@@ -22,6 +22,7 @@ import (
 	"github.com/git-treeline/cli/internal/platform"
 	"github.com/git-treeline/cli/internal/process"
 	"github.com/git-treeline/cli/internal/registry"
+	"github.com/git-treeline/cli/internal/runtimeowner"
 	"github.com/git-treeline/cli/internal/service"
 	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/style"
@@ -57,6 +58,7 @@ type detachedSupervisorConfig struct {
 	SocketPath      string            `json:"socket_path"`
 	Port            int               `json:"port"`
 	Env             map[string]string `json:"env"`
+	RuntimeHandoff  json.RawMessage   `json:"runtime_handoff,omitempty"`
 }
 
 var superviseCmd = &cobra.Command{
@@ -71,8 +73,8 @@ var superviseCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("reading supervisor runtime configuration: %w", err)
 		}
-		var runtime detachedSupervisorConfig
-		if err := json.Unmarshal(data, &runtime); err != nil {
+		runtime, handoff, err := decodeDetachedSupervisorConfig(data)
+		if err != nil {
 			return fmt.Errorf("decoding supervisor runtime configuration: %w", err)
 		}
 		if runtime.CommandTemplate == "" || runtime.Dir == "" || runtime.SocketPath == "" {
@@ -88,6 +90,30 @@ var superviseCmd = &cobra.Command{
 		sv.CommandTemplate = runtime.CommandTemplate
 		sv.Env = runtime.Env
 		sv.Port = runtime.Port
+		if handoff != nil {
+			allocation, err := registry.New("").FindForRelease(runtime.Dir)
+			if err != nil {
+				return err
+			}
+			revision, err := format.DatabaseCleanupConfigRevision(runtime.Dir)
+			if err != nil {
+				return err
+			}
+			if err := validateRuntimeBootstrap(runtime, *handoff, allocation, revision); err != nil {
+				return err
+			}
+			if err := registry.VerifyReleaseTarget(handoff.Binding.Target); err != nil {
+				return err
+			}
+			owner, err := runtimeowner.ObserveOwner(os.Getpid())
+			if err != nil {
+				return err
+			}
+			if err := configureTrackedRuntime(sv, runtimeOutcomeStore(runtime.SocketPath), *handoff, owner, RunCheckedHook); err != nil {
+				return err
+			}
+			return sv.Run()
+		}
 		runErr := sv.Run()
 		runPostStopHooks(runtime.SocketPath, config.LoadProjectConfig(runtime.Dir), runtime.Port, runtime.Dir)
 		return runErr
@@ -110,6 +136,13 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 			return err
 		}
 		absPath, _ := filepath.Abs(cwd)
+		tracked, err := hasTrackedRuntime(registry.New(""), absPath)
+		if err != nil {
+			return cliErr(cmd, err)
+		}
+		if tracked {
+			return cliErr(cmd, runTrackedStart(cmd.Context(), absPath, nil, startWith, startAwait))
+		}
 		pc := config.LoadProjectConfig(absPath)
 
 		startTemplate := pc.StartCommand()
@@ -292,12 +325,20 @@ type detachedSupervisor struct {
 	config   string
 	logPath  string
 	ownerPID int
+	owner    *runtimeowner.Owner
 }
 
 // startAwaitDetached starts a private supervisor process for the script-only
 // --await flow. The foreground command retains the terminal-owned supervisor
 // contract; only this path is detached, with its logs retained privately.
-func startAwaitDetached(parent context.Context, commandTemplate, dir, socket string, port int, env map[string]string, pc *config.ProjectConfig) error {
+func startAwaitDetached(parent context.Context, commandTemplate, dir, socket string, port int, env map[string]string, pc *config.ProjectConfig, tracked ...*runtimeHandoff) error {
+	var handoff *runtimeHandoff
+	if len(tracked) > 1 {
+		return fmt.Errorf("multiple tracked runtime handoffs")
+	}
+	if len(tracked) == 1 {
+		handoff = tracked[0]
+	}
 	ctx, stop := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 
@@ -308,13 +349,26 @@ func startAwaitDetached(parent context.Context, commandTemplate, dir, socket str
 		Port:            port,
 		Env:             env,
 	}
+	if handoff != nil {
+		raw, err := encodeRuntimeHandoff(*handoff)
+		if err != nil {
+			return err
+		}
+		runtime.RuntimeHandoff = raw
+	}
 	detached, err := launchDetachedSupervisor(runtime)
 	if err != nil {
-		runPostStopHooks(socket, pc, port, dir)
+		if handoff == nil {
+			runPostStopHooks(socket, pc, port, dir)
+		}
 		return err
 	}
 
 	cleanup := func() {
+		if handoff != nil {
+			_ = cleanupTrackedDetachedSupervisor(context.Background(), detached, *handoff, runtimeOutcomeStore(socket), runtimeowner.ObserveOwner, supervisor.ShutdownSettledGeneration)
+			return
+		}
 		cleanupDetachedSupervisor(detached)
 		// claimHooksState makes this safe even if the child is simultaneously
 		// completing its normal post-stop path.
@@ -337,7 +391,11 @@ func startAwaitDetached(parent context.Context, commandTemplate, dir, socket str
 			cleanup()
 			return &CliError{Message: "Supervisor did not start.", Hint: fmt.Sprintf("Check %s for startup output.", detached.logPath)}
 		case <-tick.C:
-			if _, err := os.Stat(detached.config); !os.IsNotExist(err) || !supervisorOwnedBy(socket, detached.ownerPID) {
+			if handoff != nil {
+				if !trackedDetachedReady(ctx, detached, *handoff, runtimeOutcomeStore(socket), runtimeowner.ObserveOwner, supervisor.RuntimeGenerationStatus) {
+					continue
+				}
+			} else if _, err := os.Stat(detached.config); !os.IsNotExist(err) || !supervisorOwnedBy(socket, detached.ownerPID) {
 				continue
 			}
 			goto ready
@@ -351,7 +409,10 @@ ready:
 	select {
 	case err := <-result:
 		if err == nil {
-			return nil
+			if handoff == nil || trackedDetachedReady(ctx, detached, *handoff, runtimeOutcomeStore(socket), runtimeowner.ObserveOwner, supervisor.RuntimeGenerationStatus) {
+				return nil
+			}
+			err = runtimeowner.ErrUnknown
 		}
 		cleanup()
 		return err
@@ -426,12 +487,21 @@ func launchDetachedSupervisor(runtime detachedSupervisorConfig) (*detachedSuperv
 	}
 	_ = devNull.Close()
 	_ = logFile.Close()
+	var owner *runtimeowner.Owner
+	var ownerErr error
+	if len(runtime.RuntimeHandoff) > 0 {
+		observed, err := runtimeowner.ObserveOwner(cmd.Process.Pid)
+		ownerErr = err
+		if err == nil {
+			owner = &observed
+		}
+	}
 	done := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
 		close(done)
 	}()
-	return &detachedSupervisor{done: done, socket: runtime.SocketPath, config: configPath, logPath: logPath, ownerPID: cmd.Process.Pid}, nil
+	return &detachedSupervisor{done: done, socket: runtime.SocketPath, config: configPath, logPath: logPath, ownerPID: cmd.Process.Pid, owner: owner}, ownerErr
 }
 
 func detachedSupervisorLogPath(socket string) string {
@@ -503,6 +573,13 @@ supervisor entirely.`,
 			command = "shutdown"
 		}
 
+		cwd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		if handled, err := runTrackedRuntimeAction(cmd.Context(), cwd, command); handled || err != nil {
+			return cliErr(cmd, err)
+		}
 		resp, err := supervisor.Send(sockPath, command)
 		if err != nil {
 			if stopKill {
@@ -558,6 +635,9 @@ var restartCmd = &cobra.Command{
 			return err
 		}
 		absPath, _ := filepath.Abs(cwd)
+		if handled, err := runTrackedRuntimeAction(cmd.Context(), absPath, "restart"); handled || err != nil {
+			return cliErr(cmd, err)
+		}
 		sockPath := supervisor.SocketPath(absPath)
 
 		pc := config.LoadProjectConfig(absPath)

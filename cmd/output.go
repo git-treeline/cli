@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -85,7 +86,7 @@ func maybeOpenInBrowser(open bool, uc *config.UserConfig, port int, project, bra
 // with --start. handled reports whether the flag was set at all — when true
 // the caller should return err as its own result (the flag consumed the rest
 // of the command), when false the caller continues its normal tail.
-func maybeStartServer(start bool, pc *config.ProjectConfig, dir string) (handled bool, err error) {
+func maybeStartServer(start bool, pc *config.ProjectConfig, dir string, held ...*registry.LifecycleLocks) (handled bool, err error) {
 	if !start {
 		return false, nil
 	}
@@ -95,6 +96,17 @@ func maybeStartServer(start bool, pc *config.ProjectConfig, dir string) (handled
 		return true, nil
 	}
 	fmt.Println(style.Actionf("Starting: %s", startCmd))
+	tracked, err := hasTrackedRuntime(registry.New(""), dir)
+	if err != nil {
+		return true, err
+	}
+	if tracked {
+		var locks *registry.LifecycleLocks
+		if len(held) == 1 {
+			locks = held[0]
+		}
+		return true, runTrackedStart(context.Background(), dir, locks, "", false)
+	}
 	return true, execInWorktree(dir, startCmd)
 }
 
@@ -124,7 +136,7 @@ func ensureWorktreeAllocation(wtPath, mainRepo string, uc *config.UserConfig, pr
 // so a failed 'new'/'claim' leaves no trace (no orphaned directory,
 // invisible to prune). Shared by 'gtl new' (both the new-branch and
 // existing-branch paths) and 'gtl claim' (its adopt path).
-func runSetupWithRollback(cmd *cobra.Command, wtPath, mainRepo string, uc *config.UserConfig, progress io.Writer, strictDB bool) (*allocator.Allocation, error) {
+func runSetupWithRollback(cmd *cobra.Command, wtPath, mainRepo string, uc *config.UserConfig, progress io.Writer, strictDB bool, locks *registry.LifecycleLocks) (*allocator.Allocation, error) {
 	_, _ = fmt.Fprintln(progress, style.Actionf("Worktree created at %s", wtPath))
 	_, _ = fmt.Fprintln(progress, style.Actionf("Running setup..."))
 
@@ -132,6 +144,21 @@ func runSetupWithRollback(cmd *cobra.Command, wtPath, mainRepo string, uc *confi
 	s.Log = progress
 	s.Options.DryRun = false
 	s.Options.StrictDB = strictDB
+	target, err := registry.CaptureReleaseTarget(wtPath)
+	if err != nil {
+		return nil, cliErr(cmd, errSetupFailed(err))
+	}
+	if locks == nil {
+		return nil, cliErr(cmd, errSetupFailed(fmt.Errorf("fresh creation lifecycle lock is required")))
+	}
+	existing, err := s.Registry.FindForRelease(target.Path)
+	if err != nil {
+		return nil, cliErr(cmd, errSetupFailed(err))
+	}
+	if existing != nil {
+		return nil, cliErr(cmd, errSetupFailed(fmt.Errorf("fresh creation target is already allocated")))
+	}
+	s.Allocator.FreshTarget, s.Allocator.FreshLocks = &target, locks
 	alloc, err := s.Run()
 	if err != nil {
 		var sce *setup.SetupCommandError

@@ -138,7 +138,7 @@ The PR may be given as a bare number or with a leading '#':
 			if err := admission.retainForStart(reviewStart); err != nil {
 				return err
 			}
-			if handled, err := maybeStartServer(reviewStart, pc, absPath); handled {
+			if handled, err := maybeStartServer(reviewStart, pc, absPath, admission.locks); handled {
 				return err
 			}
 
@@ -176,7 +176,7 @@ The PR may be given as a bare number or with a leading '#':
 			if err := admission.retainForStart(reviewStart); err != nil {
 				return err
 			}
-			if handled, err := maybeStartServer(reviewStart, pc, existing); handled {
+			if handled, err := maybeStartServer(reviewStart, pc, existing, admission.locks); handled {
 				return err
 			}
 
@@ -204,7 +204,7 @@ The PR may be given as a bare number or with a leading '#':
 			return nil
 		}
 
-		alloc, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stdout, false)
+		alloc, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stdout, false, admission.locks)
 		if err != nil {
 			return err
 		}
@@ -225,7 +225,7 @@ The PR may be given as a bare number or with a leading '#':
 		if err := admission.retainForStart(reviewStart); err != nil {
 			return err
 		}
-		if handled, err := maybeStartServer(reviewStart, startConfig, wtPath); handled {
+		if handled, err := maybeStartServer(reviewStart, startConfig, wtPath, admission.locks); handled {
 			return err
 		}
 
