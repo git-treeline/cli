@@ -308,3 +308,26 @@ func TestGenerationShutdownOrdinaryRouteRetainsCompletion(t *testing.T) {
 		t.Fatal("unbound completion attested a later operation")
 	}
 }
+
+func TestGenerationStartupNotifiesBeforeServingAndOnlyAfterLaunch(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		s := settledSupervisor()
+		var order []string
+		s.Started = func() { order = append(order, "started") }
+		launchErr := errors.New("fixture launch failed")
+		err := s.startAndServe(func() error {
+			order = append(order, "launch")
+			if fail {
+				return launchErr
+			}
+			return nil
+		}, func() { order = append(order, "serve") })
+		if fail {
+			if err != launchErr || strings.Join(order, ",") != "launch" {
+				t.Fatal("failed start notified or served")
+			}
+		} else if err != nil || strings.Join(order, ",") != "launch,started,serve" {
+			t.Fatal("runtime served before initial child launch notification")
+		}
+	}
+}

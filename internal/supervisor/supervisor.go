@@ -203,6 +203,10 @@ type Supervisor struct {
 	// A bound request supplies its operation UUID; ordinary shutdown/signals
 	// supply an empty string. Failure prevents child stop and retains ownership.
 	ShutdownRequested func(operationID string) error
+	// Started is configured before Run and notified after the initial child
+	// launches, before socket requests are served. It must not reenter lifecycle
+	// operations; callers use it to release their startup reservation.
+	Started func()
 
 	generationOnce      sync.Once
 	runtimeGeneration   string
@@ -383,13 +387,22 @@ func (s *Supervisor) Run() error {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigs)
 
-	go s.acceptLoop()
-
-	if err := s.startChild(); err != nil {
+	if err := s.startAndServe(s.startChild, func() { go s.acceptLoop() }); err != nil {
 		return err
 	}
 
 	return s.waitForShutdown(sigs)
+}
+
+func (s *Supervisor) startAndServe(start func() error, serve func()) error {
+	if err := start(); err != nil {
+		return err
+	}
+	if s.Started != nil {
+		s.Started()
+	}
+	serve()
+	return nil
 }
 
 func (s *Supervisor) waitForShutdown(sigs <-chan os.Signal) error {
