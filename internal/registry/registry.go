@@ -4,9 +4,11 @@
 package registry
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -165,6 +167,103 @@ func (r *Registry) FindStrict(worktreePath string) (Allocation, error) {
 	for _, a := range data.Allocations {
 		if resolvePath(GetString(a, "worktree")) == resolved {
 			return a, nil
+		}
+	}
+	return nil, nil
+}
+
+// ReleasePreflight validates the original envelope before migration can turn
+// missing fields into empty allocation state. It does not write the registry.
+func (r *Registry) ReleasePreflight() ([]Allocation, error) {
+	raw, err := os.ReadFile(r.Path)
+	if errors.Is(err, os.ErrNotExist) {
+		return []Allocation{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading release registry: %w", err)
+	}
+	envelope, err := releaseObject(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid release registry: %w", err)
+	}
+	for key := range envelope {
+		if key != "version" && key != "allocations" && key != "edges" {
+			return nil, fmt.Errorf("unknown release registry field %q", key)
+		}
+	}
+	if version, present := envelope["version"]; present {
+		var declared int
+		if err := json.Unmarshal(version, &declared); err != nil || declared < 1 || declared > currentVersion {
+			return nil, fmt.Errorf("unsupported release registry version")
+		}
+	}
+	var rows []json.RawMessage
+	if err := json.Unmarshal(envelope["allocations"], &rows); err != nil || rows == nil {
+		return nil, fmt.Errorf("release registry requires an allocations array")
+	}
+	seen := make(map[string]bool)
+	for _, row := range rows {
+		fields, err := releaseObject(row)
+		if err != nil {
+			return nil, fmt.Errorf("invalid release allocation: %w", err)
+		}
+		var target string
+		if err := json.Unmarshal(fields["worktree"], &target); err != nil || !filepath.IsAbs(target) || strings.ContainsRune(target, 0) {
+			return nil, fmt.Errorf("release allocation requires an absolute worktree path")
+		}
+		resolved := resolvePath(target)
+		if seen[resolved] {
+			return nil, fmt.Errorf("ambiguous duplicate release allocation for %q", resolved)
+		}
+		seen[resolved] = true
+	}
+	var data RegistryData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return nil, fmt.Errorf("invalid release registry: %w", err)
+	}
+	return data.Allocations, nil
+}
+
+func releaseObject(raw []byte) (map[string]json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, fmt.Errorf("expected a JSON object")
+	}
+	fields := make(map[string]json.RawMessage)
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := token.(string)
+		if !ok || fields[key] != nil {
+			return nil, fmt.Errorf("duplicate or invalid JSON key")
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, err
+		}
+		fields[key] = value
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, err
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return nil, fmt.Errorf("trailing registry content")
+	}
+	return fields, nil
+}
+
+func (r *Registry) FindForRelease(worktreePath string) (Allocation, error) {
+	allocations, err := r.ReleasePreflight()
+	if err != nil {
+		return nil, err
+	}
+	resolved := resolvePath(worktreePath)
+	for _, allocation := range allocations {
+		if resolvePath(GetString(allocation, "worktree")) == resolved {
+			return allocation, nil
 		}
 	}
 	return nil, nil

@@ -502,20 +502,84 @@ func ListBranches(prefix string) []string {
 	return result
 }
 
-// Remove runs `git worktree remove` on the given path. If force is true,
-// it passes --force to remove even with uncommitted changes.
-// Returns nil if the path is the main worktree (cannot be removed).
-func Remove(worktreePath string, force bool) error {
-	mainRepo := DetectMainRepo(worktreePath)
-	if mainRepo == worktreePath {
-		return fmt.Errorf("cannot remove the main worktree")
+// ValidateRemoval refuses primary clones and non-root paths before release effects.
+func ValidateRemoval(worktreePath string) (string, error) {
+	root, err := filepath.EvalSymlinks(worktreePath)
+	if err != nil {
+		return "", err
 	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	top, err := removalGit(root, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", err
+	}
+	topPath, err := filepath.EvalSymlinks(strings.TrimSuffix(string(top), "\n"))
+	if err != nil || topPath != root {
+		return "", fmt.Errorf("release target is not a Git worktree root")
+	}
+	listing, err := removalGit(root, "worktree", "list", "--porcelain", "-z")
+	if err != nil {
+		return "", err
+	}
+	first, _, found := strings.Cut(string(listing), "\x00")
+	if !found || !strings.HasPrefix(first, "worktree ") {
+		return "", fmt.Errorf("cannot establish the primary worktree")
+	}
+	primary, err := filepath.EvalSymlinks(strings.TrimPrefix(first, "worktree "))
+	if err != nil {
+		return "", err
+	}
+	if primary == root {
+		return "", fmt.Errorf("cannot remove the main worktree")
+	}
+	return primary, nil
+}
 
-	args := []string{"worktree", "remove", worktreePath}
-	if force {
-		args = []string{"worktree", "remove", "--force", worktreePath}
+func removalGit(dir string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.fsmonitor=false"}, args...)...)
+	cmd.Dir = dir
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(value, "GIT_") && !strings.HasPrefix(value, "LC_ALL=") {
+			cmd.Env = append(cmd.Env, value)
+		}
 	}
-	_, err := gitRun(mainRepo, args...)
+	cmd.Env = append(cmd.Env, "GIT_OPTIONAL_LOCKS=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	cmd.WaitDelay = time.Second
+	out, err := cmd.Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && len(exit.Stderr) > 0 {
+			return nil, fmt.Errorf("git %s failed: %s: %w", args[0], strings.TrimSpace(string(exit.Stderr)), err)
+		}
+		return nil, fmt.Errorf("git %s failed: %w", args[0], err)
+	}
+	return out, nil
+}
+
+// Remove runs git worktree remove after validating the target, preserving errors.
+func Remove(worktreePath string, force bool) error {
+	mainRepo, err := ValidateRemoval(worktreePath)
+	if err != nil {
+		return err
+	}
+	root, err := filepath.EvalSymlinks(worktreePath)
+	if err != nil {
+		return err
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	args := []string{"worktree", "remove"}
+	if force {
+		args = append(args, "--force")
+	}
+	_, err = removalGit(mainRepo, append(args, "--", root)...)
 	return err
 }
 

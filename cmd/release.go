@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -73,34 +75,45 @@ func runReleaseSingle(args []string) error {
 	if len(args) > 0 {
 		path = args[0]
 	}
-	absPath, _ := filepath.Abs(path)
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
 
 	reg := registry.New("")
-	alloc := reg.Find(absPath)
+	alloc, err := reg.FindForRelease(absPath)
+	if err != nil {
+		return fmt.Errorf("cannot read release allocation: %w", err)
+	}
+	if releaseRemoveWorktree {
+		if _, err := os.Stat(absPath); err == nil {
+			if _, err := worktree.ValidateRemoval(absPath); err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
 	if alloc == nil {
 		if releaseRemoveWorktree {
 			if _, err := os.Stat(absPath); err == nil {
-				mainRepo := worktree.DetectMainRepo(absPath)
-				if mainRepo != absPath {
-					unpushed := worktree.UnpushedCommitCount(absPath)
-					if unpushed > 0 {
-						branch := worktree.CurrentBranch(absPath)
-						fmt.Println()
-						fmt.Println(style.Warnf("Branch %q has %d unpushed commit(s).", branch, unpushed))
-						fmt.Println(style.Dimf("  These commits may be lost if you remove the worktree."))
-						fmt.Println()
-					}
-					if releaseDryRun {
-						fmt.Printf("Would remove worktree %s. (dry-run)\n", filepath.Base(absPath))
-						return nil
-					}
-					if !confirm.Prompt("Remove worktree?", releaseForce, nil) {
-						fmt.Println("Aborted.")
-						return nil
-					}
-					removeWorktreeDir(absPath, releaseForce)
+				unpushed := worktree.UnpushedCommitCount(absPath)
+				if unpushed > 0 {
+					branch := worktree.CurrentBranch(absPath)
+					fmt.Println()
+					fmt.Println(style.Warnf("Branch %q has %d unpushed commit(s).", branch, unpushed))
+					fmt.Println(style.Dimf("  These commits may be lost if you remove the worktree."))
+					fmt.Println()
+				}
+				if releaseDryRun {
+					fmt.Printf("Would remove worktree %s. (dry-run)\n", filepath.Base(absPath))
 					return nil
 				}
+				if !confirm.Prompt("Remove worktree?", releaseForce, nil) {
+					fmt.Println("Aborted.")
+					return nil
+				}
+				return removeWorktreeDir(absPath, releaseForce)
 			}
 		}
 		return errNoAllocation(absPath)
@@ -179,7 +192,9 @@ func runReleaseSingle(args []string) error {
 	}
 
 	if releaseRemoveWorktree {
-		removeWorktreeDir(absPath, releaseForce)
+		if err := removeWorktreeDir(absPath, releaseForce); err != nil {
+			return err
+		}
 	}
 
 	if err := runReleaseHook("post_release", hooks["post_release"], absPath); err != nil {
@@ -191,12 +206,15 @@ func runReleaseSingle(args []string) error {
 
 func runReleaseBatch(project string, all bool) error {
 	reg := registry.New("")
-
+	current, err := reg.ReleasePreflight()
+	if err != nil {
+		return fmt.Errorf("cannot read release allocations: %w", err)
+	}
 	var allocs []registry.Allocation
-	if all {
-		allocs = reg.Allocations()
-	} else {
-		allocs = reg.FindByProject(project)
+	for _, allocation := range current {
+		if all || registry.GetString(allocation, "project") == project {
+			allocs = append(allocs, allocation)
+		}
 	}
 
 	if len(allocs) == 0 {
@@ -280,6 +298,37 @@ func runReleaseBatch(project string, all bool) error {
 // still exist (their metadata identifies the DBs), and teardown runs after
 // removal so the hosts re-sync reflects the new route set.
 func releaseAndTeardown(reg *registry.Registry, allocs []registry.Allocation, dropDB, removeWT, force bool) (int, error) {
+	current, err := reg.ReleasePreflight()
+	if err != nil {
+		return 0, err
+	}
+	snapshots := make(map[string][]byte)
+	for _, allocation := range current {
+		snapshots[registry.GetString(allocation, "worktree")], err = json.Marshal(allocation)
+		if err != nil {
+			return 0, err
+		}
+	}
+	for _, allocation := range allocs {
+		target := registry.GetString(allocation, "worktree")
+		snapshot, err := json.Marshal(allocation)
+		if err != nil || !bytes.Equal(snapshot, snapshots[target]) {
+			return 0, fmt.Errorf("stale or duplicate release allocation for %q", target)
+		}
+		delete(snapshots, target)
+	}
+	if removeWT {
+		for _, a := range allocs {
+			p := registry.GetString(a, "worktree")
+			if _, err := os.Stat(p); err == nil {
+				if _, err := worktree.ValidateRemoval(p); err != nil {
+					return 0, err
+				}
+			} else if !os.IsNotExist(err) {
+				return 0, err
+			}
+		}
+	}
 	allocs, postHooks := runPreReleaseHooks(allocs, force, runReleaseHook)
 	if len(allocs) == 0 {
 		return 0, nil
@@ -313,7 +362,9 @@ func releaseAndTeardown(reg *registry.Registry, allocs []registry.Allocation, dr
 
 	if removeWT {
 		for _, p := range paths {
-			removeWorktreeDir(p, force)
+			if err := removeWorktreeDir(p, force); err != nil {
+				return count, err
+			}
 		}
 	}
 
@@ -488,9 +539,24 @@ func isInsideDir(cwd, dir string) bool {
 	return cwd == dir || strings.HasPrefix(cwd+string(os.PathSeparator), dir+string(os.PathSeparator))
 }
 
-func removeWorktreeDir(absPath string, force bool) {
+func removeWorktreeDir(absPath string, force bool) error {
 	if _, err := os.Stat(absPath); err != nil {
-		return
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	mainRepo, err := worktree.ValidateRemoval(absPath)
+	if err != nil {
+		return err
+	}
+	absPath, err = filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return err
+	}
+	absPath, err = filepath.Abs(absPath)
+	if err != nil {
+		return err
 	}
 
 	cwd, _ := os.Getwd()
@@ -498,7 +564,6 @@ func removeWorktreeDir(absPath string, force bool) {
 	insideWorktree := isInsideDir(cwdAbs, absPath)
 
 	if insideWorktree {
-		mainRepo := worktree.DetectMainRepo(absPath)
 		fmt.Println()
 		fmt.Println(style.Warnf("You're inside the worktree being removed."))
 		fmt.Println(style.Dimf("  After removal, this directory will no longer exist."))
@@ -506,24 +571,18 @@ func removeWorktreeDir(absPath string, force bool) {
 		fmt.Println(style.Dimf("  If in an IDE, close this window or switch workspaces."))
 		fmt.Println()
 		if !force && !confirm.Prompt("Continue with removal?", false, nil) {
-			fmt.Println("Skipped worktree removal.")
-			return
+			return fmt.Errorf("worktree removal declined")
 		}
 	}
 
-	if !force && worktree.HasUncommittedChanges(absPath) {
-		fmt.Fprintf(os.Stderr, "Warning: %s has uncommitted changes, skipping removal (use --force to override)\n", filepath.Base(absPath))
-		return
-	}
 	if err := worktree.Remove(absPath, force); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to remove worktree: %s\n", err)
-		return
+		return fmt.Errorf("failed to remove worktree: %w", err)
 	}
 	fmt.Printf("  Removed worktree %s\n", filepath.Base(absPath))
 
 	if insideWorktree {
-		mainRepo := worktree.DetectMainRepo(absPath)
 		fmt.Println()
 		fmt.Printf("  Run: cd %s\n", mainRepo)
 	}
+	return nil
 }
