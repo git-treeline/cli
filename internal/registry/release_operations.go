@@ -403,6 +403,13 @@ func identityGit(root string, args ...string) ([]byte, error) {
 	c.WaitDelay = time.Second
 	return c.Output()
 }
+
+// VerifyReleaseTarget revalidates an existing target without changing registry
+// state. Effect adapters use it between commands under their execution lock.
+func VerifyReleaseTarget(t TargetIdentity) error {
+	return verifyTarget(t, false)
+}
+
 func verifyTarget(t TargetIdentity, removed bool) error {
 	if !validTarget(t) {
 		return fmt.Errorf("invalid target identity")
