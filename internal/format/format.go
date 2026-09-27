@@ -349,7 +349,7 @@ func DropDatabasesChecked(ctx context.Context, root string, snapshot registry.Cl
 	}
 	factory := check.NewAdapter
 	if factory == nil {
-		factory = database.ForAdapter
+		factory = database.ForCheckedCleanup
 	}
 	adapter, err := factory(adapterName, pc.DatabaseConnArgs())
 	if err != nil || adapter == nil {

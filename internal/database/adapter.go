@@ -4,7 +4,12 @@
 // and existence checks across database types.
 package database
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+)
 
 // Adapter defines the interface for database template cloning and cleanup.
 // Implementations handle database-specific operations:
@@ -36,4 +41,40 @@ func ForAdapter(name string, connArgs []string) (Adapter, error) {
 	default:
 		return nil, fmt.Errorf("unsupported database adapter: %q", name)
 	}
+}
+
+// ForCheckedCleanup accepts only explicit connection coordinates. Ambient libpq
+// routing is refused before even a listing; credentials stay in the captured
+// process environment and never enter the persisted release receipt.
+func ForCheckedCleanup(name string, connArgs []string) (Adapter, error) {
+	return checkedCleanupAdapter(name, connArgs, os.Environ())
+}
+
+func checkedCleanupAdapter(name string, connArgs, env []string) (Adapter, error) {
+	if name == "sqlite" {
+		return &SQLite{}, nil
+	}
+	refuse := func() (Adapter, error) { return nil, fmt.Errorf("database connection is not explicitly bound") }
+	if name != "postgresql" && name != "" || len(connArgs) != 6 {
+		return refuse()
+	}
+	values := map[string]string{}
+	for i := 0; i < len(connArgs); i += 2 {
+		key, value := connArgs[i], connArgs[i+1]
+		if (key != "-h" && key != "-p" && key != "-U") || values[key] != "" || value == "" || strings.ContainsAny(value, "\x00\r\n") {
+			return refuse()
+		}
+		values[key] = value
+	}
+	port, err := strconv.Atoi(values["-p"])
+	if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != values["-p"] || strings.Contains(values["-h"], ",") || strings.Contains(values["-U"], "=") {
+		return refuse()
+	}
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(key, "PG") && key != "PGPASSWORD" && key != "PGPASSFILE" {
+			return refuse()
+		}
+	}
+	return &PostgreSQL{ConnArgs: append([]string(nil), connArgs...), checkedEnv: append([]string{}, env...)}, nil
 }

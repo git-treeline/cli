@@ -27,8 +27,17 @@ type PostgreSQL struct {
 	// Setting -h forces TCP instead of Unix socket, which avoids Postgres.app's
 	// socket authorization dialog when gtl is invoked from a native macOS app.
 	ConnArgs   []string
+	checkedEnv []string
 	execRun    func(name string, args ...string) error
 	execOutput func(name string, args ...string) ([]byte, error)
+}
+
+func (pg *PostgreSQL) command(name string, args ...string) *exec.Cmd {
+	cmd := exec.Command(pgTool(name), args...)
+	if pg.checkedEnv != nil {
+		cmd.Env = append([]string{}, pg.checkedEnv...)
+	}
+	return cmd
 }
 
 func (pg *PostgreSQL) run(name string, args ...string) error {
@@ -36,7 +45,7 @@ func (pg *PostgreSQL) run(name string, args ...string) error {
 	if pg.execRun != nil {
 		return pg.execRun(name, all...)
 	}
-	cmd := exec.Command(pgTool(name), all...)
+	cmd := pg.command(name, all...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -47,7 +56,7 @@ func (pg *PostgreSQL) runSilent(name string, args ...string) error {
 	if pg.execRun != nil {
 		return pg.execRun(name, all...)
 	}
-	return exec.Command(pgTool(name), all...).Run()
+	return pg.command(name, all...).Run()
 }
 
 func (pg *PostgreSQL) output(name string, args ...string) ([]byte, error) {
@@ -55,7 +64,7 @@ func (pg *PostgreSQL) output(name string, args ...string) ([]byte, error) {
 	if pg.execOutput != nil {
 		return pg.execOutput(name, all...)
 	}
-	return exec.Command(pgTool(name), all...).Output()
+	return pg.command(name, all...).Output()
 }
 
 func (pg *PostgreSQL) Exists(name string) (bool, error) {
