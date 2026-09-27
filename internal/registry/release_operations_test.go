@@ -645,3 +645,157 @@ func TestReleaseRegistryCleanupSnapshotRejectsLossyFields(t *testing.T) {
 		t.Fatal("genuine cleanup metadata lost")
 	}
 }
+
+func allocatedRemovalRequest(t *testing.T) (*Registry, ReleaseRequest, string) {
+	t.Helper()
+	reg, target, allocation := releaseRegistryFixture(t)
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseFixtureGit(t, base, "init", "-q")
+	releaseFixtureGit(t, base, "commit", "--allow-empty", "-qm", "fixture")
+	releaseFixtureGit(t, base, "worktree", "add", "-qb", "linked", target.Path)
+	common := filepath.Join(base, ".git")
+	identity, err := directoryIdentity(common)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.Common = &CommonIdentity{common, identity}
+	allocation, err = reg.EnrollAllocation(target, allocation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return reg, ReleaseRequest{OperationID: uuid.NewString(), Target: target,
+		Allocation: AllocationRef{Kind: "allocated", Generation: GetString(allocation, "allocation_generation")},
+		Policy:     ReleasePolicy{RemoveWorktree: true}, HooksDigest: strings.Repeat("0", 64)}, base
+}
+
+func releaseFixtureGit(t *testing.T, root string, args ...string) {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", root}, args...)...)
+	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_AUTHOR_NAME=fixture", "GIT_AUTHOR_EMAIL=fixture@example.com", "GIT_COMMITTER_NAME=fixture", "GIT_COMMITTER_EMAIL=fixture@example.com")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Git fixture: %s %v", output, err)
+	}
+}
+
+func TestReleaseRegistryAllocatedRemovalWaitsForHostsAndPostHook(t *testing.T) {
+	for _, drop := range []bool{false, true} {
+		t.Run(fmt.Sprintf("databases=%t", drop), func(t *testing.T) {
+			reg, request, base := allocatedRemovalRequest(t)
+			request.Policy.DropDatabases = drop
+			prepared, _, err := reg.PrepareRelease(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			complete(t, reg, request.OperationID, PhasePreHook)
+			complete(t, reg, request.OperationID, PhaseSupervisor)
+			if drop {
+				complete(t, reg, request.OperationID, PhaseDatabases)
+			}
+			complete(t, reg, request.OperationID, PhaseAllocation)
+			if allocation, err := reg.FindForRelease(request.Target.Path); err != nil || allocation != nil {
+				t.Fatalf("allocation retirement: %v %v", allocation, err)
+			}
+			for _, phase := range []ReleasePhase{PhaseHosts, PhasePostHook} {
+				token := begin(t, reg, request.OperationID, phase)
+				if _, err := reg.RecordReleasePhase(token, PhaseResult{"blocked", "failed"}); err != nil {
+					t.Fatal(err)
+				}
+				reopened := New(reg.Path)
+				current := operation(t, reopened, request.OperationID)
+				if current.Outcome() != "blocked" || !sameJSON(current.Snapshot, prepared.Snapshot) {
+					t.Fatal("failed trailing effect lost cleanup snapshot or blocked outcome")
+				}
+				if err := verifyTarget(request.Target, false); err != nil {
+					t.Fatalf("failed trailing effect lost worktree: %v", err)
+				}
+				if _, err := reopened.BeginReleasePhase(request.OperationID, PhaseWorktree, current.Revision); err == nil {
+					t.Fatal("removal dispatched before trailing effect completed")
+				}
+				called := false
+				if _, err := reopened.AllocateTx(request.Target.Path, func(UsedResources) (Allocation, error) {
+					called = true
+					return Allocation{}, nil
+				}); err == nil || called {
+					t.Fatal("retired target reservation released before worktree removal")
+				}
+				other := request
+				other.OperationID = uuid.NewString()
+				other.Allocation = AllocationRef{Kind: "unallocated"}
+				other.Policy.DropDatabases = false
+				if _, _, err := reopened.PrepareRelease(other); err == nil {
+					t.Fatal("retired target accepted a second release")
+				}
+				complete(t, reopened, request.OperationID, phase)
+			}
+			pending := operation(t, reg, request.OperationID)
+			if pending.Outcome() == "completed" || pending.Phases[len(pending.Phases)-1].Name != PhaseWorktree {
+				t.Fatal("completion did not wait for final removal")
+			}
+			token := begin(t, reg, request.OperationID, PhaseWorktree)
+			if _, err := reg.RecordReleasePhase(token, PhaseResult{"completed", "ok"}); err == nil {
+				t.Fatal("existing directory acknowledged as removed")
+			}
+			releaseFixtureGit(t, base, "worktree", "remove", request.Target.Path)
+			if operation(t, New(reg.Path), request.OperationID).Outcome() != "uncertain" {
+				t.Fatal("missing directory inferred completed removal without acknowledgment")
+			}
+			if _, err := reg.RecordReleasePhase(token, PhaseResult{"completed", "ok"}); err != nil {
+				t.Fatal(err)
+			}
+			completed := operation(t, New(reg.Path), request.OperationID)
+			if completed.Outcome() != "completed" || !sameJSON(completed.Snapshot, prepared.Snapshot) {
+				t.Fatal("final acknowledged removal lost completed receipt or snapshot")
+			}
+			if _, existing, err := reg.PrepareRelease(request); err != nil || !existing {
+				t.Fatalf("missing-path completed receipt not queryable: %v", err)
+			}
+		})
+	}
+}
+
+func TestReleaseRegistryPriorAllocatedRemovalOrderRefusesWithoutRewrite(t *testing.T) {
+	for _, drop := range []bool{false, true} {
+		t.Run(fmt.Sprintf("databases=%t", drop), func(t *testing.T) {
+			reg, request, _ := allocatedRemovalRequest(t)
+			request.Policy.DropDatabases = drop
+			if _, _, err := reg.PrepareRelease(request); err != nil {
+				t.Fatal(err)
+			}
+			data, err := reg.readReleaseStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			phases := []ReleasePhase{PhasePreHook, PhaseSupervisor}
+			if drop {
+				phases = append(phases, PhaseDatabases)
+			}
+			phases = append(phases, PhaseWorktree, PhaseAllocation, PhaseHosts, PhasePostHook)
+			for index, phase := range phases {
+				data.ReleaseOperations[0].Phases[index] = PhaseRecord{Name: phase, State: "pending"}
+			}
+			before, err := json.Marshal(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(reg.Path, before, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reg.GetRelease(request.OperationID); err == nil {
+				t.Fatal("prior development phase order accepted")
+			}
+			if _, _, err := reg.PrepareRelease(request); err == nil {
+				t.Fatal("prior development phase order resumed")
+			}
+			if err := reg.Allocate(Allocation{"worktree": t.TempDir()}); err == nil {
+				t.Fatal("prior development phase order overwritten")
+			}
+			after, err := os.ReadFile(reg.Path)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("refusal rewrote prior evidence: %v", err)
+			}
+		})
+	}
+}

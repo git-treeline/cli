@@ -136,10 +136,11 @@ func requiredPhases(r ReleaseRequest) []ReleasePhase {
 	if r.Policy.DropDatabases {
 		p = append(p, PhaseDatabases)
 	}
+	p = append(p, PhaseAllocation, PhaseHosts, PhasePostHook)
 	if r.Policy.RemoveWorktree {
 		p = append(p, PhaseWorktree)
 	}
-	return append(p, PhaseAllocation, PhaseHosts, PhasePostHook)
+	return p
 }
 func validRequest(r ReleaseRequest) bool {
 	return canonicalUUID(r.OperationID) && validTarget(r.Target) && validDigest(r.HooksDigest) && (!r.Policy.ForceDirty || r.Policy.RemoveWorktree) && (r.Allocation.Kind == "allocated" && canonicalUUID(r.Allocation.Generation) || r.Allocation.Kind == "unallocated" && r.Allocation.Generation == "" && r.Policy.RemoveWorktree && !r.Policy.DropDatabases && !r.Policy.IgnoreHookFailure) && (!r.Policy.RemoveWorktree || r.Target.Common != nil)
