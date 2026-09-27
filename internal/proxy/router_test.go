@@ -376,7 +376,7 @@ func TestRefreshRoutes_DropsInvalidAliasNames(t *testing.T) {
 	reg := testRegistry(t, nil)
 	router := NewRouter(0, reg).WithAliases(func() map[string]int {
 		return map[string]int{
-			"redis-ui":                   8081,
+			"redis-ui":                  8081,
 			`<script>alert(1)</script>`: 8082,
 		}
 	})
