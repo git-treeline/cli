@@ -5,12 +5,58 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/registry"
 )
 
 func newTestRegistry(t *testing.T) *registry.Registry {
 	t.Helper()
 	return registry.New(filepath.Join(t.TempDir(), "registry.json"))
+}
+
+func TestServeAlias_RejectsHostileName(t *testing.T) {
+	t.Setenv("GTL_HOME", t.TempDir())
+	for _, name := range []string{`<script>alert(1)</script>`, "-leading", "trailing-", "has space", "dot.ted"} {
+		err := serveAliasCmd.RunE(serveAliasCmd, []string{name, "8081"})
+		ce, ok := err.(*CliError)
+		if !ok {
+			t.Fatalf("%q: want *CliError, got %T: %v", name, err, err)
+		}
+		if !strings.Contains(ce.Message, "invalid alias name") {
+			t.Errorf("%q: unexpected message %q", name, ce.Message)
+		}
+	}
+	if got := config.LoadUserConfig("").RouterAliases(); len(got) != 0 {
+		t.Errorf("rejected aliases must not be saved, got %v", got)
+	}
+}
+
+func TestServeAlias_AcceptsPlainName(t *testing.T) {
+	t.Setenv("GTL_HOME", t.TempDir())
+	if err := serveAliasCmd.RunE(serveAliasCmd, []string{"Redis-UI", "8081"}); err != nil {
+		t.Fatalf("plain alias name should be accepted: %v", err)
+	}
+	if got := config.LoadUserConfig("").RouterAliases()["redis-ui"]; got != 8081 {
+		t.Errorf("alias not saved, got %d", got)
+	}
+}
+
+func TestServeAliasRemove_FindsLegacyMixedCaseAlias(t *testing.T) {
+	t.Setenv("GTL_HOME", t.TempDir())
+	uc := config.LoadUserConfig("")
+	uc.Set("router.aliases.RedisUI", float64(8081))
+	if err := uc.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	serveAliasRemove = true
+	t.Cleanup(func() { serveAliasRemove = false })
+	if err := serveAliasCmd.RunE(serveAliasCmd, []string{"redisui"}); err != nil {
+		t.Fatalf("remove should match legacy mixed-case alias: %v", err)
+	}
+	if got := config.LoadUserConfig("").RouterAliases(); len(got) != 0 {
+		t.Errorf("alias should be removed, got %v", got)
+	}
 }
 
 func TestDetectAliasPort_SinglePort(t *testing.T) {

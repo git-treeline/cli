@@ -25,14 +25,13 @@ func (s *flySource) Resolve() (*ConnInfo, error) {
 
 	out, err := s.deps.RunFly("ssh", "console", "-a", s.spec.App, "-C", "printenv")
 	if err != nil {
-		detail := strings.TrimSpace(string(out))
-		if looksUnauthenticated(detail) {
+		// The output is the app's full environment, so it can carry
+		// production secrets even on a partial failure. Classify it, but
+		// never echo it into the error.
+		if looksUnauthenticated(strings.TrimSpace(string(out))) {
 			return nil, fmt.Errorf("%w (app %s)", ErrFlyNotAuthed, s.spec.App)
 		}
-		if detail != "" {
-			return nil, fmt.Errorf("fly ssh console -a %s failed: %s", s.spec.App, detail)
-		}
-		return nil, fmt.Errorf("fly ssh console -a %s failed: %w", s.spec.App, err)
+		return nil, fmt.Errorf("fly ssh console -a %s failed (output redacted — may contain secrets): %w", s.spec.App, err)
 	}
 
 	env := parsePrintenv(string(out))

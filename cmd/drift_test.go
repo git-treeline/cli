@@ -81,6 +81,25 @@ func TestDetectProjectDrift_EmptyRegistryProject(t *testing.T) {
 	}
 }
 
+func TestDetectProjectDrift_BrokenConfigNeverDrifts(t *testing.T) {
+	dir := t.TempDir()
+	// Unparseable YAML: Project() falls back to the directory name, which must
+	// not be mistaken for a rename away from the registry's project.
+	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: [unterminated\n"), 0o644)
+
+	reg := newTestRegistry(t)
+	_ = reg.Allocate(registry.Allocation{
+		"worktree": dir,
+		"project":  "myapp",
+		"port":     3002,
+	})
+
+	_, _, drifted := detectProjectDriftWith(dir, reg)
+	if drifted {
+		t.Error("expected no drift when the project config fails to load")
+	}
+}
+
 func TestDoctorProjectDrift_NoDrift(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.WriteFile(filepath.Join(dir, ".treeline.yml"), []byte("project: myapp\n"), 0o644)

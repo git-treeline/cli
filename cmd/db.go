@@ -218,11 +218,13 @@ func validateResetSource(target, source string) *CliError {
 }
 
 type dbInfo struct {
-	target      string
-	template    string
-	adapter     database.Adapter
-	adapterName string
-	worktreeDir string
+	target       string
+	template     string
+	adapter      database.Adapter
+	adapterName  string
+	worktreeDir  string
+	mainWorktree bool
+	isMainRepo   bool
 }
 
 // resolveDBPaths returns the resolved target and template paths for a database
@@ -246,6 +248,7 @@ func resolveDB() (*dbInfo, error) {
 	}
 	absPath := wt.Path
 	mainRepo := worktree.DetectMainRepo(absPath)
+	repoRoot, repoRootErr := worktree.RepoRoot(absPath)
 	pc := config.LoadProjectConfigReadOnly(absPath)
 
 	dbName, _ := wt.Entry["database"].(string)
@@ -263,10 +266,12 @@ func resolveDB() (*dbInfo, error) {
 	target, tmpl := resolveDBPaths(adapterName, absPath, mainRepo, dbName, template)
 
 	return &dbInfo{
-		target:      target,
-		template:    tmpl,
-		adapter:     adapter,
-		adapterName: adapterName,
-		worktreeDir: absPath,
+		target:       target,
+		template:     tmpl,
+		adapter:      adapter,
+		adapterName:  adapterName,
+		worktreeDir:  absPath,
+		mainWorktree: wt.Entry["main_worktree"] == true,
+		isMainRepo:   repoRootErr == nil && repoRoot == mainRepo,
 	}, nil
 }

@@ -259,6 +259,71 @@ func TestEnsureCursorVisible_ScrollsUp(t *testing.T) {
 	}
 }
 
+// --- listIndexAtRow / mouse click ---
+
+func TestListIndexAtRow_AccountsForHeaderRows(t *testing.T) {
+	m := buildTestModel()
+	// entries: [header api, api/main, api/feature-x, header frontend, fe/main, fe/redesign]
+	// rows:     0 blank, 1 "api", 2 idx1, 3 idx2, 4 blank, 5 "frontend", 6 idx4, 7 idx5
+	want := map[int]int{
+		-1: -1,
+		0:  -1,
+		1:  -1,
+		2:  1,
+		3:  2,
+		4:  -1,
+		5:  -1,
+		6:  4,
+		7:  5,
+		8:  -1,
+	}
+	for row, idx := range want {
+		if got := m.listIndexAtRow(row); got != idx {
+			t.Errorf("row %d: got index %d, want %d", row, got, idx)
+		}
+	}
+}
+
+func TestListIndexAtRow_RespectsScrollOffset(t *testing.T) {
+	m := buildTestModel()
+	m.scrollOffset = 1
+	// rows: 0 idx1, 1 idx2, 2 blank, 3 "frontend", 4 idx4, 5 idx5
+	want := map[int]int{0: 1, 1: 2, 2: -1, 3: -1, 4: 4, 5: 5, 6: -1}
+	for row, idx := range want {
+		if got := m.listIndexAtRow(row); got != idx {
+			t.Errorf("row %d: got index %d, want %d", row, got, idx)
+		}
+	}
+}
+
+func TestListIndexAtRow_BeyondVisibleArea(t *testing.T) {
+	m := buildTestModel()
+	m.height = 8 // listVisibleLines = 3: rows 0..2 only
+	if got := m.listIndexAtRow(3); got != -1 {
+		t.Errorf("row past the visible panel should not select, got %d", got)
+	}
+}
+
+func TestHandleMouseClick_SelectsClickedWorktree(t *testing.T) {
+	m := buildTestModel()
+	// Screen row 2 + 6 = 8 is fe/main (flatList index 4); the old direct
+	// mapping would have computed index 6, past the end of the list.
+	updated, _ := m.handleMouseClick(tea.MouseClickMsg{X: 1, Y: 8, Button: tea.MouseLeft})
+	got := updated.(Model)
+	if got.cursor != 4 {
+		t.Errorf("expected cursor 4 (frontend/main), got %d", got.cursor)
+	}
+	if got.focus != paneList {
+		t.Error("click in list pane should focus the list")
+	}
+
+	// Screen row 6 (list row 4) is the blank line before the frontend header: no change.
+	updated, _ = got.handleMouseClick(tea.MouseClickMsg{X: 1, Y: 6, Button: tea.MouseLeft})
+	if updated.(Model).cursor != 4 {
+		t.Errorf("clicking a header row must not move the cursor, got %d", updated.(Model).cursor)
+	}
+}
+
 // --- extractLinks ---
 
 func TestExtractLinks_WithLinks(t *testing.T) {

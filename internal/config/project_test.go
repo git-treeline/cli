@@ -229,6 +229,75 @@ start_command: bin/dev
 	}
 }
 
+func TestRewriteSetupCommands(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		migrate bool
+	}{
+		{
+			name:    "two-space items migrate",
+			in:      "project: myapp\nsetup_commands:\n  - bundle install\n  - yarn install\nports_needed: 2\n",
+			migrate: true,
+		},
+		{
+			name: "zero-space items leave content unchanged",
+			in:   "project: myapp\nsetup_commands:\n- bundle install\n- yarn install\nports_needed: 2\n",
+		},
+		{
+			name: "four-space items leave content unchanged",
+			in:   "project: myapp\nsetup_commands:\n    - bundle install\n    - yarn install\nports_needed: 2\n",
+		},
+		{
+			name: "inline list leaves content unchanged",
+			in:   "project: myapp\nsetup_commands: [bundle install, yarn install]\nports_needed: 2\n",
+		},
+		{
+			name: "mixed indentation leaves content unchanged",
+			in:   "project: myapp\nsetup_commands:\n  - bundle install\n    - yarn install\nports_needed: 2\n",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := rewriteSetupCommands(c.in)
+			if !c.migrate {
+				if got != c.in {
+					t.Fatalf("expected content unchanged, got:\n%s", got)
+				}
+				return
+			}
+			if strings.Contains(got, "setup_commands") {
+				t.Errorf("setup_commands header not removed:\n%s", got)
+			}
+			if !strings.Contains(got, "commands:\n  setup:\n    - bundle install\n    - yarn install") {
+				t.Errorf("items not moved under commands.setup:\n%s", got)
+			}
+			if !strings.Contains(got, "ports_needed: 2") {
+				t.Errorf("following key lost:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestProjectConfig_MigrateCommands_UnparseableBlockKeepsFileValid(t *testing.T) {
+	dir := t.TempDir()
+	yml := "project: myapp\nsetup_commands:\n    - bundle install\n    - yarn install\n"
+	path := filepath.Join(dir, ".treeline.yml")
+	_ = os.WriteFile(path, []byte(yml), 0o644)
+
+	pc := LoadProjectConfig(dir)
+	if cmds := pc.SetupCommands(); len(cmds) != 2 || cmds[0] != "bundle install" {
+		t.Errorf("in-memory migration should still apply, got %v", cmds)
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != yml {
+		t.Errorf("file with unparseable block must be left untouched, got:\n%s", data)
+	}
+	if LoadProjectConfig(dir).LoadError() != nil {
+		t.Errorf("file must remain valid YAML: %v", LoadProjectConfig(dir).LoadError())
+	}
+}
+
 func TestProjectConfig_MergeTarget_Empty(t *testing.T) {
 	dir := t.TempDir()
 	pc := LoadProjectConfig(dir)

@@ -265,6 +265,29 @@ func (m *Model) listVisibleLines() int {
 	return contentHeight - 1
 }
 
+// listIndexAtRow maps a row within the list panel's content area (row 0 is
+// the first line below the title) to the flatList index rendered there,
+// mirroring renderListPanel: project headers occupy two rows (a blank line
+// and the name), worktrees one. Header rows and rows past the rendered list
+// return -1.
+func (m *Model) listIndexAtRow(row int) int {
+	if row < 0 || row >= m.listVisibleLines() {
+		return -1
+	}
+	line := 0
+	for i := m.scrollOffset; i < len(m.flatList) && line <= row; i++ {
+		if m.flatList[i].projectHeader {
+			line += 2
+			continue
+		}
+		if line == row {
+			return i
+		}
+		line++
+	}
+	return -1
+}
+
 func (m *Model) clampCursor() {
 	if m.cursor < 0 {
 		m.cursor = 0
@@ -300,9 +323,8 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	mouse := msg.Mouse()
 	if mouse.X < leftWidth {
 		m.focus = paneList
-		// offset by 2 for border + title, then add scrollOffset
-		idx := mouse.Y - 2 + m.scrollOffset
-		if idx >= 0 && idx < len(m.flatList) && !m.flatList[idx].projectHeader {
+		// Row 0 is the top border, row 1 the panel title.
+		if idx := m.listIndexAtRow(mouse.Y - 2); idx >= 0 {
 			m.cursor = idx
 			m.ensureCursorVisible()
 		}

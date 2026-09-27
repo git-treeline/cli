@@ -1,3 +1,12 @@
+## [0.58.2]
+
+- **Database pulls and refreshes protect the template.** `gtl db pull` and `gtl db refresh` refuse the main worktree, including older allocations without a main-worktree flag, and any target matching the configured template. `--force` cannot bypass this guard; use `gtl db template update` to refresh the clone source.
+- **Deferred worktree setup respects existing Git hooks.** `gtl new --no-setup` defers setup even when an older installed checkout hook invokes `gtl setup`, and leaves an existing worktree's allocation untouched.
+- **Config loading avoids destructive false renames.** Unreadable or invalid project config no longer triggers project-drift handling. The legacy `setup_commands` migration leaves unsupported list layouts unchanged instead of stripping their header.
+- **Router aliases are validated and escaped.** Alias names must be plain DNS labels, are normalized to lowercase for routing, and are HTML-escaped in status and not-found pages. Linux CA installation and removal pass literal arguments to privileged commands instead of interpolating paths into a shell.
+- **Tunnel logs and database-source errors handle sensitive output more safely.** Tunnel daemon logs live beside the private socket and refuse symlink targets. Failed Fly environment resolution redacts command output that may contain credentials.
+- **Dashboard clicks select the rendered worktree.** Mouse selection accounts for project-header rows and scrolling. Linux verification now checks real certificate trust before installation, after installation, and after removal; the Docker harness includes its required tools and reaps child processes, and the supervisor shutdown test waits for readiness before sending SIGHUP.
+
 ## [0.58.1]
 
 - **Credential files and retained database exports stay private.** Managed env files are written at `0600`, including tightening older files during sync; an already-private file with unchanged content is left untouched. Configured file copies preserve source permissions, including private keys and executables. Database dump directories use `0700`, staging files are uniquely named and private before `pg_dump` starts writing, and a failed pull preserves the previous sample. Retained dumps, generated restore lists, and manifests use `0600`.

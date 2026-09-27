@@ -27,6 +27,25 @@ import (
 	"github.com/git-treeline/cli/internal/registry"
 )
 
+// aliasNameRe is the shape an alias name must have to be a safe DNS label:
+// lowercase alphanumerics and hyphens, no leading or trailing hyphen.
+var aliasNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+func canonicalAliasName(name string) string {
+	return strings.ToLower(name)
+}
+
+// ValidateAliasName rejects alias names that are not a plain DNS label. Names
+// are used as subdomains and rendered into the router's HTML pages, so
+// anything outside [a-z0-9-] is refused rather than escaped case by case.
+func ValidateAliasName(name string) error {
+	name = canonicalAliasName(name)
+	if len(name) > 63 || !aliasNameRe.MatchString(name) {
+		return fmt.Errorf("invalid alias name %q: use letters, digits and hyphens only, not starting or ending with a hyphen", name)
+	}
+	return nil
+}
+
 // AliasSource returns static alias routes to merge into the route table.
 // Registry routes take priority over aliases.
 type AliasSource func() map[string]int
@@ -363,9 +382,15 @@ func (r *Router) refreshRoutes() {
 	allocs := r.registry.Allocations()
 	routes := make(map[string]int, len(allocs))
 
-	// Aliases go first so registry routes can override them
+	// Aliases go first so registry routes can override them. Config files can
+	// be hand-edited, so names are re-checked here rather than trusted.
 	for _, src := range r.aliasSources {
 		for name, port := range src() {
+			name = canonicalAliasName(name)
+			if err := ValidateAliasName(name); err != nil {
+				r.rlog("skipping alias: %v", err)
+				continue
+			}
 			routes[name] = port
 		}
 	}
@@ -444,7 +469,7 @@ func (r *Router) serveStatusPage(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprint(w, "<table><tr><th>Route</th><th>Port</th></tr>")
 		for _, k := range sortedKeys(routes) {
 			href := fmt.Sprintf("%s://%s.%s", r.scheme(), k, r.baseDomain)
-			_, _ = fmt.Fprintf(w, "<tr><td><a href=%q>%s</a></td><td>%d</td></tr>", href, k, routes[k])
+			_, _ = fmt.Fprintf(w, "<tr><td><a href=\"%s\">%s</a></td><td>%d</td></tr>", html.EscapeString(href), html.EscapeString(k), routes[k])
 		}
 		_, _ = fmt.Fprint(w, "</table>")
 	}
@@ -462,7 +487,7 @@ func (r *Router) serveNotFound(w http.ResponseWriter, subdomain string) {
 		body.WriteString("<p>Available routes:</p><table><tr><th>Route</th><th>Port</th></tr>")
 		for _, k := range sortedKeys(routes) {
 			href := fmt.Sprintf("%s://%s.%s", r.scheme(), k, r.baseDomain)
-			fmt.Fprintf(&body, "<tr><td><a href=%q>%s</a></td><td>%d</td></tr>", href, k, routes[k])
+			fmt.Fprintf(&body, "<tr><td><a href=\"%s\">%s</a></td><td>%d</td></tr>", html.EscapeString(href), html.EscapeString(k), routes[k])
 		}
 		body.WriteString("</table>")
 	} else {

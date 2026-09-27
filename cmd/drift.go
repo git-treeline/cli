@@ -25,6 +25,12 @@ var adapterFor = database.ForAdapter
 func detectProjectDriftWith(absPath string, reg *registry.Registry) (yamlName, registryName string, drifted bool) {
 	pc := config.LoadProjectConfig(absPath)
 	yamlName = pc.Project()
+	// Never infer drift from an unreadable or unparseable config: Project()
+	// falls back to the directory name in that case, which would look like a
+	// rename and could lead to the recorded database being dropped.
+	if pc.LoadError() != nil {
+		return yamlName, "", false
+	}
 
 	alloc := reg.Find(absPath)
 	if alloc == nil {

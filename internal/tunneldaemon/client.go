@@ -70,9 +70,26 @@ func dialWithSpawn(socketPath, tunnelName, gtlBinary string) (net.Conn, error) {
 	return nil, errors.New("daemon did not start in time")
 }
 
+// daemonLogPath returns the daemon's log file, kept beside its socket so it
+// inherits the same private, user-owned directory (see SocketPath) rather
+// than a predictable name in a shared temp dir.
+func daemonLogPath(socketPath string) string {
+	return strings.TrimSuffix(socketPath, ".sock") + ".log"
+}
+
+// openDaemonLog opens the log for append without following symlinks, so a
+// pre-planted link at the path cannot redirect daemon output elsewhere.
+func openDaemonLog(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+}
+
 func spawnDaemon(gtlBinary, tunnelName, socketPath string) error {
-	logPath := filepath.Join(os.TempDir(), fmt.Sprintf("gtl-tunnel-%s.log", sanitizeFilename(tunnelName)))
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	// Logging is best-effort: a refused open (e.g. a symlink at the path)
+	// must not stop the daemon from starting.
+	logFile, err := openDaemonLog(daemonLogPath(socketPath))
 	if err != nil {
 		logFile = nil
 	}
@@ -179,9 +196,4 @@ func renderEvent(ev Event, hostname string, port int) {
 		}
 		fmt.Fprintf(os.Stderr, "Tunnel down: %s\n", msg)
 	}
-}
-
-func sanitizeFilename(s string) string {
-	r := strings.NewReplacer("/", "_", "\\", "_", ":", "_", " ", "_")
-	return r.Replace(s)
 }

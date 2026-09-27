@@ -27,7 +27,7 @@ run_native() {
   step "Installing prerequisites (iptables, libnss3-tools, ca-certificates)"
   if command -v apt-get >/dev/null 2>&1; then
     sudo apt-get update
-    sudo apt-get install -y iptables libnss3-tools ca-certificates
+    sudo apt-get install -y iptables libnss3-tools ca-certificates openssl
   else
     echo "  Non-Debian host: ensure iptables + certutil (nss-tools) are installed." >&2
   fi
@@ -46,14 +46,14 @@ run_docker() {
   step "Running the integration suite inside an ubuntu:24.04 container"
   local repo
   repo="$(cd "$(dirname "$0")/.." && pwd)"
-  docker run --rm --privileged \
-    -v "$repo":/src -w /src \
+  docker run --rm --init --privileged \
+    -v "$repo":/src:ro -w /src \
     ubuntu:24.04 \
     bash -c '
       set -euo pipefail
       apt-get update
-      apt-get install -y golang-go iptables libnss3-tools ca-certificates
-      # Already root inside the container, so sudo is unnecessary.
+      apt-get install -y golang-go sudo iptables libnss3-tools ca-certificates openssl
+      # Production trust commands invoke sudo even when the caller is root.
       go test -v -count=1 -tags linux_integration -run Integration \
         ./internal/service/... ./internal/proxy/...
     '
