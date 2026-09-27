@@ -576,11 +576,9 @@ Aliases let you route non-gtl services through the router:
 		}
 
 		aliases, _ := config.Dig(uc.Data, "router", "aliases").(map[string]any)
-		if aliases != nil {
-			for key := range aliases {
-				if strings.ToLower(key) == name {
-					delete(aliases, key)
-				}
+		for key := range aliases {
+			if strings.ToLower(key) == name {
+				delete(aliases, key)
 			}
 		}
 		uc.Set("router.aliases."+name, float64(port))
