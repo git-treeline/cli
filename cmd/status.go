@@ -218,7 +218,16 @@ func renderStatus(ctx context.Context) error {
 	ctx = process.WithTracker(ctx, tracker)
 
 	reg := registry.New("")
-	snapshot := reg.Snapshot()
+	var snapshot registry.RegistryData
+	if statusJSON {
+		var err error
+		snapshot, err = reg.SnapshotStrict()
+		if err != nil {
+			return fmt.Errorf("reading related registry: %w", err)
+		}
+	} else {
+		snapshot = reg.Snapshot()
+	}
 	all := snapshot.Allocations
 	allocs := all
 	if statusProject != "" {
@@ -263,14 +272,28 @@ func renderStatus(ctx context.Context) error {
 				relatedPaths = append(relatedPaths, wt)
 			}
 		}
+		type relatedConfig struct {
+			repos []config.RelatedRepo
+			err   error
+		}
+		var configErr error
 		probeAll(ctx, relatedPaths,
-			func(ctx context.Context, wt string) []config.RelatedRepo {
+			func(ctx context.Context, wt string) relatedConfig {
 				ctx, cancel := context.WithTimeout(ctx, gitProbeTimeout)
 				defer cancel()
 				root := worktree.DetectRepoRootContext(ctx, wt)
-				return config.LoadProjectConfigReadOnly(root).RelatedRepos()
+				repos, err := loadRelatedRepos(root)
+				return relatedConfig{repos: repos, err: err}
 			},
-			func(i int, repos []config.RelatedRepo) { relatedReposByPath[relatedPaths[i]] = repos })
+			func(i int, result relatedConfig) {
+				if result.err != nil && configErr == nil {
+					configErr = result.err
+				}
+				relatedReposByPath[relatedPaths[i]] = result.repos
+			})
+		if configErr != nil {
+			return configErr
+		}
 	}
 
 	if statusCheck || statusJSON {

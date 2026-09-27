@@ -41,15 +41,18 @@ var rootCmd = &cobra.Command{
 	},
 }
 
-// readOnlyIntrospection validates the local flag before any root-hook effects.
+// readOnlyIntrospection recognizes read-only JSON queries before any root-hook effects.
 func readOnlyIntrospection(cmd *cobra.Command) (bool, error) {
+	jsonOutput, _ := cmd.Flags().GetBool("json")
+	if cmd.Name() == "related" && jsonOutput {
+		return true, nil
+	}
 	readOnly, _ := cmd.Flags().GetBool("read-only")
 	if !readOnly {
 		return false, nil
 	}
 	allowed := cmd.Name() == "routes" || cmd.Name() == "doctor" || cmd.Name() == "env" ||
 		(cmd.Name() == "show" && cmd.Parent() != nil && cmd.Parent().Name() == "env")
-	jsonOutput, _ := cmd.Flags().GetBool("json")
 	fix, _ := cmd.Flags().GetBool("fix")
 	template, _ := cmd.Flags().GetBool("template")
 	if !allowed || !jsonOutput || fix || template {

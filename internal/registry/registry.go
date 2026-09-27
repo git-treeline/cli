@@ -157,6 +157,28 @@ func (r *Registry) Find(worktreePath string) Allocation {
 	return nil
 }
 
+// SnapshotStrict reads allocation and relationship state from one validated
+// envelope, without migrating or writing the registry.
+func (r *Registry) SnapshotStrict() (RegistryData, error) {
+	data, err := r.readReleaseStore()
+	if err != nil {
+		return RegistryData{}, err
+	}
+	for _, allocation := range data.Allocations {
+		if branch, present := allocation["branch"]; present {
+			if _, ok := branch.(string); !ok {
+				return RegistryData{}, fmt.Errorf("invalid allocation branch")
+			}
+		}
+	}
+	for _, edge := range data.Edges {
+		if edge.A.Repo == "" || edge.B.Repo == "" {
+			return RegistryData{}, fmt.Errorf("invalid relationship endpoint")
+		}
+	}
+	return data, nil
+}
+
 // FindStrict preserves read errors rather than treating them as an absent allocation.
 func (r *Registry) FindStrict(worktreePath string) (Allocation, error) {
 	data, err := r.load()
