@@ -43,6 +43,14 @@ var rootCmd = &cobra.Command{
 
 // readOnlyIntrospection recognizes read-only JSON queries before any root-hook effects.
 func readOnlyIntrospection(cmd *cobra.Command) (bool, error) {
+	if cmd.Name() == "claim" {
+		inspect, _ := cmd.Flags().GetBool("inspect-json")
+		request, _ := cmd.Flags().GetString("request-file")
+		operation, _ := cmd.Flags().GetString("operation-id")
+		if inspect || request != "" || operation != "" {
+			return true, nil
+		}
+	}
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 	if cmd.Name() == "related" && jsonOutput {
 		return true, nil

@@ -137,6 +137,11 @@ func ensureWorktreeAllocation(wtPath, mainRepo string, uc *config.UserConfig, pr
 // invisible to prune). Shared by 'gtl new' (both the new-branch and
 // existing-branch paths) and 'gtl claim' (its adopt path).
 func runSetupWithRollback(cmd *cobra.Command, wtPath, mainRepo string, uc *config.UserConfig, progress io.Writer, strictDB bool, locks *registry.LifecycleLocks) (*allocator.Allocation, error) {
+	allocation, _, err := runSetupWithRollbackOutcome(cmd, wtPath, mainRepo, uc, progress, strictDB, locks)
+	return allocation, err
+}
+
+func runSetupWithRollbackOutcome(cmd *cobra.Command, wtPath, mainRepo string, uc *config.UserConfig, progress io.Writer, strictDB bool, locks *registry.LifecycleLocks) (*allocator.Allocation, string, error) {
 	_, _ = fmt.Fprintln(progress, style.Actionf("Worktree created at %s", wtPath))
 	_, _ = fmt.Fprintln(progress, style.Actionf("Running setup..."))
 
@@ -146,17 +151,17 @@ func runSetupWithRollback(cmd *cobra.Command, wtPath, mainRepo string, uc *confi
 	s.Options.StrictDB = strictDB
 	target, err := registry.CaptureReleaseTarget(wtPath)
 	if err != nil {
-		return nil, cliErr(cmd, errSetupFailed(err))
+		return nil, "unknown", cliErr(cmd, errSetupFailed(err))
 	}
 	if locks == nil {
-		return nil, cliErr(cmd, errSetupFailed(fmt.Errorf("fresh creation lifecycle lock is required")))
+		return nil, "unknown", cliErr(cmd, errSetupFailed(fmt.Errorf("fresh creation lifecycle lock is required")))
 	}
 	existing, err := s.Registry.FindForRelease(target.Path)
 	if err != nil {
-		return nil, cliErr(cmd, errSetupFailed(err))
+		return nil, "unknown", cliErr(cmd, errSetupFailed(err))
 	}
 	if existing != nil {
-		return nil, cliErr(cmd, errSetupFailed(fmt.Errorf("fresh creation target is already allocated")))
+		return nil, "unknown", cliErr(cmd, errSetupFailed(fmt.Errorf("fresh creation target is already allocated")))
 	}
 	s.Allocator.FreshTarget, s.Allocator.FreshLocks = &target, locks
 	alloc, err := s.Run()
@@ -167,18 +172,24 @@ func runSetupWithRollback(cmd *cobra.Command, wtPath, mainRepo string, uc *confi
 			// Don't remove the worktree; user can fix env and re-run gtl setup.
 			_, _ = fmt.Fprintln(progress, style.Warnf("Setup commands failed — worktree kept at %s", wtPath))
 			_, _ = fmt.Fprintln(progress, style.Dimf("Fix the issue above and re-run 'gtl setup'."))
-			return nil, cliErr(cmd, errSetupFailed(err))
+			return nil, "retained", cliErr(cmd, errSetupFailed(err))
 		}
 		// Fatal setup error (allocation, config, env file, DB) — roll back.
-		if rmErr := worktree.Remove(wtPath, true); rmErr != nil {
+		outcome := "unknown"
+		rmErr := registry.VerifyReleaseTarget(target)
+		if rmErr == nil {
+			rmErr = worktree.Remove(wtPath, true)
+		}
+		if rmErr != nil {
 			fmt.Fprintln(os.Stderr, style.Warnf("Could not remove worktree after failed setup: %s", rmErr))
 			fmt.Fprintln(os.Stderr, style.Dimf("  Remove it manually: git worktree remove --force %s", wtPath))
 		} else {
+			outcome = "rolled_back"
 			_, _ = fmt.Fprintln(progress, style.Dimf("Rolled back worktree %s after setup failure.", wtPath))
 		}
-		return nil, cliErr(cmd, errSetupFailed(err))
+		return nil, outcome, cliErr(cmd, errSetupFailed(err))
 	}
-	return alloc, nil
+	return alloc, "retained", nil
 }
 
 // ensureGitignored delegates to worktree.EnsureGitignored and prints a

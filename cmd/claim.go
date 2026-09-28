@@ -12,10 +12,15 @@ import (
 
 var claimPath string
 var claimNoSetup bool
+var claimInspectJSON bool
+var claimOperationID, claimRequestFile string
 
 func init() {
 	claimCmd.Flags().StringVar(&claimPath, "path", "", "Custom worktree path (default: ../<project>-<branch>)")
 	claimCmd.Flags().BoolVar(&claimNoSetup, "no-setup", false, "Create the worktree only — skip allocation, env, and setup commands (run 'gtl setup' later)")
+	claimCmd.Flags().BoolVar(&claimInspectJSON, "inspect-json", false, "Inspect exact host claim intent without effects")
+	claimCmd.Flags().StringVar(&claimOperationID, "operation-id", "", "Operation UUID for host claim inspection")
+	claimCmd.Flags().StringVar(&claimRequestFile, "request-file", "", "Execute an exact inspected host claim request")
 	claimCmd.ValidArgsFunction = completeBranches
 	rootCmd.AddCommand(claimCmd)
 }
@@ -41,6 +46,9 @@ safe to capture, e.g.: wt=$(gtl claim agent/some-branch)`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		branch := args[0]
+		if claimInspectJSON || claimRequestFile != "" || claimOperationID != "" {
+			return runHostClaim(cmd, branch)
+		}
 
 		cwd, err := os.Getwd()
 		if err != nil {
