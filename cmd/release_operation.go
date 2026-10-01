@@ -27,7 +27,7 @@ func newReleaseStatusCommand(registryPath string) *cobra.Command {
 		Use:               "status <operation-id>",
 		Short:             "Read a retained release operation as JSON without running cleanup",
 		Args:              cobra.ExactArgs(1),
-		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
+		PersistentPreRunE: guardAppManagedDev,
 		PersistentPostRun: func(*cobra.Command, []string) {},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]

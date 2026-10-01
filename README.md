@@ -321,6 +321,23 @@ or socket; structured release refuses unknown runtime ownership. Mixed old/new
 lifecycle writers and automatic live migration are not supported. Host rollout
 must require a compatible CLI before enabling this contract.
 
+App-managed development hosts (`TREELINE_MANAGED=app` and
+`TREELINE_CHANNEL=dev`) currently allow inspection only, using the canonical
+`GTL_HOME=$HOME/.treeline-dev/gtl`. Existing state directories must be owned by
+the current user: `.treeline-dev` must not be group/world writable, and `gtl`
+must be private. Neither directory nor its registry/config files may redirect
+through symlinks. Missing state is not created by inspection.
+
+Supported reads are `status --json`, `related --json`, `env`/`env show`, `routes`
+and `doctor` with `--json --read-only`, `claim --inspect-json --operation-id UUID`,
+and `release status UUID`, plus help/version. Status does not reap processes,
+create process trackers, or update stored branches. Other commands, including
+release inspection (which acquires filesystem locks), fail before effects with
+an explicit unavailable-resources error. This is interim containment, not working
+dev provisioning: separate files do not isolate database, Redis, port, router,
+hosts-file, or tunnel resources. Normal CLI use, including a standalone
+`GTL_HOME` override, retains its existing behavior.
+
 ### 14. Refresh after config changes
 
 ```bash

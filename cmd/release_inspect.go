@@ -19,7 +19,7 @@ func newReleaseInspectCommand(registryPath string) *cobra.Command {
 		Use:           "inspect <path> --operation-id <uuid>",
 		Short:         "Capture an exact release request as JSON without running cleanup",
 		SilenceErrors: true, SilenceUsage: true,
-		PersistentPreRunE:  func(*cobra.Command, []string) error { return nil },
+		PersistentPreRunE:  guardAppManagedDev,
 		PersistentPostRunE: func(*cobra.Command, []string) error { return nil },
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 || policy.ForceDirty && !policy.RemoveWorktree {

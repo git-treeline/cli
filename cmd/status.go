@@ -209,17 +209,20 @@ func renderStatus(ctx context.Context) error {
 	// way to tie a child's lifetime to its parent, so orphaned git probes are
 	// reaped by the next run instead. This keeps a repeatedly-killed poll from
 	// accumulating them — the process storm this bounding exists to prevent.
-	stateDir := platform.ConfigDir()
-	if n := process.ReapStale(stateDir); n > 0 {
-		fmt.Fprintf(os.Stderr, "note: reaped %d orphaned git process group(s) from a previous run\n", n)
+	readOnly := appManagedDev()
+	if !readOnly {
+		stateDir := platform.ConfigDir()
+		if n := process.ReapStale(stateDir); n > 0 {
+			fmt.Fprintf(os.Stderr, "note: reaped %d orphaned git process group(s) from a previous run\n", n)
+		}
+		tracker := process.NewTracker(stateDir)
+		defer tracker.Close()
+		ctx = process.WithTracker(ctx, tracker)
 	}
-	tracker := process.NewTracker(stateDir)
-	defer tracker.Close()
-	ctx = process.WithTracker(ctx, tracker)
 
 	reg := registry.New("")
 	var snapshot registry.RegistryData
-	if statusJSON {
+	if statusJSON || readOnly {
 		var err error
 		snapshot, err = reg.SnapshotStrict()
 		if err != nil {
@@ -316,7 +319,7 @@ func renderStatus(ctx context.Context) error {
 
 	// One lock acquisition for every branch write-back, and none once the
 	// budget is spent, so a contended registry costs at most one lock wait.
-	if len(branchChanges) > 0 && ctx.Err() == nil {
+	if !readOnly && len(branchChanges) > 0 && ctx.Err() == nil {
 		if err := reg.UpdateBranches(branchChanges); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not update branches in registry: %v\n", err)
 		}

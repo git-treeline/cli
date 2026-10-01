@@ -31,7 +31,7 @@ func newPublicReleaseCommand(registryPath string, factory releaseExecutorFactory
 	}
 	command := &cobra.Command{
 		Use: use, Short: short, SilenceErrors: true, SilenceUsage: true,
-		PersistentPreRunE:  func(*cobra.Command, []string) error { return nil },
+		PersistentPreRunE:  guardAppManagedDev,
 		PersistentPostRunE: func(*cobra.Command, []string) error { return nil },
 		RunE: func(cmd *cobra.Command, args []string) error {
 			response := releaseStatus{Schema: 1}

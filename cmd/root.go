@@ -20,6 +20,9 @@ var rootCmd = &cobra.Command{
 	Short:         "Worktree environment manager — ports, databases, and Redis across parallel development environments",
 	SilenceErrors: true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if appManagedDev() {
+			return guardAppManagedDev(cmd, args)
+		}
 		readOnly, err := readOnlyIntrospection(cmd)
 		if err != nil || readOnly {
 			return err
@@ -35,7 +38,7 @@ var rootCmd = &cobra.Command{
 		return nil
 	},
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
-		if readOnly, _ := readOnlyIntrospection(cmd); !readOnly {
+		if readOnly, _ := readOnlyIntrospection(cmd); !readOnly && !appManagedDev() {
 			printUpdateNotice()
 		}
 	},
