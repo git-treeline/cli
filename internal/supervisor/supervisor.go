@@ -47,7 +47,15 @@ const generationStatusCommand = "runtime-status-v1"
 func SocketPath(worktreePath string) string {
 	worktreePath = canonicalWorktreePath(worktreePath)
 	h := sha256.Sum256([]byte(worktreePath))
-	return fmt.Sprintf("/tmp/gtl-%d/gtl-%x.sock", os.Geteuid(), h[:8])
+	namespace := "gtl"
+	if appManagedDevNamespace() {
+		namespace = "gtl-dev"
+	}
+	return fmt.Sprintf("/tmp/%s-%d/gtl-%x.sock", namespace, os.Geteuid(), h[:8])
+}
+
+func appManagedDevNamespace() bool {
+	return os.Getenv("TREELINE_MANAGED") == "app" && os.Getenv("TREELINE_CHANNEL") == "dev"
 }
 
 func canonicalWorktreePath(worktreePath string) string {
@@ -106,6 +114,9 @@ func ShutdownLegacy(worktreePath string) error {
 }
 
 func legacySocketPaths(worktreePath string) []string {
+	if appManagedDevNamespace() {
+		return nil
+	}
 	raw := LegacySocketPath(worktreePath)
 	canonical := LegacySocketPath(canonicalWorktreePath(worktreePath))
 	if canonical == raw {
