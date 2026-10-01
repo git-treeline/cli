@@ -24,21 +24,34 @@ type releaseDriver struct {
 	databases       releaseDatabasesAdapter
 	hooks           releaseHooksAdapter
 	hosts           releaseHostsAdapter
+	skipHosts       bool
 	checkHosts      func(service.ManagedHostsSnapshot) error
 	validateRemoval func(string) (string, error)
 	remove          func(context.Context, registry.ReleaseOperation) registry.PhaseResult
 }
 
 func productionReleaseExecutor(reg *registry.Registry) (*releaseExecutor, error) {
+	d, err := productionReleaseDriver(reg)
+	if err != nil {
+		return nil, err
+	}
+	return &releaseExecutor{Registry: reg, Preflight: d.preflight, RunPhase: d.run, RecoverSupervisor: func(ctx context.Context, op registry.ReleaseOperation) bool { return d.runtimeFor(op).Recover(ctx, op) }}, nil
+}
+
+func productionReleaseDriver(reg *registry.Registry) (*releaseDriver, error) {
+	if appManagedDev() && appManagedDevHome() != nil {
+		return nil, releaseRefusal("config_unavailable")
+	}
 	uc := config.LoadUserConfig("")
 	if uc.LoadError() != nil || !releaseHostsDomainValid(uc.RouterDomain()) {
 		return nil, releaseRefusal("config_unavailable")
 	}
 	d := &releaseDriver{registry: reg, databases: releaseDatabasesAdapter{Registry: reg}, hooks: releaseHooksAdapter{Registry: reg, RunHook: RunCheckedHook}, hosts: releaseHostsAdapter{Registry: reg, Domain: uc.RouterDomain()}, checkHosts: service.CheckManagedHostsWrite, validateRemoval: worktree.ValidateRemoval, remove: releaseWorktreePhase}
+	d.skipHosts = appManagedDev() && uc.RouterMode() == config.RouterModeDisabled
 	d.runtime = releaseRuntimeAdapter{Registry: reg, Probe: func(ctx context.Context, owner runtimeowner.Owner) bool {
 		return ctx.Err() == nil && runtimeowner.VerifyOwner(owner)
 	}}
-	return &releaseExecutor{Registry: reg, Preflight: d.preflight, RunPhase: d.run, RecoverSupervisor: func(ctx context.Context, op registry.ReleaseOperation) bool { return d.runtimeFor(op).Recover(ctx, op) }}, nil
+	return d, nil
 }
 
 func (d *releaseDriver) runtimeFor(op registry.ReleaseOperation) releaseRuntimeAdapter {
@@ -126,7 +139,7 @@ func (d *releaseDriver) preflight(ctx context.Context, op registry.ReleaseOperat
 			return blocked
 		}
 	}
-	if remainingReleasePhase(op, registry.PhaseHosts) {
+	if !d.skipHosts && remainingReleasePhase(op, registry.PhaseHosts) {
 		domain := strings.ToLower(d.hosts.Domain)
 		if !releaseHostsDomainValid(domain) {
 			return registry.PhaseResult{State: "blocked", Code: "config_changed"}
@@ -176,6 +189,9 @@ func (d *releaseDriver) run(ctx context.Context, op registry.ReleaseOperation, p
 	case registry.PhaseDatabases:
 		return d.databases.Run(ctx, op)
 	case registry.PhaseHosts:
+		if d.skipHosts {
+			return registry.PhaseResult{State: "completed", Code: "ok"}
+		}
 		return d.hosts.Run(ctx, op)
 	case registry.PhaseWorktree:
 		if d.remove != nil {
