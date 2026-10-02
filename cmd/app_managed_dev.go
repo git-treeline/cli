@@ -38,8 +38,8 @@ func appManagedDev() bool {
 	return os.Getenv("TREELINE_MANAGED") == "app" && os.Getenv("TREELINE_CHANNEL") == "dev"
 }
 
-// App development hosts may inspect their private state, but provisioning is
-// withheld until ports, databases and services have independent ownership.
+// Inspection remains available without a pool. Lifecycle entry points also
+// validate the selected project and retained ownership before their effects.
 func guardAppManagedDev(cmd *cobra.Command, _ []string) error {
 	if !appManagedDev() {
 		return nil
@@ -74,6 +74,29 @@ func guardAppManagedDev(cmd *cobra.Command, _ []string) error {
 	}
 	if parent == "release" && cmd.Name() == "status" {
 		allowed = true
+	}
+	if !allowed {
+		lifecycle := false
+		if root {
+			switch cmd.Name() {
+			case "setup", "new", "start", "stop", "restart", "__supervise":
+				lifecycle = true
+			case "claim":
+				lifecycle = !flag("inspect-json") && (text("operation-id") == "" || publicReleaseUUID(text("operation-id")))
+			}
+		}
+		if parent == "release" {
+			switch cmd.Name() {
+			case "inspect", "start", "resume":
+				lifecycle = true
+			}
+		}
+		if lifecycle {
+			if _, err := devresources.Check(); err != nil {
+				return fmt.Errorf("app-managed dev resources are not configured: %w", err)
+			}
+			allowed = true
+		}
 	}
 	if !allowed {
 		return fmt.Errorf("app-managed dev resources are not configured: this command is unavailable; read-only inspection remains available")

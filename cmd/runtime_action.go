@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/devresources"
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/runtimeowner"
 	"github.com/git-treeline/cli/internal/setup"
@@ -51,6 +52,9 @@ func runTrackedRuntimeActionWith(ctx context.Context, dir, action string, effect
 	reg := registry.New("")
 	tracked, err := hasTrackedRuntime(reg, dir)
 	if err != nil || !tracked {
+		if devresources.Active() && err == nil {
+			return true, errors.New("managed dev runtime requires a tracked allocation")
+		}
 		return tracked, err
 	}
 	if ctx == nil || ctx.Err() != nil || (action != "stop" && action != "shutdown" && action != "restart") || effects.store == nil || effects.verify == nil || effects.status == nil || effects.command == nil || effects.shutdown == nil {
@@ -70,6 +74,9 @@ func runTrackedRuntimeActionWith(ctx context.Context, dir, action string, effect
 	}
 	allocation, err := reg.FindForRelease(dir)
 	if err != nil {
+		return true, err
+	}
+	if err := validateManagedDevRuntime(dir, allocation, false); err != nil {
 		return true, err
 	}
 	binding, err := registry.AllocationRuntimeBinding(allocation)
@@ -107,6 +114,11 @@ func runTrackedRuntimeActionWith(ctx context.Context, dir, action string, effect
 	state, err := effects.status(socket, binding.Generation)
 	if err != nil || state != "owned" {
 		return true, runtimeowner.ErrUnknown
+	}
+	if devresources.Active() {
+		if err := supervisor.RequireManagedDevAdmission(socket); err != nil {
+			return true, err
+		}
 	}
 	current, err := store.Query(ctx, record.Binding)
 	if err != nil || !reflect.DeepEqual(current, record) || ctx.Err() != nil {

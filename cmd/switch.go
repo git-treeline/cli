@@ -61,7 +61,7 @@ Must be run from inside a worktree (not the main repo).`,
 				return creationSelection{}, err
 			}
 			if current == source {
-				return creationSelection{}, errNotInWorktree()
+				return creationSelection{}, cliErr(cmd, errNotInWorktree())
 			}
 			return creationSelection{source: source, target: current, inPlace: true}, nil
 		}

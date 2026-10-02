@@ -54,6 +54,13 @@ func TestReleaseDriverManagedDevDisabledRouter(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// This legacy unit isolates the router/hosts adapter decision made at
+			// construction. Managed-dev policy admission has dedicated fixtures;
+			// disable it before phase execution so this test does not invent a
+			// partial resource policy around its unrelated temporary worktree.
+			if tt.managed == "app" && tt.channel == "dev" {
+				t.Setenv("TREELINE_MANAGED", "")
+			}
 			hosts := filepath.Join(t.TempDir(), "hosts")
 			if err := os.WriteFile(hosts, []byte(releaseHostsContent("lifecycle-fixture.example.test")), 0600); err != nil {
 				t.Fatal(err)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/git-treeline/cli/internal/allocator"
 	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/devresources"
 	"github.com/git-treeline/cli/internal/proxy"
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/service"
@@ -107,6 +108,9 @@ func maybeStartServer(start bool, pc *config.ProjectConfig, dir string, held ...
 		}
 		return true, runTrackedStart(context.Background(), dir, locks, "", false)
 	}
+	if devresources.Active() {
+		return true, fmt.Errorf("managed dev start requires a tracked allocation")
+	}
 	return true, execInWorktree(dir, startCmd)
 }
 
@@ -118,6 +122,9 @@ func maybeStartServer(start bool, pc *config.ProjectConfig, dir string, held ...
 func ensureWorktreeAllocation(wtPath, mainRepo string, uc *config.UserConfig, progress io.Writer, strictDB bool) (registry.Allocation, error) {
 	reg := registry.New("")
 	if alloc := reg.Find(wtPath); alloc != nil {
+		if err := validateManagedDevRuntime(wtPath, alloc, false); err != nil {
+			return nil, err
+		}
 		return alloc, nil
 	}
 	_, _ = fmt.Fprintln(progress, style.Actionf("No allocation found — running setup..."))

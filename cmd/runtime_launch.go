@@ -3,16 +3,94 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"reflect"
+	"slices"
 
 	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/devresources"
 	"github.com/git-treeline/cli/internal/format"
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/runtimeowner"
 	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/supervisor"
+	"github.com/git-treeline/cli/internal/worktree"
 )
+
+var managedDevPortAvailable = func(port int) error {
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return fmt.Errorf("managed dev port %d is occupied", port)
+	}
+	if err := listener.Close(); err != nil {
+		return fmt.Errorf("releasing managed dev port probe %d: %w", port, err)
+	}
+	return nil
+}
+
+func validateManagedDevRuntime(dir string, allocation registry.Allocation, requireFree bool) error {
+	if !devresources.Active() {
+		return nil
+	}
+	policy, err := devresources.Check()
+	if err != nil || policy == nil || allocation == nil {
+		return errors.New("managed dev runtime policy unavailable")
+	}
+	pc := config.LoadProjectConfigReadOnlyQuiet(dir)
+	if err := setup.ValidateManagedDevProject(dir, dir, pc); err != nil {
+		return err
+	}
+	if err := policy.ValidateAllocation(map[string]any(allocation)); err != nil {
+		return err
+	}
+	branch := worktree.CurrentBranch(dir)
+	main := false
+	if raw, present := allocation["main_worktree"]; present {
+		var ok bool
+		main, ok = raw.(bool)
+		if !ok {
+			return errors.New("managed dev runtime project identity unavailable")
+		}
+	}
+	if branch == "" || registry.GetString(allocation, "project") != pc.Project() || registry.GetString(allocation, "branch") != branch {
+		return errors.New("managed dev runtime project identity changed")
+	}
+	expected, err := policy.Ports(pc.Project(), branch, main, pc.PortsNeeded())
+	if err != nil || !slices.Equal(expected, registry.ExtractPorts(allocation)) {
+		return errors.New("managed dev runtime port contract changed")
+	}
+	if !requireFree {
+		return nil
+	}
+	for _, port := range registry.ExtractPorts(allocation) {
+		if err := managedDevPortAvailable(port); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func installManagedDevRuntimeAdmission(sv *supervisor.Supervisor, dir string) {
+	if !devresources.Active() {
+		return
+	}
+	sv.BeforeChildStart = func(port int) error {
+		allocation, err := registry.New("").FindForRelease(dir)
+		if err != nil {
+			return err
+		}
+		if err := validateManagedDevRuntime(dir, allocation, true); err != nil {
+			return err
+		}
+		ports := registry.ExtractPorts(allocation)
+		if len(ports) == 0 || ports[0] != port {
+			return errors.New("managed dev runtime port changed")
+		}
+		return nil
+	}
+}
 
 func hasTrackedRuntime(reg *registry.Registry, dir string) (bool, error) {
 	allocation, err := reg.FindForRelease(dir)
@@ -84,11 +162,19 @@ func runTrackedStartWith(ctx context.Context, dir string, locks *registry.Lifecy
 	if err != nil {
 		return err
 	}
+	if err := validateManagedDevRuntime(dir, allocation, false); err != nil {
+		return err
+	}
 	binding, err := registry.AllocationRuntimeBinding(allocation)
 	if err != nil {
 		return err
 	}
 	if binding.Kind == "supervisor" {
+		if devresources.Active() {
+			if err := supervisor.RequireManagedDevAdmission(socket); err != nil {
+				return err
+			}
+		}
 		prior, err := store.Get(ctx, binding.Generation)
 		if err != nil {
 			return err
@@ -156,6 +242,7 @@ func runTrackedStartWith(ctx context.Context, dir string, locks *registry.Lifecy
 	}
 	sv := supervisor.New(pc.StartCommand(), dir, socket)
 	sv.Env, sv.Port = env, port
+	installManagedDevRuntimeAdmission(sv, dir)
 	if err := configureTrackedRuntime(sv, store, h, owner, effects.hook); err != nil {
 		return err
 	}

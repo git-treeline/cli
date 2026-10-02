@@ -14,6 +14,23 @@ import (
 
 var ansiEscapeRE = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
+func TestManagedDevImplicitStartRefusesLegacyExecution(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GTL_HOME", filepath.Join(root, "private-gtl"))
+	t.Setenv("TREELINE_MANAGED", "app")
+	t.Setenv("TREELINE_CHANNEL", "dev")
+	pc := &config.ProjectConfig{Data: map[string]any{
+		"commands": map[string]any{"start": "touch unexpected-start"},
+	}}
+	handled, err := maybeStartServer(true, pc, root)
+	if !handled || err == nil || !strings.Contains(err.Error(), "tracked allocation") {
+		t.Fatalf("legacy execution was not refused: %t %v", handled, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "unexpected-start")); !os.IsNotExist(err) {
+		t.Fatalf("legacy start ran: %v", err)
+	}
+}
+
 func TestWarnServeNotInstalled_MentionsInstallCommands(t *testing.T) {
 	gtlHome := filepath.Join(t.TempDir(), "gtl-home")
 	t.Setenv("GTL_HOME", gtlHome)

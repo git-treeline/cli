@@ -41,6 +41,7 @@ const settledShutdownAcknowledgement = "settled-v1"
 const generationShutdownCommand = "shutdown-settled-v2"
 const generationShutdownAcknowledgement = "settled-v2"
 const generationStatusCommand = "runtime-status-v1"
+const managedDevAdmissionCommand = "managed-dev-admission-v1"
 
 // SocketPath returns a short, deterministic socket path in a private,
 // per-user directory under /tmp. It does not create that directory.
@@ -218,6 +219,13 @@ type Supervisor struct {
 	// launches, before socket requests are served. It must not reenter lifecycle
 	// operations; callers use it to release their startup reservation.
 	Started func()
+	// BeforeChildStart revalidates external admission immediately before every
+	// child launch, including socket-driven resume and restart.
+	BeforeChildStart func(port int) error
+	// ListenerOwned proves that a ready TCP listener belongs to the supervised
+	// child process group. Managed dev refuses readiness when this proof is
+	// unavailable; ordinary channels retain their existing TCP readiness rule.
+	ListenerOwned func(port, childPGID int) bool
 
 	generationOnce      sync.Once
 	runtimeGeneration   string
@@ -313,6 +321,7 @@ func New(command, dir, socketPath string) *Supervisor {
 		ChildStderr:       os.Stderr,
 		StopTimeout:       10 * time.Second,
 		KillTimeout:       5 * time.Second,
+		ListenerOwned:     ownedTCPListener,
 		done:              make(chan struct{}),
 	}
 }
@@ -453,6 +462,11 @@ func (s *Supervisor) startChildLocked() error {
 	}
 	if s.childPGID > 1 && processGroupAlive(s.childPGID) {
 		return fmt.Errorf("child process group %d is still running", s.childPGID)
+	}
+	if s.BeforeChildStart != nil {
+		if err := s.BeforeChildStart(s.Port); err != nil {
+			return fmt.Errorf("runtime admission changed: %w", err)
+		}
 	}
 
 	s.refreshCommandLocked()
@@ -920,6 +934,12 @@ func (s *Supervisor) handleConn(conn net.Conn) {
 			return
 		}
 		_, _ = fmt.Fprint(conn, resp)
+	case managedDevAdmissionCommand:
+		if s.BeforeChildStart == nil {
+			_, _ = fmt.Fprint(conn, "error: managed dev runtime admission unavailable")
+			return
+		}
+		_, _ = fmt.Fprint(conn, "ok")
 	case "wait-ready":
 		timeout := 60 * time.Second
 		if len(parts) > 1 {
@@ -931,6 +951,19 @@ func (s *Supervisor) handleConn(conn net.Conn) {
 	default:
 		_, _ = fmt.Fprintf(conn, "unknown command: %s", raw)
 	}
+}
+
+// RequireManagedDevAdmission refuses an older supervisor that cannot recheck
+// policy at the final child-launch boundary.
+func RequireManagedDevAdmission(socketPath string) error {
+	response, err := Send(socketPath, managedDevAdmissionCommand)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(response) != "ok" {
+		return errors.New("managed dev supervisor admission unavailable")
+	}
+	return nil
 }
 
 func (s *Supervisor) configureAndAct(request configureRequest) (string, error) {
@@ -990,21 +1023,37 @@ func (s *Supervisor) handleWaitReady(conn net.Conn, timeout time.Duration) {
 	for {
 		s.mu.Lock()
 		port = s.Port
+		pgid := s.childPGID
+		childDone := s.childDone
+		running := pgid > 1 && processGroupAlive(pgid)
+		stopping := s.stopping
 		s.mu.Unlock()
 		addr := fmt.Sprintf("127.0.0.1:%d", port)
 		c, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
 		if err == nil {
 			_ = c.Close()
-			_, _ = fmt.Fprint(conn, "ok")
-			return
+			if !appManagedDevNamespace() {
+				_, _ = fmt.Fprint(conn, "ok")
+				return
+			}
+			if running && s.ListenerOwned != nil && s.ListenerOwned(port, pgid) {
+				s.mu.Lock()
+				sameChild := s.childPGID == pgid && s.childDone == childDone && !s.stopping && !s.terminal && processGroupAlive(pgid)
+				if sameChild && childDone != nil {
+					select {
+					case <-childDone:
+						sameChild = false
+					default:
+					}
+				}
+				s.mu.Unlock()
+				if sameChild {
+					_, _ = fmt.Fprint(conn, "ok")
+					return
+				}
+			}
 		}
-
-		s.mu.Lock()
-		childDone := s.childDone
-		running := s.childPGID > 1 && processGroupAlive(s.childPGID)
-		s.mu.Unlock()
-
-		if !running {
+		if !running && !stopping {
 			_, _ = fmt.Fprint(conn, "error: server not running")
 			return
 		}

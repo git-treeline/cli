@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -18,6 +19,7 @@ import (
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/confirm"
 	"github.com/git-treeline/cli/internal/detect"
+	"github.com/git-treeline/cli/internal/devresources"
 	"github.com/git-treeline/cli/internal/format"
 	"github.com/git-treeline/cli/internal/platform"
 	"github.com/git-treeline/cli/internal/process"
@@ -80,6 +82,18 @@ var superviseCmd = &cobra.Command{
 		if runtime.CommandTemplate == "" || runtime.Dir == "" || runtime.SocketPath == "" {
 			return fmt.Errorf("invalid supervisor runtime configuration")
 		}
+		if devresources.Active() && handoff == nil {
+			return fmt.Errorf("managed dev supervisor requires a tracked runtime handoff")
+		}
+		if devresources.Active() {
+			allocation, err := registry.New("").FindForRelease(runtime.Dir)
+			if err != nil {
+				return err
+			}
+			if err := validateManagedDevRuntime(runtime.Dir, allocation, false); err != nil {
+				return err
+			}
+		}
 		// The parent only removes this file if it knows the re-exec never claimed
 		// it. Once decoded, this process owns hooks and lifecycle cleanup.
 		if err := os.Remove(superviseConfigPath); err != nil {
@@ -90,6 +104,7 @@ var superviseCmd = &cobra.Command{
 		sv.CommandTemplate = runtime.CommandTemplate
 		sv.Env = runtime.Env
 		sv.Port = runtime.Port
+		installManagedDevRuntimeAdmission(sv, runtime.Dir)
 		if handoff != nil {
 			allocation, err := registry.New("").FindForRelease(runtime.Dir)
 			if err != nil {
@@ -142,6 +157,9 @@ resumes the server in the original terminal. Ctrl+C exits the supervisor.`,
 		}
 		if tracked {
 			return cliErr(cmd, runTrackedStart(cmd.Context(), absPath, nil, startWith, startAwait))
+		}
+		if devresources.Active() {
+			return cliErr(cmd, errors.New("managed dev runtime requires a tracked allocation"))
 		}
 		pc := config.LoadProjectConfig(absPath)
 

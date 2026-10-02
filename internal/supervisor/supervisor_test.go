@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -321,6 +322,104 @@ func TestSupervisor_ConfigureRestartSerializesWithWaitReady(t *testing.T) {
 		t.Fatalf("wait-ready did not observe atomically updated port: %q", resp)
 	}
 
+	_, _ = Send(sock, "shutdown")
+	<-errCh
+}
+
+func TestSupervisor_ManagedDevWaitReadyRejectsForeignListener(t *testing.T) {
+	t.Setenv("TREELINE_MANAGED", "app")
+	t.Setenv("TREELINE_CHANNEL", "dev")
+	dir := t.TempDir()
+	sock := tmpSocket(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	sv := newTestSupervisor(t, "sleep 60", dir, sock)
+	sv.Port = listener.Addr().(*net.TCPAddr).Port
+	sv.ListenerOwned = func(port, pgid int) bool { return false }
+	errCh := make(chan error, 1)
+	go func() { errCh <- sv.Run() }()
+	waitForSocket(t, sock, 2*time.Second)
+
+	resp, err := SendWithTimeout(sock, "wait-ready:1", 2*time.Second)
+	if err != nil {
+		t.Fatalf("wait-ready failed: %v", err)
+	}
+	if resp == "ok" || !strings.Contains(resp, "timeout waiting for port") {
+		t.Fatalf("foreign listener reported ready: %q", resp)
+	}
+	if _, err := listener.Accept(); err != nil {
+		t.Fatalf("foreign listener was disturbed: %v", err)
+	}
+	_, _ = Send(sock, "shutdown")
+	<-errCh
+}
+
+func TestSupervisor_ManagedDevChecksEveryChildStart(t *testing.T) {
+	t.Setenv("TREELINE_MANAGED", "app")
+	t.Setenv("TREELINE_CHANNEL", "dev")
+	dir := t.TempDir()
+	sock := tmpSocket(t)
+	var checks atomic.Int32
+	sv := newTestSupervisor(t, "sleep 60", dir, sock)
+	sv.BeforeChildStart = func(port int) error {
+		if checks.Add(1) > 1 {
+			return errors.New("policy drift")
+		}
+		return nil
+	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- sv.Run() }()
+	waitForSocket(t, sock, 2*time.Second)
+
+	resp, err := Send(sock, "restart")
+	if err != nil {
+		t.Fatalf("restart request failed: %v", err)
+	}
+	if !strings.Contains(resp, "runtime admission changed: policy drift") {
+		t.Fatalf("restart response = %q", resp)
+	}
+	if checks.Load() != 2 {
+		t.Fatalf("admission checks = %d, want 2", checks.Load())
+	}
+	_, _ = Send(sock, "shutdown")
+	<-errCh
+}
+
+func TestSupervisor_ManagedDevWaitReadyRejectsStaleOwnershipProof(t *testing.T) {
+	t.Setenv("TREELINE_MANAGED", "app")
+	t.Setenv("TREELINE_CHANNEL", "dev")
+	dir := t.TempDir()
+	sock := tmpSocket(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	sv := newTestSupervisor(t, "sleep 60", dir, sock)
+	sv.Port = listener.Addr().(*net.TCPAddr).Port
+	sv.ListenerOwned = func(port, pgid int) bool {
+		sv.mu.Lock()
+		sv.stopping = true
+		sv.mu.Unlock()
+		return true
+	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- sv.Run() }()
+	waitForSocket(t, sock, 2*time.Second)
+	resp, err := SendWithTimeout(sock, "wait-ready:1", 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == "ok" {
+		t.Fatal("stale listener ownership reported ready")
+	}
+	sv.mu.Lock()
+	sv.stopping = false
+	sv.mu.Unlock()
 	_, _ = Send(sock, "shutdown")
 	<-errCh
 }

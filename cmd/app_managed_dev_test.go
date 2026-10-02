@@ -145,6 +145,38 @@ func TestAppManagedDevResourceInspectionDoesNotWrite(t *testing.T) {
 	}
 }
 
+func TestAppManagedDevConfiguredLifecycleAllowlist(t *testing.T) {
+	managedDevRuntimeFixture(t)
+	for _, tc := range []struct {
+		parent, name string
+		allowed      bool
+	}{
+		{"", "setup", true}, {"", "new", true}, {"", "claim", true},
+		{"", "start", true}, {"", "stop", true}, {"", "restart", true}, {"", "__supervise", true},
+		{"release", "inspect", true}, {"release", "start", true}, {"release", "resume", true},
+		{"", "release", false}, {"db", "reset", false}, {"db", "drop", false},
+		{"config", "set", false}, {"serve", "install", false}, {"", "tunnel", false},
+		{"", "provision", false}, {"", "install", false}, {"registry", "repair", false},
+	} {
+		t.Run(tc.parent+"/"+tc.name, func(t *testing.T) {
+			root := &cobra.Command{Use: "gtl"}
+			parent := root
+			if tc.parent != "" {
+				parent = &cobra.Command{Use: tc.parent}
+				root.AddCommand(parent)
+			}
+			command := &cobra.Command{Use: tc.name}
+			command.Flags().Bool("inspect-json", false, "")
+			command.Flags().String("operation-id", "", "")
+			command.Flags().String("request-file", "", "")
+			parent.AddCommand(command)
+			if err := guardAppManagedDev(command, nil); (err == nil) != tc.allowed {
+				t.Fatalf("allow=%t: %v", tc.allowed, err)
+			}
+		})
+	}
+}
+
 func TestAppManagedDevRequiresPrivateCanonicalHome(t *testing.T) {
 	for _, variant := range []string{"missing", "shared", "relative", "dotdot", "parent-symlink", "home-symlink", "public-mode", "writable-parent", "registry-symlink", "config-symlink"} {
 		t.Run(variant, func(t *testing.T) {

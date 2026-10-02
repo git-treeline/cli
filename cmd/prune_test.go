@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -42,7 +43,7 @@ func TestRemovedAllocations_NoneRemoved(t *testing.T) {
 }
 
 // prunableAllocations selects exactly the allocations whose worktree directory
-// no longer exists on disk; live directories and pathless entries are kept.
+// no longer exists on disk; live directories are kept.
 func TestPrunableAllocations_SelectsMissingDirs(t *testing.T) {
 	// Resolve the temp dir so the paths stored by Allocate (which canonicalizes
 	// through symlinked ancestors, e.g. macOS /var -> /private/var) compare
@@ -61,7 +62,6 @@ func TestPrunableAllocations_SelectsMissingDirs(t *testing.T) {
 	for _, a := range []registry.Allocation{
 		{"worktree": live, "project": "a"},
 		{"worktree": gone, "project": "b"},
-		{"project": "c"}, // no worktree path — skipped
 	} {
 		if err := reg.Allocate(a); err != nil {
 			t.Fatal(err)
@@ -74,6 +74,34 @@ func TestPrunableAllocations_SelectsMissingDirs(t *testing.T) {
 	}
 	if registry.GetString(got[0], "worktree") != gone {
 		t.Errorf("expected the missing dir to be prunable, got %+v", got[0])
+	}
+}
+
+func TestPrunableAllocations_LegacyPathlessReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "registry.json")
+	legacy := registry.RegistryData{
+		Version:     2,
+		Allocations: []registry.Allocation{{"project": "legacy-without-worktree"}},
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := registry.New(path)
+	if got := prunableAllocations(reg); len(got) != 0 {
+		t.Fatalf("legacy pathless allocation should be retained by read-only preview: %+v", got)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(data) {
+		t.Fatal("read-only prune preview rewrote the legacy registry fixture")
 	}
 }
 

@@ -3,17 +3,21 @@ package cmd
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/devresources"
 	"github.com/git-treeline/cli/internal/format"
 	"github.com/git-treeline/cli/internal/proxy"
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/runtimeowner"
 	"github.com/git-treeline/cli/internal/service"
+	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/supervisor"
 	"github.com/git-treeline/cli/internal/worktree"
 )
@@ -28,6 +32,104 @@ type releaseDriver struct {
 	checkHosts      func(service.ManagedHostsSnapshot) error
 	validateRemoval func(string) (string, error)
 	remove          func(context.Context, registry.ReleaseOperation) registry.PhaseResult
+}
+
+func validateManagedDevRelease(op registry.ReleaseOperation) error {
+	if !devresources.Active() {
+		return nil
+	}
+	if err := validateManagedDevRetainedTarget(op.Target); err != nil {
+		return err
+	}
+	if op.HooksDigest != (releaseHookPlan{}).digest() {
+		return errors.New("managed dev release hooks are unavailable")
+	}
+	if op.Snapshot == nil {
+		if op.Allocation.Kind != "unallocated" {
+			return errors.New("managed dev release allocation unavailable")
+		}
+		if _, err := devresources.Check(); err != nil {
+			return errors.New("managed dev release policy unavailable")
+		}
+		if _, err := os.Stat(op.Target.Path); err == nil {
+			return setup.ValidateManagedDevProject(op.Target.Path, op.Target.Path, config.LoadProjectConfigReadOnlyQuiet(op.Target.Path))
+		} else if !os.IsNotExist(err) || remainingReleasePhase(op, registry.PhaseWorktree) {
+			return errors.New("managed dev release target unavailable")
+		}
+		return nil
+	}
+	snapshot := op.Snapshot
+	if snapshot.DatabaseAdapter != "" || len(snapshot.Databases) != 0 || snapshot.RedisDB != nil {
+		return errors.New("managed dev release resources are unavailable")
+	}
+	allocation := registry.Allocation{
+		"worktree":      op.Target.Path,
+		"project":       snapshot.Project,
+		"branch":        snapshot.Branch,
+		"main_worktree": snapshot.MainWorktree,
+		"ports":         snapshot.Ports,
+		"databases":     snapshot.Databases,
+	}
+	if snapshot.RedisDB != nil {
+		allocation["redis_db"] = *snapshot.RedisDB
+	}
+	policy, err := devresources.Check()
+	if err != nil || policy == nil {
+		return errors.New("managed dev release policy unavailable")
+	}
+	if err := policy.ValidateAllocation(map[string]any(allocation)); err != nil {
+		return err
+	}
+	current, err := registry.New("").FindForRelease(op.Target.Path)
+	if err != nil {
+		return err
+	}
+	if current != nil {
+		if registry.GetString(current, "allocation_generation") != op.Allocation.Generation {
+			return errors.New("managed dev release allocation changed")
+		}
+		if err := policy.ValidateAllocation(map[string]any(current)); err != nil {
+			return err
+		}
+	} else if remainingReleasePhase(op, registry.PhaseAllocation) {
+		return errors.New("managed dev release allocation proof unavailable")
+	}
+	if _, err := os.Stat(op.Target.Path); err == nil {
+		return setup.ValidateManagedDevProject(op.Target.Path, op.Target.Path, config.LoadProjectConfigReadOnlyQuiet(op.Target.Path))
+	} else if !os.IsNotExist(err) || remainingReleasePhase(op, registry.PhaseWorktree) {
+		return errors.New("managed dev release target unavailable")
+	}
+	return nil
+}
+
+func validateManagedDevRetainedTarget(target registry.TargetIdentity) error {
+	home, err := os.UserHomeDir()
+	if err != nil || !filepath.IsAbs(home) {
+		return errors.New("managed dev workspace root unavailable")
+	}
+	home, err = filepath.EvalSymlinks(home)
+	if err != nil {
+		return errors.New("managed dev workspace root unavailable")
+	}
+	root := filepath.Join(home, ".treeline-dev", "workspaces")
+	canonicalRoot, err := registry.CanonicalLifecycleTarget(root)
+	if err != nil || canonicalRoot != root {
+		return errors.New("managed dev workspace root unavailable")
+	}
+	contained := func(path string) bool {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return false
+		}
+		canonical, err := registry.CanonicalLifecycleTarget(path)
+		return err == nil && canonical == path && strings.HasPrefix(path, root+string(filepath.Separator))
+	}
+	if !contained(target.Path) {
+		return errors.New("managed dev release target outside disposable workspace")
+	}
+	if target.Common != nil && !contained(target.Common.Path) {
+		return errors.New("managed dev release Git metadata outside disposable workspace")
+	}
+	return nil
 }
 
 func productionReleaseExecutor(reg *registry.Registry) (*releaseExecutor, error) {
@@ -81,6 +183,9 @@ func remainingReleasePhase(op registry.ReleaseOperation, name registry.ReleasePh
 
 func (d *releaseDriver) preflight(ctx context.Context, op registry.ReleaseOperation) registry.PhaseResult {
 	blocked := registry.PhaseResult{State: "blocked", Code: "failed"}
+	if err := validateManagedDevRelease(op); err != nil {
+		return blocked
+	}
 	if ctx.Err() != nil || d.registry == nil || registry.VerifyReleaseTarget(op.Target) != nil {
 		return blocked
 	}
@@ -181,6 +286,9 @@ func (d *releaseDriver) preflight(ctx context.Context, op registry.ReleaseOperat
 }
 
 func (d *releaseDriver) run(ctx context.Context, op registry.ReleaseOperation, phase registry.ReleasePhase) registry.PhaseResult {
+	if err := validateManagedDevRelease(op); err != nil {
+		return registry.PhaseResult{State: "blocked", Code: "failed"}
+	}
 	switch phase {
 	case registry.PhasePreHook, registry.PhasePostHook:
 		return d.hooks.Run(ctx, op, phase)
