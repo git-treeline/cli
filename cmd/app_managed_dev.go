@@ -1,13 +1,38 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
 
+	"github.com/git-treeline/cli/internal/devresources"
 	"github.com/spf13/cobra"
 )
+
+func init() {
+	command := &cobra.Command{
+		Use:    "dev-resources",
+		Short:  "Inspect the private Mac development resource contract without changes",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			jsonOutput, _ := cmd.Flags().GetBool("json")
+			if !appManagedDev() || !jsonOutput {
+				return fmt.Errorf("dev-resources requires app-managed dev and --json")
+			}
+			if _, err := devresources.Check(); err != nil {
+				return err
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+				"ready": true, "contract": "mac-dev-port-pool-v1",
+			})
+		},
+	}
+	command.Flags().Bool("json", false, "Return the resource admission result as JSON")
+	rootCmd.AddCommand(command)
+}
 
 func appManagedDev() bool {
 	return os.Getenv("TREELINE_MANAGED") == "app" && os.Getenv("TREELINE_CHANNEL") == "dev"
@@ -32,6 +57,8 @@ func guardAppManagedDev(cmd *cobra.Command, _ []string) error {
 	allowed := cmd.Name() == "help" || root && cmd.Name() == "version"
 	if root {
 		switch cmd.Name() {
+		case "dev-resources":
+			allowed = flag("json")
 		case "status":
 			allowed = flag("json") && !flag("watch")
 		case "related":

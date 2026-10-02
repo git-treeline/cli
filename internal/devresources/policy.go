@@ -1,0 +1,468 @@
+// Package devresources admits the finite, explicitly reserved managed-dev pool.
+package devresources
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io"
+	"math"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"syscall"
+)
+
+const increment = 10
+
+var blocks = [...]int{42000, 42010, 42020, 42030}
+var identifier = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+var refusal = errors.New("managed dev resource policy unavailable")
+
+type Policy struct{ reservations map[string]int }
+
+func Active() bool {
+	return os.Getenv("TREELINE_MANAGED") == "app" && os.Getenv("TREELINE_CHANNEL") == "dev"
+}
+
+// Check reads existing configuration and normal allocations without creating,
+// repairing or locking either state directory. Call again before each effect.
+func Check() (*Policy, error) {
+	if !Active() {
+		return nil, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || !filepath.IsAbs(home) {
+		return nil, refusal
+	}
+	home, err = filepath.EvalSymlinks(home)
+	if err != nil {
+		return nil, refusal
+	}
+	private := filepath.Join(home, ".treeline-dev", "gtl")
+	if os.Getenv("GTL_HOME") != private {
+		return nil, refusal
+	}
+	normal := filepath.Join(home, "Library", "Application Support", "git-treeline")
+	uc, err := readObject(home, filepath.Join(normal, "config.json"), false)
+	if err != nil {
+		return nil, refusal
+	}
+	pc, err := readObject(home, filepath.Join(private, "config.json"), true)
+	if err != nil {
+		return nil, refusal
+	}
+	reg, err := readObject(home, filepath.Join(normal, "registry.json"), false)
+	if err != nil {
+		return nil, refusal
+	}
+	for _, key := range []string{"redis", "tunnel", "editor"} {
+		if value, present := pc[key]; present {
+			entries, ok := value.(map[string]any)
+			if !ok || len(entries) != 0 {
+				return nil, refusal
+			}
+		}
+	}
+	if router, present := uc["router"]; present {
+		entries, ok := router.(map[string]any)
+		if !ok {
+			return nil, refusal
+		}
+		if value, present := entries["port"]; present {
+			port, ok := portNumber(value)
+			if !ok || port >= blocks[0] && port < blocks[len(blocks)-1]+increment {
+				return nil, refusal
+			}
+		}
+	}
+	normalPorts, ok := uc["port"].(map[string]any)
+	if !ok || !equalsInt(normalPorts["increment"], increment) {
+		return nil, refusal
+	}
+	reservations, ok := normalPorts["reservations"].(map[string]any)
+	if !ok {
+		return nil, refusal
+	}
+	for i, base := range blocks {
+		key := "@treeline-dev-qa/slot-0" + strconv.Itoa(i+1)
+		if !equalsInt(reservations[key], base) {
+			return nil, refusal
+		}
+	}
+	for key, value := range reservations {
+		base, ok := portNumber(value)
+		if !ok || base+increment-1 > 65535 {
+			return nil, refusal
+		}
+		for i, reserved := range blocks {
+			if base <= reserved+increment-1 && base+increment-1 >= reserved && key != "@treeline-dev-qa/slot-0"+strconv.Itoa(i+1) {
+				return nil, refusal
+			}
+		}
+	}
+	privatePorts, ok := pc["port"].(map[string]any)
+	if !ok || !equalsInt(privatePorts["increment"], increment) {
+		return nil, refusal
+	}
+	if base, present := privatePorts["base"]; present {
+		if _, ok := portNumber(base); !ok {
+			return nil, refusal
+		}
+	}
+	router, ok := pc["router"].(map[string]any)
+	if !ok || router["mode"] != "disabled" {
+		return nil, refusal
+	}
+	raw, ok := privatePorts["reservations"].(map[string]any)
+	if !ok || len(raw) == 0 || len(raw) > len(blocks) {
+		return nil, refusal
+	}
+	policy := &Policy{reservations: make(map[string]int, len(raw))}
+	seen := map[int]bool{}
+	for key, value := range raw {
+		project, branch, split := strings.Cut(key, "/")
+		if !identifier.MatchString(project) || split && !validBranch(branch) {
+			return nil, refusal
+		}
+		base, ok := portNumber(value)
+		if !ok || !blockBase(base) || seen[base] {
+			return nil, refusal
+		}
+		seen[base] = true
+		policy.reservations[key] = base
+	}
+	version, ok := integer(reg["version"])
+	if !ok || version < 2 || version > 4 {
+		return nil, refusal
+	}
+	allocations, ok := reg["allocations"].([]any)
+	if !ok {
+		return nil, refusal
+	}
+	for _, raw := range allocations {
+		allocation, ok := raw.(map[string]any)
+		if !ok {
+			return nil, refusal
+		}
+		ports, err := allocationPorts(allocation)
+		if err != nil {
+			return nil, refusal
+		}
+		for _, port := range ports {
+			if port >= blocks[0] && port < blocks[len(blocks)-1]+increment {
+				return nil, refusal
+			}
+		}
+	}
+	return policy, nil
+}
+
+func (p *Policy) Ports(project, branch string, main bool, count int) ([]int, error) {
+	if p == nil || !identifier.MatchString(project) || count < 1 || count > increment || branch != "" && !validBranch(branch) {
+		return nil, refusal
+	}
+	base, ok := p.reservations[project+"/"+branch]
+	if !ok && main {
+		base, ok = p.reservations[project]
+	}
+	if !ok || !blockBase(base) {
+		return nil, refusal
+	}
+	ports := make([]int, count)
+	for i := range ports {
+		ports[i] = base + i
+	}
+	return ports, nil
+}
+
+func (p *Policy) ValidateAllocation(a map[string]any) error {
+	project, ok := a["project"].(string)
+	if !ok {
+		return refusal
+	}
+	branch, ok := a["branch"].(string)
+	if !ok {
+		return refusal
+	}
+	main := false
+	if value, present := a["main_worktree"]; present {
+		var ok bool
+		main, ok = value.(bool)
+		if !ok {
+			return refusal
+		}
+	}
+	ports, err := allocationPorts(a)
+	if err != nil {
+		return refusal
+	}
+	expected, err := p.Ports(project, branch, main, len(ports))
+	if err != nil {
+		return refusal
+	}
+	for i, port := range ports {
+		if port != expected[i] {
+			return refusal
+		}
+	}
+	for _, key := range []string{"database", "redis_prefix"} {
+		if value, present := a[key]; present && value != nil {
+			if text, ok := value.(string); !ok || text != "" {
+				return refusal
+			}
+		}
+	}
+	if value, present := a["redis_db"]; present && value != nil {
+		return refusal
+	}
+	if value, present := a["databases"]; present && value != nil {
+		switch v := value.(type) {
+		case []any:
+			if len(v) != 0 {
+				return refusal
+			}
+		case []string:
+			if len(v) != 0 {
+				return refusal
+			}
+		default:
+			return refusal
+		}
+	}
+	if value, present := a["database_extra"]; present && value != nil {
+		switch v := value.(type) {
+		case map[string]any:
+			if len(v) != 0 {
+				return refusal
+			}
+		case map[string]string:
+			if len(v) != 0 {
+				return refusal
+			}
+		default:
+			return refusal
+		}
+	}
+	return nil
+}
+
+func blockBase(port int) bool {
+	for _, base := range blocks {
+		if port == base {
+			return true
+		}
+	}
+	return false
+}
+func validBranch(branch string) bool {
+	return branch != "" && !strings.ContainsAny(branch, "\x00\r\n") && strings.TrimSpace(branch) == branch
+}
+func equalsInt(value any, want int) bool { got, ok := integer(value); return ok && got == want }
+func integer(value any) (int, bool) {
+	switch v := value.(type) {
+	case int:
+		return v, true
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) || v != math.Trunc(v) || v < 0 || v > 65535 {
+			return 0, false
+		}
+		return int(v), true
+	case json.Number:
+		n, err := strconv.Atoi(string(v))
+		return n, err == nil
+	default:
+		return 0, false
+	}
+}
+func portNumber(value any) (int, bool) { n, ok := integer(value); return n, ok && n >= 1 && n <= 65535 }
+
+func allocationPorts(a map[string]any) ([]int, error) {
+	var ports []int
+	if value, present := a["ports"]; present {
+		switch list := value.(type) {
+		case []any:
+			for _, value := range list {
+				n, ok := portNumber(value)
+				if !ok {
+					return nil, refusal
+				}
+				ports = append(ports, n)
+			}
+		case []int:
+			for _, value := range list {
+				n, ok := portNumber(value)
+				if !ok {
+					return nil, refusal
+				}
+				ports = append(ports, n)
+			}
+		default:
+			return nil, refusal
+		}
+		if len(ports) == 0 {
+			return nil, refusal
+		}
+	}
+	if value, present := a["port"]; present {
+		n, ok := portNumber(value)
+		if !ok {
+			return nil, refusal
+		}
+		if len(ports) == 0 {
+			ports = []int{n}
+		} else if ports[0] != n {
+			return nil, refusal
+		}
+	}
+	if len(ports) == 0 {
+		return nil, refusal
+	}
+	seen := map[int]bool{}
+	for _, port := range ports {
+		if seen[port] {
+			return nil, refusal
+		}
+		seen[port] = true
+	}
+	for key, value := range a {
+		if !strings.HasPrefix(key, "port_") {
+			continue
+		}
+		index, err := strconv.Atoi(strings.TrimPrefix(key, "port_"))
+		if err != nil || index < 1 || index > len(ports) || key != "port_"+strconv.Itoa(index) || !equalsInt(value, ports[index-1]) {
+			return nil, refusal
+		}
+	}
+	return ports, nil
+}
+
+func checkedPath(home, path string, private bool) (os.FileInfo, error) {
+	relative, err := filepath.Rel(home, path)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, refusal
+	}
+	current := home
+	components := append([]string{""}, strings.Split(relative, string(filepath.Separator))...)
+	var info os.FileInfo
+	for index, component := range components {
+		if component != "" {
+			current = filepath.Join(current, component)
+		}
+		info, err = os.Lstat(current)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
+			return nil, refusal
+		}
+		owner, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || owner.Uid != uint32(os.Getuid()) || info.Mode().IsRegular() && owner.Nlink != 1 {
+			return nil, refusal
+		}
+		if index != len(components)-1 && !info.IsDir() || index == len(components)-1 && !info.Mode().IsRegular() {
+			return nil, refusal
+		}
+		if private && (current == filepath.Dir(path) || current == path) && info.Mode().Perm()&0077 != 0 {
+			return nil, refusal
+		}
+	}
+	return info, nil
+}
+
+func readObject(home, path string, private bool) (map[string]any, error) {
+	before, err := checkedPath(home, path, private)
+	if err != nil {
+		return nil, refusal
+	}
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, refusal
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(before, opened) || !opened.Mode().IsRegular() || opened.Size() > 16<<20 {
+		return nil, refusal
+	}
+	owner, ok := opened.Sys().(*syscall.Stat_t)
+	if !ok || owner.Nlink != 1 || owner.Uid != uint32(os.Getuid()) {
+		return nil, refusal
+	}
+	data, err := io.ReadAll(io.LimitReader(file, (16<<20)+1))
+	if err != nil || len(data) > 16<<20 {
+		return nil, refusal
+	}
+	after, err := checkedPath(home, path, private)
+	if err != nil || !os.SameFile(opened, after) || after.Size() != opened.Size() || !after.ModTime().Equal(opened.ModTime()) {
+		return nil, refusal
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	value, err := decodeValue(decoder)
+	if err != nil {
+		return nil, refusal
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, refusal
+	}
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil, refusal
+	}
+	return object, nil
+}
+
+// decodeValue rejects duplicate keys instead of accepting JSON's last value.
+func decodeValue(decoder *json.Decoder) (any, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, refusal
+	}
+	delimiter, compound := token.(json.Delim)
+	if !compound {
+		return token, nil
+	}
+	switch delimiter {
+	case '{':
+		object := map[string]any{}
+		for decoder.More() {
+			token, err := decoder.Token()
+			if err != nil {
+				return nil, refusal
+			}
+			key, ok := token.(string)
+			if !ok {
+				return nil, refusal
+			}
+			if _, duplicate := object[key]; duplicate {
+				return nil, refusal
+			}
+			value, err := decodeValue(decoder)
+			if err != nil {
+				return nil, refusal
+			}
+			object[key] = value
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim('}') {
+			return nil, refusal
+		}
+		return object, nil
+	case '[':
+		array := []any{}
+		for decoder.More() {
+			value, err := decodeValue(decoder)
+			if err != nil {
+				return nil, refusal
+			}
+			array = append(array, value)
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim(']') {
+			return nil, refusal
+		}
+		return array, nil
+	default:
+		return nil, refusal
+	}
+}

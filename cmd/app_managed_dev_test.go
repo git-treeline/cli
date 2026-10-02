@@ -113,6 +113,38 @@ func TestAppManagedDevBlocksEffectsBeforeHooks(t *testing.T) {
 	}
 }
 
+func TestAppManagedDevResourceInspectionDoesNotWrite(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		t.Run(fmt.Sprintf("configured=%t", configured), func(t *testing.T) {
+			f := appDevFixture(t)
+			privateAppDevState(t, f, `{"version":2,"allocations":[]}`)
+			if configured {
+				stable := filepath.Join(f.home, "Library", "Application Support", "git-treeline")
+				writeIntrospectionFile(t, filepath.Join(stable, "config.json"), `{"port":{"base":3002,"increment":10,"reservations":{"@treeline-dev-qa/slot-01":42000,"@treeline-dev-qa/slot-02":42010,"@treeline-dev-qa/slot-03":42020,"@treeline-dev-qa/slot-04":42030}}}`)
+				writeIntrospectionFile(t, filepath.Join(stable, "registry.json"), `{"version":2,"allocations":[]}`)
+				writeIntrospectionFile(t, filepath.Join(f.state, "config.json"), `{"port":{"base":42000,"increment":10,"reservations":{"fixture":42000}},"router":{"mode":"disabled"}}`)
+				if err := os.Chmod(filepath.Join(f.state, "config.json"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := snapshotIntrospection(t, f.base)
+			out, stderr, err := runAppDev(t, f, f.state, "dev-resources", "--json")
+			if configured {
+				var result struct {
+					Ready    bool   `json:"ready"`
+					Contract string `json:"contract"`
+				}
+				if err != nil || json.Unmarshal([]byte(out), &result) != nil || !result.Ready || result.Contract != "mac-dev-port-pool-v1" {
+					t.Fatalf("configured inspection failed: %v %s %s", err, out, stderr)
+				}
+			} else if err == nil || strings.TrimSpace(out) != "" {
+				t.Fatalf("unconfigured inspection claimed readiness: %v %s %s", err, out, stderr)
+			}
+			assertIntrospectionUnchanged(t, before, snapshotIntrospection(t, f.base))
+		})
+	}
+}
+
 func TestAppManagedDevRequiresPrivateCanonicalHome(t *testing.T) {
 	for _, variant := range []string{"missing", "shared", "relative", "dotdot", "parent-symlink", "home-symlink", "public-mode", "writable-parent", "registry-symlink", "config-symlink"} {
 		t.Run(variant, func(t *testing.T) {
