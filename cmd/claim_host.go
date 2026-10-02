@@ -460,6 +460,9 @@ func executeHostClaim(cmd *cobra.Command, cwd string, request hostClaimRequest) 
 	result := hostClaimReceipt{Schema: 1, OperationID: request.OperationID, Request: request, Outcome: "failed", Stage: "admission", Effect: "none", Warnings: []hostClaimWarning{}}
 	fail := func(code string) hostClaimReceipt { result.Failure = &hostClaimFailure{Code: code}; return result }
 	selection := func() (creationSelection, error) {
+		if err := validateManagedDevCreation(request.Source.Path, request.Target.Path, request.Branch); err != nil {
+			return creationSelection{}, err
+		}
 		current, err := inspectHostClaim(cmd.Context(), cwd, request.Branch, request.OperationID)
 		if err != nil {
 			return creationSelection{}, err

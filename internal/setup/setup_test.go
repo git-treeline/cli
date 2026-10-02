@@ -270,6 +270,214 @@ func testSetup(t *testing.T, yamlContent string) (*Setup, string, string) {
 	return s, mainRepo, worktree
 }
 
+func TestValidateManagedDevProjectRejectsUnsafeConfigBeforeEffects(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, ".treeline-dev", "workspaces")
+	repo := filepath.Join(root, "fixture")
+	if err := os.MkdirAll(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+
+	cases := map[string]string{
+		"database":      "database:\n  adapter: sqlite\n  name: fixture.sqlite3\n",
+		"copy files":    "copy_files:\n  - .env\n",
+		"hooks":         "hooks:\n  pre_setup:\n    - touch denied\n",
+		"setup command": "commands:\n  setup:\n    - touch denied\n",
+		"provision":     "provision:\n  apt:\n    - redis\n",
+		"editor":        "editor:\n  title: fixture\n",
+	}
+	for name, extra := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(repo, config.ProjectConfigFile)
+			if err := os.WriteFile(path, []byte("project: fixture\nport_count: 1\n"+extra), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			pc := config.LoadProjectConfigReadOnly(repo)
+			if err := ValidateManagedDevProject(repo, repo, pc); err == nil {
+				t.Fatal("unsafe managed-dev project configuration was accepted")
+			}
+		})
+	}
+}
+
+func TestValidateManagedDevProjectContainment(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := filepath.Join(home, ".treeline-dev", "workspaces")
+	contained := filepath.Join(root, "fixture")
+	if err := os.MkdirAll(contained, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", contained, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(contained, config.ProjectConfigFile), []byte("project: fixture\nport_count: 1\ncommands:\n  start: ruby -run -e httpd . -p {port}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pc := config.LoadProjectConfigReadOnly(contained)
+	if err := ValidateManagedDevProject(filepath.Join(root, "not-created-yet"), contained, pc); err != nil {
+		t.Fatalf("contained pre-creation target rejected: %v", err)
+	}
+	if err := ValidateManagedDevProject(contained, contained, pc); err != nil {
+		t.Fatalf("contained repository rejected: %v", err)
+	}
+	outside := filepath.Join(home, "outside")
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateManagedDevProject(outside, contained, pc); err == nil {
+		t.Fatal("outside worktree path was accepted")
+	}
+}
+
+func TestValidateManagedDevProjectRejectsEnvTargetAliases(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	repo := filepath.Join(home, ".treeline-dev", "workspaces", "fixture")
+	outside := filepath.Join(home, "outside")
+	if err := os.MkdirAll(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(repo, config.ProjectConfigFile), []byte("project: fixture\nport_count: 1\nenv_file: .env.local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside, []byte("untouched\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(repo, ".env.local")
+	pc := config.LoadProjectConfigReadOnly(repo)
+	if err := os.Symlink(outside, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateManagedDevProject(repo, repo, pc); err == nil {
+		t.Fatal("symlinked env target was accepted")
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(outside, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateManagedDevProject(repo, repo, pc); err == nil {
+		t.Fatal("hard-linked env target was accepted")
+	}
+	if got, err := os.ReadFile(outside); err != nil || string(got) != "untouched\n" {
+		t.Fatalf("outside file changed: %q, %v", got, err)
+	}
+}
+
+func TestValidateManagedDevProjectRejectsExternalObjectAlternates(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	repo := filepath.Join(home, ".treeline-dev", "workspaces", "fixture")
+	externalObjects := filepath.Join(home, "shared-objects")
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "objects", "info"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(externalObjects, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(repo, config.ProjectConfigFile), []byte("project: fixture\nport_count: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".git", "objects", "info", "alternates"), []byte(externalObjects+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateManagedDevProject(repo, repo, config.LoadProjectConfigReadOnly(repo)); err == nil {
+		t.Fatal("external Git object alternate was accepted")
+	}
+}
+
+func TestValidateManagedDevProjectRejectsSymlinkedWorkspaceRoot(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	outside := filepath.Join(home, "ordinary-workspaces")
+	repo := filepath.Join(outside, "fixture")
+	if err := os.MkdirAll(filepath.Join(home, ".treeline-dev"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(home, ".treeline-dev", "workspaces")); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(repo, config.ProjectConfigFile), []byte("project: fixture\nport_count: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateManagedDevProject(repo, repo, config.LoadProjectConfigReadOnly(repo)); err == nil {
+		t.Fatal("symlinked managed-dev workspace root was accepted")
+	}
+}
+
+func TestNormalSetupCannotClaimManagedDevSentinelProject(t *testing.T) {
+	t.Setenv("TREELINE_MANAGED", "")
+	t.Setenv("TREELINE_CHANNEL", "")
+	s, _, _ := testSetup(t, "project: '@treeline-dev-qa'\nport_count: 1\n")
+	userPath := filepath.Join(t.TempDir(), "config.json")
+	userConfig := `{"port":{"base":42000,"increment":10,"reservations":{"@treeline-dev-qa/slot-01":42000,"@treeline-dev-qa/slot-02":42010,"@treeline-dev-qa/slot-03":42020,"@treeline-dev-qa/slot-04":42030}},"router":{"mode":"disabled"}}`
+	if err := os.WriteFile(userPath, []byte(userConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.UserConfig = config.LoadUserConfig(userPath)
+	s.Allocator.UserConfig = s.UserConfig
+	s.Options.DryRun = true
+	s.Allocator.DryRun = true
+	s.Allocator.PortFree = func(int) bool { return true }
+	if _, err := s.Run(); err == nil {
+		t.Fatal("normal setup accepted sentinel prefix as a project identifier")
+	}
+	if allocations := s.Registry.Allocations(); len(allocations) != 0 {
+		t.Fatalf("sentinel setup refusal changed registry: %#v", allocations)
+	}
+}
+
+func TestNormalSetupAllowsMergeTargetAndOrdinaryDatabaseDefaults(t *testing.T) {
+	t.Setenv("TREELINE_MANAGED", "")
+	t.Setenv("TREELINE_CHANNEL", "")
+	s, _, _ := testSetup(t, `
+project: ordinary
+port_count: 1
+merge_target: main
+database:
+  adapter: postgresql
+  template: ordinary_development
+  pattern: "{template}_{worktree}"
+`)
+	s.Options.DryRun = true
+	s.Allocator.DryRun = true
+	s.Allocator.PortFree = func(int) bool { return true }
+	alloc, err := s.Run()
+	if err != nil {
+		t.Fatalf("normal setup rejected supported project config: %v", err)
+	}
+	if s.ProjectConfig.MergeTarget() != "main" || alloc.PrimaryDatabase() == "" {
+		t.Fatalf("normal setup lost supported config: merge=%q database=%q", s.ProjectConfig.MergeTarget(), alloc.PrimaryDatabase())
+	}
+}
+
 // --- writeEnvFile tests ---
 
 func TestWriteEnvFile_SeedsFromSource(t *testing.T) {

@@ -51,6 +51,60 @@ func creationFixture(t *testing.T) (string, string) {
 	return main, destination
 }
 
+func TestManagedDevCreationSelectionBeforeEffects(t *testing.T) {
+	for _, variant := range []string{"contained", "unmapped branch", "outside target", "setup hook", "drifted pool"} {
+		t.Run(variant, func(t *testing.T) {
+			commandLifecycleEnvironment(t)
+			f := appDevFixture(t)
+			t.Setenv("HOME", f.home)
+			t.Setenv("GTL_HOME", f.state)
+			t.Setenv("TREELINE_MANAGED", "app")
+			t.Setenv("TREELINE_CHANNEL", "dev")
+			privateAppDevState(t, f, `{"version":2,"allocations":[]}`)
+			stable := filepath.Join(f.home, "Library", "Application Support", "git-treeline")
+			writeIntrospectionFile(t, filepath.Join(stable, "config.json"), `{"port":{"base":3002,"increment":10,"reservations":{"@treeline-dev-qa/slot-01":42000,"@treeline-dev-qa/slot-02":42010,"@treeline-dev-qa/slot-03":42020,"@treeline-dev-qa/slot-04":42030}}}`)
+			writeIntrospectionFile(t, filepath.Join(stable, "registry.json"), `{"version":2,"allocations":[]}`)
+			writeIntrospectionFile(t, filepath.Join(f.state, "config.json"), `{"port":{"increment":10,"reservations":{"fixture":42000,"fixture/qa-one":42010}},"router":{"mode":"disabled"}}`)
+			if err := os.Chmod(filepath.Join(f.state, "config.json"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			source := filepath.Join(f.home, ".treeline-dev", "workspaces", "repo")
+			if err := os.MkdirAll(source, 0700); err != nil {
+				t.Fatal(err)
+			}
+			runGit(t, source, "init", "-b", "main")
+			project := "project: fixture\nport_count: 1\nenv: {PORT: '{port}'}\n"
+			if variant == "setup hook" {
+				project += "hooks: {pre_setup: 'touch escaped'}\n"
+			}
+			writeIntrospectionFile(t, filepath.Join(source, config.ProjectConfigFile), project)
+			runGit(t, source, "add", config.ProjectConfigFile)
+			runGit(t, source, "commit", "-m", "fixture")
+			branch := "qa-one"
+			target := filepath.Join(filepath.Dir(source), "repo-qa-one")
+			if variant == "unmapped branch" {
+				branch = "unmapped"
+			}
+			if variant == "outside target" {
+				target = filepath.Join(f.home, "ordinary-worktree")
+			}
+			if variant == "drifted pool" {
+				writeIntrospectionFile(t, filepath.Join(stable, "config.json"), `{"port":{"increment":10}}`)
+			}
+			before := snapshotIntrospection(t, f.base)
+			selection, err := discoverCreation(source, branch, false, func(string, *config.ProjectConfig, *config.UserConfig) string { return target })
+			if variant == "contained" {
+				if err != nil || selection.source != source || selection.target != target {
+					t.Fatalf("contained selection refused: %+v %v", selection, err)
+				}
+			} else if err == nil {
+				t.Fatalf("unsafe selection accepted: %+v", selection)
+			}
+			assertIntrospectionUnchanged(t, before, snapshotIntrospection(t, f.base))
+		})
+	}
+}
+
 func runCreationCommand(name string) error {
 	switch name {
 	case "new":

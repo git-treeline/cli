@@ -5,7 +5,9 @@ import (
 	"fmt"
 
 	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/devresources"
 	"github.com/git-treeline/cli/internal/registry"
+	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/worktree"
 )
 
@@ -43,6 +45,9 @@ func discoverCreation(cwd, branch string, reviewInPlace bool, destination func(s
 			return creationSelection{}, err
 		}
 		if current != source {
+			if err := validateManagedDevCreation(source, current, branch); err != nil {
+				return creationSelection{}, err
+			}
 			return creationSelection{source: source, target: current, inPlace: true}, nil
 		}
 	}
@@ -65,7 +70,26 @@ func discoverCreation(cwd, branch string, reviewInPlace bool, destination func(s
 	if existing != "" {
 		existing = target
 	}
+	if err := validateManagedDevCreation(source, target, branch); err != nil {
+		return creationSelection{}, err
+	}
 	return creationSelection{source: source, target: target, existing: existing}, nil
+}
+
+func validateManagedDevCreation(source, target, branch string) error {
+	if !devresources.Active() {
+		return nil
+	}
+	policy, err := devresources.Check()
+	if err != nil {
+		return err
+	}
+	pc := config.LoadProjectConfigReadOnlyQuiet(source)
+	if err := setup.ValidateManagedDevProject(target, source, pc); err != nil {
+		return err
+	}
+	_, err = policy.Ports(pc.Project(), branch, target == source, pc.PortsNeeded())
+	return err
 }
 
 func admitCreation(ctx context.Context, discover func() (creationSelection, error)) (*creationAdmission, error) {

@@ -12,11 +12,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/git-treeline/cli/internal/allocator"
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/database"
+	"github.com/git-treeline/cli/internal/devresources"
 	"github.com/git-treeline/cli/internal/editor"
 	"github.com/git-treeline/cli/internal/format"
 	"github.com/git-treeline/cli/internal/interpolation"
@@ -133,7 +137,7 @@ func NewWithOptions(worktreePath string, mainRepo string, uc *config.UserConfig,
 	}
 
 	var pc *config.ProjectConfig
-	if options.DryRun {
+	if options.DryRun || devresources.Active() {
 		pc = config.LoadProjectConfigReadOnly(absPath)
 	} else {
 		pc = config.LoadProjectConfig(absPath)
@@ -154,10 +158,37 @@ func NewWithOptions(worktreePath string, mainRepo string, uc *config.UserConfig,
 }
 
 func (s *Setup) Run() (*allocator.Allocation, error) {
+	worktreeName := filepath.Base(s.WorktreePath)
+	isMain := s.WorktreePath == s.MainRepo
+	var devPolicy *devresources.Policy
+	if devresources.Active() {
+		var err error
+		devPolicy, err = devresources.Check()
+		if err != nil {
+			return nil, fmt.Errorf("validating app-managed dev resources before setup: %w", err)
+		}
+	}
+	branch := s.detectBranch()
+	if devPolicy != nil {
+		if err := ValidateManagedDevProject(s.WorktreePath, s.MainRepo, s.ProjectConfig); err != nil {
+			return nil, err
+		}
+		if existing := s.Registry.Find(s.WorktreePath); existing != nil {
+			if err := devPolicy.ValidateAllocation(map[string]any(existing)); err != nil {
+				return nil, fmt.Errorf("refusing retained app-managed dev allocation before setup: %w", err)
+			}
+			expected, err := devPolicy.Ports(s.ProjectConfig.Project(), branch, isMain, s.ProjectConfig.PortsNeeded())
+			if err != nil || registry.GetString(existing, "project") != s.ProjectConfig.Project() ||
+				registry.GetString(existing, "branch") != branch || existing["main_worktree"] == true != isMain ||
+				!slices.Equal(registry.ExtractPorts(existing), expected) {
+				return nil, fmt.Errorf("refusing retained app-managed dev allocation before setup: project, branch, or port mapping changed")
+			}
+		}
+	}
 	if err := s.ProjectConfig.Validate(); err != nil {
 		return nil, err
 	}
-	if !s.Options.DryRun {
+	if !s.Options.DryRun && devPolicy == nil {
 		if err := s.handleProjectRename(); err != nil {
 			return nil, err
 		}
@@ -166,9 +197,6 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 		}
 	}
 
-	worktreeName := filepath.Base(s.WorktreePath)
-	isMain := s.WorktreePath == s.MainRepo
-	branch := s.detectBranch()
 	resolverPkg := resolve.New(s.Registry, s.WorktreePath, branch)
 	s.Resolver = resolverPkg.Resolve
 	hadExisting := s.Registry.Find(s.WorktreePath) != nil
@@ -251,7 +279,169 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	return alloc, nil
 }
 
+// ValidateManagedDevProject performs the read-only project and containment
+// admission shared by managed-dev creation, setup, and runtime entry points.
+// An absent worktree target may be admitted before creation, but every existing
+// repository and all of its Git metadata must already be contained in the
+// private development workspace root.
+func ValidateManagedDevProject(worktreePath, mainRepo string, pc *config.ProjectConfig) error {
+	if err := devresources.ValidateProject(pc); err != nil {
+		return fmt.Errorf("app-managed dev project is not an approved HTTP fixture: %w", err)
+	}
+	if err := validateManagedDevSetupTarget(worktreePath, mainRepo); err != nil {
+		return err
+	}
+	return validateManagedDevEnvFiles(worktreePath, mainRepo, pc)
+}
+
+func validateManagedDevSetupTarget(worktreePath, mainRepo string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("app-managed dev workspace root unavailable")
+	}
+	home, err = filepath.EvalSymlinks(home)
+	if err != nil {
+		return fmt.Errorf("app-managed dev workspace root unavailable: %w", err)
+	}
+	root := filepath.Join(home, ".treeline-dev", "workspaces")
+	for _, directory := range []string{filepath.Dir(root), root} {
+		info, err := os.Lstat(directory)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 {
+			return fmt.Errorf("app-managed dev workspace root must be a real private directory")
+		}
+		owner, owned := info.Sys().(*syscall.Stat_t)
+		if !owned || owner.Uid != uint32(os.Getuid()) {
+			return fmt.Errorf("app-managed dev workspace root must be a real private directory")
+		}
+	}
+	contained := func(path string) bool {
+		return path != root && strings.HasPrefix(path, root+string(filepath.Separator))
+	}
+	for name, path := range map[string]string{"worktree": worktreePath, "main repository": mainRepo} {
+		canonical, err := registry.CanonicalLifecycleTarget(path)
+		if err != nil || !contained(canonical) {
+			return fmt.Errorf("app-managed dev %s must stay inside %s", name, root)
+		}
+		if _, err := os.Stat(canonical); os.IsNotExist(err) && name == "worktree" {
+			continue
+		} else if err != nil {
+			return fmt.Errorf("validating app-managed dev %s: %w", name, err)
+		}
+		target, err := registry.CaptureReleaseTarget(path)
+		if err != nil {
+			return fmt.Errorf("validating app-managed dev %s: %w", name, err)
+		}
+		if !contained(target.Path) || target.Common == nil || !contained(target.Common.Path) {
+			return fmt.Errorf("app-managed dev %s and Git metadata must stay inside %s", name, root)
+		}
+		gitDir, err := managedDevGitPath(target.Path, "--absolute-git-dir")
+		if err != nil || !contained(gitDir) {
+			return fmt.Errorf("app-managed dev %s Git directory must stay inside %s", name, root)
+		}
+		if err := validateManagedDevAlternates(target.Common.Path, contained); err != nil {
+			return fmt.Errorf("validating app-managed dev %s object storage: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func managedDevGitPath(root string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "git", append([]string{"-c", "core.fsmonitor=false", "-C", root, "rev-parse"}, args...)...)
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(value, "GIT_") && !strings.HasPrefix(value, "LC_ALL=") {
+			command.Env = append(command.Env, value)
+		}
+	}
+	command.Env = append(command.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	output, err := command.Output()
+	if err != nil || !strings.HasSuffix(string(output), "\n") {
+		return "", fmt.Errorf("Git metadata unavailable")
+	}
+	return filepath.EvalSymlinks(strings.TrimSuffix(string(output), "\n"))
+}
+
+func validateManagedDevAlternates(common string, contained func(string) bool) error {
+	objects, err := filepath.EvalSymlinks(filepath.Join(common, "objects"))
+	if err != nil || !contained(objects) {
+		return fmt.Errorf("Git object directory escapes the private workspace root")
+	}
+	path := filepath.Join(common, "objects", "info", "alternates")
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > 64<<10 {
+		return fmt.Errorf("object alternates are not safely readable")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(string(data)) != "" {
+		return fmt.Errorf("object alternates are not permitted for the managed dev fixture")
+	}
+	return nil
+}
+
+func validateManagedDevEnvFiles(worktreePath, mainRepo string, pc *config.ProjectConfig) error {
+	worktree, err := registry.CanonicalLifecycleTarget(worktreePath)
+	if err != nil {
+		return err
+	}
+	main, err := registry.CanonicalLifecycleTarget(mainRepo)
+	if err != nil {
+		return err
+	}
+	check := func(root, relative, kind string) error {
+		path := filepath.Join(root, relative)
+		canonical, err := registry.CanonicalLifecycleTarget(path)
+		if err != nil || canonical == root || !strings.HasPrefix(canonical, root+string(filepath.Separator)) {
+			return fmt.Errorf("app-managed dev %s escapes its repository", kind)
+		}
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("app-managed dev %s is not a regular file", kind)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || stat.Nlink != 1 {
+			return fmt.Errorf("app-managed dev %s must not be hard-linked", kind)
+		}
+		return nil
+	}
+	if err := check(worktree, pc.EnvFileTarget(), "env target"); err != nil {
+		return err
+	}
+	for _, source := range []string{pc.EnvFileSource(), ".env"} {
+		if err := check(main, source, "env seed"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Setup) runPostAllocation(alloc *allocator.Allocation, redisURL string) error {
+	if devresources.Active() {
+		policy, err := devresources.Check()
+		if err != nil {
+			return fmt.Errorf("revalidating app-managed dev resources before setup effects: %w", err)
+		}
+		fresh := config.LoadProjectConfigReadOnlyQuiet(s.WorktreePath)
+		if err := ValidateManagedDevProject(s.WorktreePath, s.MainRepo, fresh); err != nil {
+			return err
+		}
+		expected, err := policy.Ports(fresh.Project(), alloc.Branch, alloc.MainWorktree, fresh.PortsNeeded())
+		if err != nil || fresh.Project() != alloc.Project || !slices.Equal(expected, alloc.Ports) ||
+			policy.ValidateAllocation(map[string]any(alloc.ToRegistryEntry())) != nil {
+			return fmt.Errorf("app-managed dev allocation or project changed before setup effects")
+		}
+		s.ProjectConfig = fresh
+		s.Allocator.ProjectConfig = fresh
+	}
 	if err := s.copyFiles(); err != nil {
 		return fmt.Errorf("copying configured files: %w", err)
 	}

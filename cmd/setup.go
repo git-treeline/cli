@@ -8,6 +8,7 @@ import (
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/detect"
+	"github.com/git-treeline/cli/internal/devresources"
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/style"
@@ -69,6 +70,18 @@ var setupCmd = &cobra.Command{
 			return err
 		}
 		mainRepo := setupMainRepo
+		if devresources.Active() {
+			if _, err := devresources.Check(); err != nil {
+				return err
+			}
+			if mainRepo == "" {
+				mainRepo = worktree.DetectMainRepo(setupAbs)
+			}
+			pc := config.LoadProjectConfigReadOnlyQuiet(setupAbs)
+			if err := setup.ValidateManagedDevProject(setupAbs, mainRepo, pc); err != nil {
+				return err
+			}
+		}
 		if !setupDryRun {
 			setupAbs, err = registry.CanonicalLifecycleTarget(path)
 			if err != nil {

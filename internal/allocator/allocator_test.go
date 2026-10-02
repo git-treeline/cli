@@ -46,6 +46,172 @@ func itoa(n int) string {
 	return string(rune('0') + rune(n))
 }
 
+func managedDevAllocator(t *testing.T, reservationKey string) (*Allocator, *registry.Registry) {
+	t.Helper()
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("TREELINE_MANAGED", "app")
+	t.Setenv("TREELINE_CHANNEL", "dev")
+	private := filepath.Join(home, ".treeline-dev", "gtl")
+	normal := filepath.Join(home, "Library", "Application Support", "git-treeline")
+	for _, directory := range []string{private, normal} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("GTL_HOME", private)
+	normalConfig := `{"port":{"increment":10,"reservations":{"@treeline-dev-qa/slot-01":42000,"@treeline-dev-qa/slot-02":42010,"@treeline-dev-qa/slot-03":42020,"@treeline-dev-qa/slot-04":42030}}}`
+	privateConfig := fmt.Sprintf(`{"port":{"base":42000,"increment":10,"reservations":{%q:42000}},"router":{"mode":"disabled"}}`, reservationKey)
+	for path, body := range map[string]string{
+		filepath.Join(normal, "config.json"):    normalConfig,
+		filepath.Join(normal, "registry.json"):  `{"version":4,"allocations":[],"relationships":[]}`,
+		filepath.Join(private, "config.json"):   privateConfig,
+		filepath.Join(private, "registry.json"): `{"version":4,"allocations":[]}`,
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	project := filepath.Join(home, ".treeline-dev", "workspaces", "fixture")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, config.ProjectConfigFile), []byte("project: fixture\nport_count: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg := registry.New(filepath.Join(private, "registry.json"))
+	al := New(config.LoadUserConfig(filepath.Join(private, "config.json")), config.LoadProjectConfigReadOnly(project), reg)
+	al.PortFree = func(int) bool { return true }
+	return al, reg
+}
+
+func TestManagedDevAllocateUsesExactMappedPort(t *testing.T) {
+	al, _ := managedDevAllocator(t, "fixture/feature")
+	alloc, err := al.Allocate("/fixture/worktree", "worktree", false, "feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(alloc.Ports, []int{42000}) || alloc.PrimaryDatabase() != "" || alloc.RedisPrefix != "" || alloc.RedisDB != 0 {
+		t.Fatalf("managed allocation = %#v", alloc)
+	}
+}
+
+func TestManagedDevAllocateRefusesUnmappedWithoutRegistryWrite(t *testing.T) {
+	al, _ := managedDevAllocator(t, "fixture/feature")
+	registryPath := filepath.Join(os.Getenv("GTL_HOME"), "registry.json")
+	before, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := al.Allocate("/fixture/worktree", "worktree", false, "other"); err == nil {
+		t.Fatal("unmapped branch was allocated")
+	}
+	after, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(before, after) {
+		t.Fatal("registry changed after managed-dev refusal")
+	}
+}
+
+func TestManagedDevAllocateRejectsConfiguredResources(t *testing.T) {
+	al, _ := managedDevAllocator(t, "fixture/feature")
+	path := filepath.Join(al.ProjectConfig.ProjectRoot, config.ProjectConfigFile)
+	unsafe := "project: fixture\nport_count: 1\ndatabase:\n  adapter: sqlite\n  name: fixture.sqlite3\n"
+	if err := os.WriteFile(path, []byte(unsafe), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := al.Allocate("/fixture/worktree", "worktree", false, "feature"); err == nil {
+		t.Fatal("managed-dev allocator silently discarded configured database resources")
+	}
+}
+
+func TestManagedDevAllocateRefusesRetainedMismatchAndBusyOwnPort(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		port int
+		free bool
+	}{
+		{name: "outside mapping", port: 43000, free: true},
+		{name: "busy despite supervisor", port: 42000, free: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			al, reg := managedDevAllocator(t, "fixture/feature")
+			entry := registry.Allocation{"project": "fixture", "worktree": "/fixture/worktree", "worktree_name": "worktree", "branch": "feature", "port": test.port, "ports": []any{test.port}, "port_1": test.port, "database": "", "database_adapter": "", "redis_db": nil, "redis_prefix": nil}
+			if err := reg.Allocate(entry); err != nil {
+				t.Fatal(err)
+			}
+			al.PortFree = func(int) bool { return test.free }
+			al.SupervisorLive = func(string) bool { return true }
+			if _, err := al.Allocate("/fixture/worktree", "worktree", false, "feature"); err == nil {
+				t.Fatal("unsafe retained allocation was accepted")
+			}
+		})
+	}
+}
+
+func TestNormalAllocateSkipsManagedDevSentinelBlocksAndPreservesRegistry(t *testing.T) {
+	t.Setenv("TREELINE_MANAGED", "")
+	t.Setenv("TREELINE_CHANNEL", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	userConfig := `{"port":{"base":42000,"increment":10,"reservations":{"@treeline-dev-qa/slot-01":42000,"@treeline-dev-qa/slot-02":42010,"@treeline-dev-qa/slot-03":42020,"@treeline-dev-qa/slot-04":42030}},"router":{"mode":"disabled"}}`
+	if err := os.WriteFile(configPath, []byte(userConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(dir, "project")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, config.ProjectConfigFile), []byte("project: ordinary\nport_count: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg := registry.New(filepath.Join(dir, "registry.json"))
+	for i := range 53 {
+		port := 43000 + i
+		entry := registry.Allocation{
+			"project": "ordinary", "worktree": fmt.Sprintf("/ordinary/%02d", i),
+			"worktree_name": fmt.Sprintf("ordinary-%02d", i), "branch": fmt.Sprintf("branch-%02d", i),
+			"port": port, "ports": []any{port}, "port_1": port,
+		}
+		if err := reg.Allocate(entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := reg.Allocations()
+	al := New(config.LoadUserConfig(configPath), config.LoadProjectConfigReadOnly(project), reg)
+	var inspected []int
+	al.PortFree = func(port int) bool {
+		inspected = append(inspected, port)
+		return true
+	}
+	alloc, err := al.Allocate("/ordinary/new", "new", false, "new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alloc.Port != 42040 {
+		t.Fatalf("normal allocation port = %d, want first port after all four sentinel blocks", alloc.Port)
+	}
+	if !slices.Equal(inspected, []int{42040}) {
+		t.Fatalf("listener probe candidates = %v, want only 42040", inspected)
+	}
+	after := reg.Allocations()
+	if len(after) != len(before)+1 {
+		t.Fatalf("allocation count = %d, want %d", len(after), len(before)+1)
+	}
+	for i := range before {
+		beforeJSON, _ := json.Marshal(before[i])
+		afterJSON, _ := json.Marshal(after[i])
+		if !slices.Equal(beforeJSON, afterJSON) {
+			t.Fatalf("ordinary allocation %d changed\nbefore: %s\nafter:  %s", i, beforeJSON, afterJSON)
+		}
+	}
+}
+
 func TestAllocate_SinglePort(t *testing.T) {
 	al, _ := testAllocator(t, 1, "")
 	alloc, err := al.Allocate("/wt/branch-a", "branch-a", false)

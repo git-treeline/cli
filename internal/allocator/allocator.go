@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/devresources"
 	"github.com/git-treeline/cli/internal/interpolation"
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/supervisor"
@@ -31,6 +33,9 @@ type Allocator struct {
 	// allocated port held by the worktree's own dev server isn't mistaken for a
 	// foreign squatter. Injectable for tests; nil falls back to a socket probe.
 	SupervisorLive func(worktreePath string) bool
+	// PortFree performs the final listener check. Tests inject it so managed-dev
+	// policy fixtures never inspect or bind the real reserved pool.
+	PortFree func(port int) bool
 	// DryRun selects resources against the current registry snapshot without
 	// persisting them (for previewing an allocation). When false, a new-worktree
 	// allocation is chosen and written atomically inside the registry lock.
@@ -50,6 +55,13 @@ func (al *Allocator) hasLiveSupervisor(worktreePath string) bool {
 		return al.SupervisorLive(worktreePath)
 	}
 	return supervisorResponding(worktreePath)
+}
+
+func (al *Allocator) portFree(port int) bool {
+	if al.PortFree != nil {
+		return al.PortFree(port)
+	}
+	return IsPortFree(port)
 }
 
 // Allocation represents the resources assigned to a worktree including
@@ -196,11 +208,29 @@ func (al *Allocator) Allocate(worktreePath, worktreeName string, mainWorktree bo
 	if len(branch) > 0 {
 		b = branch[0]
 	}
+	var devPolicy *devresources.Policy
+	if devresources.Active() {
+		var err error
+		fresh := config.LoadProjectConfigReadOnlyQuiet(al.ProjectConfig.ProjectRoot)
+		if err := devresources.ValidateProject(fresh); err != nil {
+			return nil, fmt.Errorf("validating app-managed dev project: %w", err)
+		}
+		al.ProjectConfig = fresh
+		devPolicy, err = devresources.Check()
+		if err != nil {
+			return nil, fmt.Errorf("validating app-managed dev resources: %w", err)
+		}
+		if _, err := devPolicy.Ports(al.ProjectConfig.Project(), b, mainWorktree, al.ProjectConfig.PortsNeeded()); err != nil {
+			return nil, err
+		}
+	}
 	if al.FreshTarget != nil || al.FreshLocks != nil {
 		if al.FreshTarget == nil || al.FreshLocks == nil || al.DryRun || mainWorktree || al.FreshTarget.Path != worktreePath {
 			return nil, fmt.Errorf("invalid fresh allocation context")
 		}
-	} else if existing := al.reuseExisting(worktreePath, worktreeName, mainWorktree, b); existing != nil {
+	} else if existing, err := al.reuseExisting(worktreePath, worktreeName, mainWorktree, b, devPolicy); err != nil {
+		return nil, err
+	} else if existing != nil {
 		return existing, nil
 	}
 	if mainWorktree {
@@ -223,15 +253,29 @@ func (al *Allocator) validatePortConfig() error {
 	return nil
 }
 
-func (al *Allocator) reuseExisting(worktreePath, worktreeName string, mainWorktree bool, branch string) *Allocation {
+func (al *Allocator) reuseExisting(worktreePath, worktreeName string, mainWorktree bool, branch string, devPolicy *devresources.Policy) (*Allocation, error) {
 	entry := al.Registry.Find(worktreePath)
 	if entry == nil {
-		return nil
+		return nil, nil
+	}
+	if devPolicy != nil {
+		if err := devPolicy.ValidateAllocation(map[string]any(entry)); err != nil {
+			return nil, fmt.Errorf("refusing retained app-managed dev allocation: %w", err)
+		}
+		expected, err := devPolicy.Ports(al.ProjectConfig.Project(), branch, mainWorktree, al.ProjectConfig.PortsNeeded())
+		if err != nil || registry.GetString(entry, "project") != al.ProjectConfig.Project() ||
+			registry.GetString(entry, "branch") != branch || entry["main_worktree"] == true != mainWorktree ||
+			!slices.Equal(registry.ExtractPorts(entry), expected) {
+			return nil, fmt.Errorf("refusing retained app-managed dev allocation: project, branch, or port mapping changed")
+		}
 	}
 
 	ports := registry.ExtractPorts(entry)
 	if len(ports) == 0 {
-		return nil
+		if devPolicy != nil {
+			return nil, fmt.Errorf("refusing retained app-managed dev allocation: invalid ports")
+		}
+		return nil, nil
 	}
 
 	alloc := &Allocation{
@@ -256,34 +300,39 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string, mainWorktr
 	}
 
 	if len(alloc.Ports) != al.ProjectConfig.PortsNeeded() {
-		return nil
+		if devPolicy != nil {
+			return nil, fmt.Errorf("refusing retained app-managed dev allocation: port count changed")
+		}
+		return nil, nil
 	}
 
 	project := al.ProjectConfig.Project()
-	if mainWorktree {
-		if base, ok := al.resolveReservation(project, branch); ok && base != ports[0] {
-			return nil
-		}
-	} else if branch != "" {
-		if base, ok := al.resolveBranchReservation(project, branch); ok && base != ports[0] {
-			return nil
-		}
-	}
-
-	reserved := al.UserConfig.ReservedPorts()
-	if reserved[ports[0]] {
-		isOwnReservation := false
+	if devPolicy == nil {
 		if mainWorktree {
-			if base, ok := al.resolveReservation(project, branch); ok && base == ports[0] {
-				isOwnReservation = true
+			if base, ok := al.resolveReservation(project, branch); ok && base != ports[0] {
+				return nil, nil
 			}
 		} else if branch != "" {
-			if base, ok := al.resolveBranchReservation(project, branch); ok && base == ports[0] {
-				isOwnReservation = true
+			if base, ok := al.resolveBranchReservation(project, branch); ok && base != ports[0] {
+				return nil, nil
 			}
 		}
-		if !isOwnReservation {
-			return nil
+
+		reserved := al.UserConfig.ReservedPorts()
+		if reserved[ports[0]] {
+			isOwnReservation := false
+			if mainWorktree {
+				if base, ok := al.resolveReservation(project, branch); ok && base == ports[0] {
+					isOwnReservation = true
+				}
+			} else if branch != "" {
+				if base, ok := al.resolveBranchReservation(project, branch); ok && base == ports[0] {
+					isOwnReservation = true
+				}
+			}
+			if !isOwnReservation {
+				return nil, nil
+			}
 		}
 	}
 
@@ -295,19 +344,32 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string, mainWorktr
 	ownSupervisorChecked := false
 	ownSupervisorLive := false
 	for _, p := range ports {
-		if IsPortFree(p) {
+		if al.portFree(p) {
 			continue
+		}
+		if devPolicy != nil {
+			return nil, fmt.Errorf("refusing busy app-managed dev port %d", p)
 		}
 		if !ownSupervisorChecked {
 			ownSupervisorLive = al.hasLiveSupervisor(worktreePath)
 			ownSupervisorChecked = true
 		}
 		if !ownSupervisorLive {
-			return nil
+			return nil, nil
+		}
+	}
+	if devPolicy != nil {
+		fresh := config.LoadProjectConfigReadOnlyQuiet(al.ProjectConfig.ProjectRoot)
+		if err := devresources.ValidateProject(fresh); err != nil || fresh.Project() != project || fresh.PortsNeeded() != len(ports) {
+			return nil, fmt.Errorf("app-managed dev project changed before allocation reuse")
+		}
+		policy, err := devresources.Check()
+		if err != nil || policy.ValidateAllocation(map[string]any(entry)) != nil {
+			return nil, fmt.Errorf("app-managed dev resource policy changed before allocation reuse")
 		}
 	}
 
-	return alloc
+	return alloc, nil
 }
 
 func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*Allocation, error) {
@@ -337,7 +399,25 @@ func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*A
 	// Redis DB is allocated here.
 	build := func(used registry.UsedResources) (*Allocation, error) {
 		var ports []int
-		if base, ok := al.resolveReservation(project, branch); ok {
+		var policy *devresources.Policy
+		if devresources.Active() {
+			var err error
+			fresh := config.LoadProjectConfigReadOnlyQuiet(al.ProjectConfig.ProjectRoot)
+			if err := devresources.ValidateProject(fresh); err != nil || fresh.Project() != project || fresh.PortsNeeded() != count {
+				return nil, fmt.Errorf("app-managed dev project changed before allocation")
+			}
+			policy, err = devresources.Check()
+			if err != nil {
+				return nil, fmt.Errorf("revalidating app-managed dev resources: %w", err)
+			}
+			ports, err = policy.Ports(project, branch, true, count)
+			if err != nil {
+				return nil, err
+			}
+			if err := al.validateManagedDevPortsFree(ports, used.Ports); err != nil {
+				return nil, err
+			}
+		} else if base, ok := al.resolveReservation(project, branch); ok {
 			if verr := al.validateReservedPorts(base, count, used.Ports); verr != nil {
 				return nil, verr
 			}
@@ -351,7 +431,7 @@ func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*A
 		if ports == nil {
 			return nil, fmt.Errorf("no available port block of size %d found (all ports in use or reserved)", count)
 		}
-		return &Allocation{
+		allocation := &Allocation{
 			Project:         project,
 			Worktree:        worktreePath,
 			WorktreeName:    worktreeName,
@@ -361,7 +441,16 @@ func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*A
 			ExtraKeys:       al.extraKeysFor(mainDatabases),
 			DatabaseAdapter: al.ProjectConfig.DatabaseAdapter(),
 			MainWorktree:    true,
-		}, nil
+		}
+		if policy != nil {
+			allocation.Databases = nil
+			allocation.ExtraKeys = nil
+			allocation.DatabaseAdapter = ""
+			if err := policy.ValidateAllocation(map[string]any(allocation.ToRegistryEntry())); err != nil {
+				return nil, err
+			}
+		}
+		return allocation, nil
 	}
 
 	if al.DryRun {
@@ -400,7 +489,25 @@ func (al *Allocator) allocateNew(worktreePath, worktreeName, branch string) (*Al
 	// never persists.
 	build := func(used registry.UsedResources) (*Allocation, error) {
 		var ports []int
-		if branch != "" {
+		var policy *devresources.Policy
+		if devresources.Active() {
+			var err error
+			fresh := config.LoadProjectConfigReadOnlyQuiet(al.ProjectConfig.ProjectRoot)
+			if err := devresources.ValidateProject(fresh); err != nil || fresh.Project() != project || fresh.PortsNeeded() != count {
+				return nil, fmt.Errorf("app-managed dev project changed before allocation")
+			}
+			policy, err = devresources.Check()
+			if err != nil {
+				return nil, fmt.Errorf("revalidating app-managed dev resources: %w", err)
+			}
+			ports, err = policy.Ports(project, branch, false, count)
+			if err != nil {
+				return nil, err
+			}
+			if err := al.validateManagedDevPortsFree(ports, used.Ports); err != nil {
+				return nil, err
+			}
+		} else if branch != "" {
 			if base, ok := al.resolveBranchReservation(project, branch); ok {
 				if verr := al.validateReservedPorts(base, count, used.Ports); verr != nil {
 					return nil, verr
@@ -417,11 +524,15 @@ func (al *Allocator) allocateNew(worktreePath, worktreeName, branch string) (*Al
 		if ports == nil {
 			return nil, fmt.Errorf("no available port block of size %d found (all ports in use or reserved)", count)
 		}
-		redisDB, redisPrefix, rerr := al.allocateRedisFrom(worktreeName, used.RedisDbs)
-		if rerr != nil {
-			return nil, rerr
+		redisDB, redisPrefix := 0, ""
+		if policy == nil {
+			var rerr error
+			redisDB, redisPrefix, rerr = al.allocateRedisFrom(worktreeName, used.RedisDbs)
+			if rerr != nil {
+				return nil, rerr
+			}
 		}
-		return &Allocation{
+		allocation := &Allocation{
 			Project:         project,
 			Worktree:        worktreePath,
 			WorktreeName:    worktreeName,
@@ -433,7 +544,16 @@ func (al *Allocator) allocateNew(worktreePath, worktreeName, branch string) (*Al
 			DatabaseAdapter: adapter,
 			RedisDB:         redisDB,
 			RedisPrefix:     redisPrefix,
-		}, nil
+		}
+		if policy != nil {
+			allocation.Databases = nil
+			allocation.ExtraKeys = nil
+			allocation.DatabaseAdapter = ""
+			if err := policy.ValidateAllocation(map[string]any(allocation.ToRegistryEntry())); err != nil {
+				return nil, err
+			}
+		}
+		return allocation, nil
 	}
 
 	if al.DryRun {
@@ -461,6 +581,22 @@ func (al *Allocator) allocateNew(worktreePath, worktreeName, branch string) (*Al
 		return nil, err
 	}
 	return alloc, nil
+}
+
+func (al *Allocator) validateManagedDevPortsFree(ports, usedPorts []int) error {
+	used := make(map[int]bool, len(usedPorts))
+	for _, port := range usedPorts {
+		used[port] = true
+	}
+	for _, port := range ports {
+		if used[port] {
+			return fmt.Errorf("app-managed dev port %d is already allocated", port)
+		}
+		if !al.portFree(port) {
+			return fmt.Errorf("app-managed dev port %d is busy", port)
+		}
+	}
+	return nil
 }
 
 // validatePortCount rejects non-positive port counts (which would otherwise
@@ -599,7 +735,7 @@ func (al *Allocator) nextAvailablePortsFromUsed(start, count int, usedPorts []in
 		for i := range count {
 			port := candidate + i
 			block[i] = port
-			if usedSet[port] || reserved[port] || port == routerPort || browserBlockedPorts[port] || CommonDevPorts[port] || !IsPortFree(port) {
+			if usedSet[port] || reserved[port] || port == routerPort || browserBlockedPorts[port] || CommonDevPorts[port] || !al.portFree(port) {
 				conflict = true
 			}
 		}
