@@ -283,12 +283,12 @@ func TestValidateManagedDevProjectRejectsUnsafeConfigBeforeEffects(t *testing.T)
 	}
 
 	cases := map[string]string{
-		"database":      "database:\n  adapter: sqlite\n  name: fixture.sqlite3\n",
-		"copy files":    "copy_files:\n  - .env\n",
-		"hooks":         "hooks:\n  pre_setup:\n    - touch denied\n",
-		"setup command": "commands:\n  setup:\n    - touch denied\n",
-		"provision":     "provision:\n  apt:\n    - redis\n",
-		"editor":        "editor:\n  title: fixture\n",
+		"missing SQLite template": "database:\n  adapter: sqlite\n  name: fixture.sqlite3\n",
+		"copy files":              "copy_files:\n  - .env\n",
+		"hooks":                   "hooks:\n  pre_setup:\n    - touch denied\n",
+		"setup command":           "commands:\n  setup:\n    - touch denied\n",
+		"provision":               "provision:\n  apt:\n    - redis\n",
+		"editor":                  "editor:\n  title: fixture\n",
 	}
 	for name, extra := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -2784,5 +2784,336 @@ env:
 `
 	if got := renderFixtureEnv(t, mapForm); got != wantFixtureEnv {
 		t.Errorf("map-form env output differs from the list-form equivalent:\n got:\n%s\nwant:\n%s", got, wantFixtureEnv)
+	}
+}
+
+func managedDevSQLiteSetup(t *testing.T) (*Setup, *allocator.Allocation) {
+	t.Helper()
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("TREELINE_MANAGED", "app")
+	t.Setenv("TREELINE_CHANNEL", "dev")
+	private := filepath.Join(home, ".treeline-dev", "gtl")
+	normal := filepath.Join(home, "Library", "Application Support", "git-treeline")
+	main := filepath.Join(home, ".treeline-dev", "workspaces", "main")
+	worktree := filepath.Join(home, ".treeline-dev", "workspaces", "feature")
+	for _, path := range []string{private, normal, main, worktree} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("GTL_HOME", private)
+	for path, data := range map[string]string{
+		filepath.Join(normal, "config.json"):    `{"port":{"increment":10,"reservations":{"@treeline-dev-qa/slot-01":42000,"@treeline-dev-qa/slot-02":42010,"@treeline-dev-qa/slot-03":42020,"@treeline-dev-qa/slot-04":42030}}}`,
+		filepath.Join(normal, "registry.json"):  `{"version":4,"allocations":[]}`,
+		filepath.Join(private, "config.json"):   `{"port":{"increment":10,"reservations":{"fixture/feature":42000,"fixture/main":42010}},"router":{"mode":"disabled"}}`,
+		filepath.Join(private, "registry.json"): `{"version":4,"allocations":[]}`,
+	} {
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{main, worktree} {
+		if out, err := exec.Command("git", "-C", path, "init", "-q", "-b", filepath.Base(path)).CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v: %s", err, out)
+		}
+		if out, err := exec.Command("git", "-C", path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "--no-verify", "-qm", "Fixture").CombinedOutput(); err != nil {
+			t.Fatalf("git fixture commit: %v: %s", err, out)
+		}
+		if err := os.WriteFile(filepath.Join(path, config.ProjectConfigFile), []byte("project: fixture\nport_count: 1\ndatabase:\n  adapter: sqlite\n  template: db/template.sqlite3\n  name: 'db/{worktree}.sqlite3'\nenv:\n  PORT: '{port}'\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := New(worktree, main, config.LoadUserConfig(filepath.Join(private, "config.json")))
+	s.Registry = registry.New(filepath.Join(private, "registry.json"))
+	s.Allocator = allocator.New(s.UserConfig, s.ProjectConfig, s.Registry)
+	s.Allocator.PortFree = func(int) bool { return true }
+	s.Log = &bytes.Buffer{}
+	alloc := &allocator.Allocation{Project: "fixture", Worktree: worktree, WorktreeName: "feature", Branch: "feature", Port: 42000, Ports: []int{42000}, DatabaseAdapter: "sqlite", Databases: allocator.ExpectedDatabases(s.ProjectConfig, "feature", false)}
+	return s, alloc
+}
+
+type changingSQLiteAdapter struct {
+	*fakeAdapter
+	probes     int
+	afterProbe func()
+	afterClone func()
+}
+
+func (a *changingSQLiteAdapter) Exists(name string) (bool, error) {
+	a.probes++
+	exists, err := a.fakeAdapter.Exists(name)
+	if a.afterProbe != nil {
+		a.afterProbe()
+	}
+	return exists, err
+}
+
+func (a *changingSQLiteAdapter) Clone(source, target string) error {
+	err := a.fakeAdapter.Clone(source, target)
+	if a.afterClone != nil {
+		a.afterClone()
+	}
+	return err
+}
+
+func TestManagedDevSQLiteSetupCloneAndEmptyFallback(t *testing.T) {
+	for _, templateExists := range []bool{true, false} {
+		t.Run(fmt.Sprint(templateExists), func(t *testing.T) {
+			s, alloc := managedDevSQLiteSetup(t)
+			source := filepath.Join(s.MainRepo, s.ProjectConfig.DatabaseTemplate())
+			target := filepath.Join(s.WorktreePath, alloc.PrimaryDatabase())
+			if templateExists {
+				if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				createSetupSQLiteFixture(t, source, 42)
+			}
+			if err := s.cloneDatabaseWith(&database.SQLite{}, "sqlite", alloc); err != nil {
+				t.Fatal(err)
+			}
+			if templateExists {
+				if got := setupSQLiteValue(t, target); got != "42" {
+					t.Fatalf("clone = %s", got)
+				}
+				if got := setupSQLiteValue(t, source); got != "42" {
+					t.Fatalf("source = %s", got)
+				}
+			} else {
+				info, err := os.Stat(target)
+				if err != nil || info.Size() != 0 || s.DBDegradation == nil {
+					t.Fatalf("empty fallback: %v, %+v", err, s.DBDegradation)
+				}
+				if _, err := os.Stat(source); !os.IsNotExist(err) {
+					t.Fatalf("missing template changed: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestManagedDevSQLiteSetupRefusesAliasesBeforeProbes(t *testing.T) {
+	for _, kind := range []string{"source symlink", "source hardlink", "target symlink", "target hardlink", "source parent", "source wal", "target journal"} {
+		t.Run(kind, func(t *testing.T) {
+			s, alloc := managedDevSQLiteSetup(t)
+			outside := filepath.Join(os.Getenv("HOME"), "outside")
+			if err := os.WriteFile(outside, []byte("sentinel"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			source := filepath.Join(s.MainRepo, s.ProjectConfig.DatabaseTemplate())
+			target := filepath.Join(s.WorktreePath, alloc.PrimaryDatabase())
+			if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			switch kind {
+			case "source symlink":
+				err = os.Symlink(outside, source)
+			case "source hardlink":
+				err = os.Link(outside, source)
+			case "target symlink":
+				err = os.Symlink(outside, target)
+			case "target hardlink":
+				err = os.Link(outside, target)
+			case "source parent":
+				if err = os.Remove(filepath.Dir(source)); err == nil {
+					err = os.Symlink(os.Getenv("HOME"), filepath.Dir(source))
+				}
+			case "source wal":
+				err = os.WriteFile(source+"-wal", []byte("wal"), 0o600)
+			case "target journal":
+				err = os.Symlink(outside, target+"-journal")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := &changingSQLiteAdapter{fakeAdapter: newFakeAdapter()}
+			if err := s.cloneDatabaseWith(a, "sqlite", alloc); err == nil {
+				t.Fatal("unsafe path accepted")
+			}
+			if a.probes != 0 || len(a.calls) != 0 || s.DBDegradation != nil {
+				t.Fatalf("effects before refusal: %+v", a)
+			}
+			data, err := os.ReadFile(outside)
+			if err != nil || string(data) != "sentinel" {
+				t.Fatalf("outside changed: %q %v", data, err)
+			}
+		})
+	}
+}
+
+func TestManagedDevSQLiteSetupDriftDoesNotFallBack(t *testing.T) {
+	for _, kind := range []string{"config probe", "policy clone", "target clone", "source clone"} {
+		t.Run(kind, func(t *testing.T) {
+			s, alloc := managedDevSQLiteSetup(t)
+			source := filepath.Join(s.MainRepo, s.ProjectConfig.DatabaseTemplate())
+			target := filepath.Join(s.WorktreePath, alloc.PrimaryDatabase())
+			outside := filepath.Join(os.Getenv("HOME"), "sentinel")
+			if err := os.WriteFile(outside, []byte("sentinel"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			a := &changingSQLiteAdapter{fakeAdapter: newFakeAdapter(source)}
+			a.cloneErr = errors.New("clone failed")
+			switch kind {
+			case "config probe":
+				a.afterProbe = func() {
+					if err := os.WriteFile(filepath.Join(s.WorktreePath, config.ProjectConfigFile), []byte("project: fixture\nport_count: 1\ndatabase:\n  adapter: postgresql\n  template: live\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "policy clone":
+				a.afterClone = func() {
+					if err := os.WriteFile(filepath.Join(os.Getenv("GTL_HOME"), "config.json"), []byte("{}"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "target clone":
+				a.afterClone = func() {
+					if err := os.Symlink(outside, target); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "source clone":
+				a.afterClone = func() {
+					if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Link(outside, source); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if err := s.cloneDatabaseWith(a, "sqlite", alloc); err == nil {
+				t.Fatal("drift accepted")
+			}
+			for _, call := range a.calls {
+				if strings.HasPrefix(call, "create:") {
+					t.Fatalf("drift fell through to create: %v", a.calls)
+				}
+			}
+			if s.DBDegradation != nil {
+				t.Fatalf("boundary failure became degradation: %+v", s.DBDegradation)
+			}
+			data, err := os.ReadFile(outside)
+			if err != nil || string(data) != "sentinel" {
+				t.Fatalf("outside changed: %q %v", data, err)
+			}
+		})
+	}
+}
+
+func TestManagedDevSQLiteSetupRejectsRetainedDatabaseDriftBeforeEnv(t *testing.T) {
+	for _, change := range []string{"name", "adapter", "basename"} {
+		t.Run(change, func(t *testing.T) {
+			s, alloc := managedDevSQLiteSetup(t)
+			switch change {
+			case "name":
+				alloc.Databases = []string{"other.sqlite3"}
+			case "adapter":
+				alloc.DatabaseAdapter = "postgresql"
+			case "basename":
+				alloc.Databases = allocator.ExpectedDatabases(s.ProjectConfig, "old-name", false)
+			}
+			if err := s.Registry.Allocate(alloc.ToRegistryEntry()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Run(); err == nil {
+				t.Fatal("retained drift accepted")
+			}
+			if _, err := os.Stat(filepath.Join(s.WorktreePath, s.ProjectConfig.EnvFileTarget())); !os.IsNotExist(err) {
+				t.Fatalf("env changed before refusal: %v", err)
+			}
+		})
+	}
+}
+
+func TestManagedDevSQLiteSetupMainTemplatePreserved(t *testing.T) {
+	s, alloc := managedDevSQLiteSetup(t)
+	s.WorktreePath = s.MainRepo
+	s.ProjectConfig = config.LoadProjectConfigReadOnly(s.MainRepo)
+	alloc.Worktree, alloc.WorktreeName, alloc.Branch = s.MainRepo, "main", "main"
+	alloc.MainWorktree, alloc.Port, alloc.Ports = true, 42010, []int{42010}
+	alloc.Databases = allocator.ExpectedDatabases(s.ProjectConfig, "main", true)
+	source := filepath.Join(s.MainRepo, s.ProjectConfig.DatabaseTemplate())
+	if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("template"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.cloneDatabaseWith(&database.SQLite{}, "sqlite", alloc); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(source)
+	if err != nil || string(data) != "template" {
+		t.Fatalf("template changed: %q %v", data, err)
+	}
+	if err := os.Remove(source); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.cloneDatabaseWith(&database.SQLite{}, "sqlite", alloc); err == nil {
+		t.Fatal("missing main template created")
+	}
+	if _, err := os.Stat(source); !os.IsNotExist(err) {
+		t.Fatalf("missing main template changed: %v", err)
+	}
+}
+
+func TestManagedDevSQLiteSetupPermissionErrorsFailHard(t *testing.T) {
+	for _, step := range []string{"exists", "clone", "create"} {
+		t.Run(step, func(t *testing.T) {
+			s, alloc := managedDevSQLiteSetup(t)
+			a := newFakeAdapter(filepath.Join(s.MainRepo, s.ProjectConfig.DatabaseTemplate()))
+			switch step {
+			case "exists":
+				a.existsErr = os.ErrPermission
+			case "clone":
+				a.cloneErr = os.ErrPermission
+			case "create":
+				a.existing = map[string]bool{}
+				a.createErr = os.ErrPermission
+			}
+			if err := s.cloneDatabaseWith(a, "sqlite", alloc); !errors.Is(err, os.ErrPermission) {
+				t.Fatalf("permission failure = %v", err)
+			}
+			if s.DBDegradation != nil {
+				t.Fatalf("permission failure became degradation: %+v", s.DBDegradation)
+			}
+			if step != "create" {
+				for _, call := range a.calls {
+					if strings.HasPrefix(call, "create:") {
+						t.Fatalf("permission failure fell back: %v", a.calls)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestManagedDevSQLiteSetupRunUsesAllocatedIdentity(t *testing.T) {
+	s, expected := managedDevSQLiteSetup(t)
+	source := filepath.Join(s.MainRepo, s.ProjectConfig.DatabaseTemplate())
+	if err := os.MkdirAll(filepath.Dir(source), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	createSetupSQLiteFixture(t, source, 73)
+	alloc, err := s.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alloc.PrimaryDatabase() != expected.PrimaryDatabase() || alloc.DatabaseAdapter != "sqlite" {
+		t.Fatalf("allocation identity = %+v", alloc)
+	}
+	if got := setupSQLiteValue(t, filepath.Join(s.WorktreePath, alloc.PrimaryDatabase())); got != "73" {
+		t.Fatalf("allocated clone = %s", got)
+	}
+	if got := setupSQLiteValue(t, source); got != "73" {
+		t.Fatalf("main template = %s", got)
+	}
+	if _, err := os.Stat(filepath.Join(s.WorktreePath, s.ProjectConfig.EnvFileTarget())); err != nil {
+		t.Fatalf("env was not written: %v", err)
 	}
 }

@@ -45,7 +45,11 @@ func ResolveRuntimeEnv(worktreePath string, uc *config.UserConfig) (map[string]s
 	}
 	interpAlloc := interpolation.Allocation(allocMap)
 	branch := worktree.CurrentBranch(absPath)
-	InjectRouterTokens(interpAlloc, pc.Project(), branch, uc.RouterDomain(), uc.TunnelDomain(""))
+	routerDomain := uc.RouterDomain()
+	if uc.RouterMode() == config.RouterModeDisabled {
+		routerDomain = ""
+	}
+	InjectRouterTokens(interpAlloc, pc.Project(), branch, routerDomain, uc.TunnelDomain(""))
 	redisURL := interpolation.BuildRedisURL(uc.RedisURL(), interpAlloc)
 	resolver := resolve.New(reg, absPath, branch)
 

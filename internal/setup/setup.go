@@ -173,6 +173,9 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 		if err := ValidateManagedDevProject(s.WorktreePath, s.MainRepo, s.ProjectConfig); err != nil {
 			return nil, err
 		}
+		if err := s.validateManagedDevSQLiteFiles(s.ProjectConfig, allocator.ExpectedDatabases(s.ProjectConfig, worktreeName, isMain)); err != nil {
+			return nil, err
+		}
 		if existing := s.Registry.Find(s.WorktreePath); existing != nil {
 			if err := devPolicy.ValidateAllocation(map[string]any(existing)); err != nil {
 				return nil, fmt.Errorf("refusing retained app-managed dev allocation before setup: %w", err)
@@ -180,8 +183,9 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 			expected, err := devPolicy.Ports(s.ProjectConfig.Project(), branch, isMain, s.ProjectConfig.PortsNeeded())
 			if err != nil || registry.GetString(existing, "project") != s.ProjectConfig.Project() ||
 				registry.GetString(existing, "branch") != branch || existing["main_worktree"] == true != isMain ||
-				!slices.Equal(registry.ExtractPorts(existing), expected) {
-				return nil, fmt.Errorf("refusing retained app-managed dev allocation before setup: project, branch, or port mapping changed")
+				!slices.Equal(registry.ExtractPorts(existing), expected) ||
+				allocator.ValidateManagedDevDatabaseBinding(s.ProjectConfig, existing) != nil {
+				return nil, fmt.Errorf("refusing retained app-managed dev allocation before setup: project, branch, port mapping, or database identity changed")
 			}
 		}
 	}
@@ -286,7 +290,7 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 // private development workspace root.
 func ValidateManagedDevProject(worktreePath, mainRepo string, pc *config.ProjectConfig) error {
 	if err := devresources.ValidateProject(pc); err != nil {
-		return fmt.Errorf("app-managed dev project is not an approved HTTP fixture: %w", err)
+		return fmt.Errorf("app-managed dev project is not an approved fixture: %w", err)
 	}
 	if err := validateManagedDevSetupTarget(worktreePath, mainRepo); err != nil {
 		return err
@@ -396,7 +400,8 @@ func validateManagedDevEnvFiles(worktreePath, mainRepo string, pc *config.Projec
 	}
 	check := func(root, relative, kind string) error {
 		path := filepath.Join(root, relative)
-		canonical, err := registry.CanonicalLifecycleTarget(path)
+		parent, err := registry.CanonicalLifecycleTarget(filepath.Dir(path))
+		canonical := filepath.Join(parent, filepath.Base(path))
 		if err != nil || canonical == root || !strings.HasPrefix(canonical, root+string(filepath.Separator)) {
 			return fmt.Errorf("app-managed dev %s escapes its repository", kind)
 		}
@@ -424,23 +429,66 @@ func validateManagedDevEnvFiles(worktreePath, mainRepo string, pc *config.Projec
 	return nil
 }
 
+func (s *Setup) validateManagedDevSQLiteFiles(pc *config.ProjectConfig, names []string) error {
+	if pc.DatabaseAdapter() != "sqlite" {
+		return nil
+	}
+	if err := devresources.ValidateSQLiteFile(s.MainRepo, pc.DatabaseTemplate()); err != nil {
+		return fmt.Errorf("refusing app-managed dev SQLite template: %w", err)
+	}
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if _, err := os.Lstat(filepath.Join(s.MainRepo, pc.DatabaseTemplate()) + suffix); !os.IsNotExist(err) {
+			return fmt.Errorf("app-managed dev SQLite template must be offline without companion files")
+		}
+	}
+	for _, name := range names {
+		if err := devresources.ValidateSQLiteFile(s.WorktreePath, name); err != nil {
+			return fmt.Errorf("refusing app-managed dev SQLite destination: %w", err)
+		}
+		if _, err := os.Lstat(filepath.Join(s.WorktreePath, name)); os.IsNotExist(err) {
+			for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+				if _, err := os.Lstat(filepath.Join(s.WorktreePath, name) + suffix); !os.IsNotExist(err) {
+					return fmt.Errorf("app-managed dev SQLite destination has companion files without a database")
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Setup) revalidateManagedDevAllocation(alloc *allocator.Allocation) error {
+	policy, err := devresources.Check()
+	if err != nil || policy == nil {
+		return fmt.Errorf("app-managed dev resource policy changed before setup effects")
+	}
+	fresh := config.LoadProjectConfigReadOnlyQuiet(s.WorktreePath)
+	if err := ValidateManagedDevProject(s.WorktreePath, s.MainRepo, fresh); err != nil {
+		return err
+	}
+	isMain := s.WorktreePath == s.MainRepo
+	expected, err := policy.Ports(fresh.Project(), alloc.Branch, isMain, fresh.PortsNeeded())
+	if err != nil || fresh.Project() != alloc.Project || !slices.Equal(expected, alloc.Ports) ||
+		alloc.MainWorktree != isMain || alloc.Worktree != s.WorktreePath ||
+		allocator.ValidateManagedDevDatabaseBinding(fresh, alloc.ToRegistryEntry()) != nil ||
+		fresh.DatabaseTemplate() != s.ProjectConfig.DatabaseTemplate() ||
+		policy.ValidateAllocation(map[string]any(alloc.ToRegistryEntry())) != nil {
+		return fmt.Errorf("app-managed dev allocation or project changed before setup effects")
+	}
+	if err := s.validateManagedDevSQLiteFiles(fresh, alloc.Databases); err != nil {
+		return err
+	}
+	s.ProjectConfig = fresh
+	if s.Allocator != nil {
+		s.Allocator.ProjectConfig = fresh
+	}
+	return nil
+}
+
 func (s *Setup) runPostAllocation(alloc *allocator.Allocation, redisURL string) error {
 	if devresources.Active() {
-		policy, err := devresources.Check()
-		if err != nil {
-			return fmt.Errorf("revalidating app-managed dev resources before setup effects: %w", err)
-		}
-		fresh := config.LoadProjectConfigReadOnlyQuiet(s.WorktreePath)
-		if err := ValidateManagedDevProject(s.WorktreePath, s.MainRepo, fresh); err != nil {
+		if err := s.revalidateManagedDevAllocation(alloc); err != nil {
 			return err
 		}
-		expected, err := policy.Ports(fresh.Project(), alloc.Branch, alloc.MainWorktree, fresh.PortsNeeded())
-		if err != nil || fresh.Project() != alloc.Project || !slices.Equal(expected, alloc.Ports) ||
-			policy.ValidateAllocation(map[string]any(alloc.ToRegistryEntry())) != nil {
-			return fmt.Errorf("app-managed dev allocation or project changed before setup effects")
-		}
-		s.ProjectConfig = fresh
-		s.Allocator.ProjectConfig = fresh
 	}
 	if err := s.copyFiles(); err != nil {
 		return fmt.Errorf("copying configured files: %w", err)
@@ -818,6 +866,22 @@ func (s *Setup) cloneDatabase(alloc *allocator.Allocation) error {
 // set — the same boundary SetupCommandError draws for user commands.
 // Split from cloneDatabase so tests can inject a fake adapter.
 func (s *Setup) cloneDatabaseWith(adapter database.Adapter, adapterName string, alloc *allocator.Allocation) error {
+	managed := devresources.Active()
+	validate := func() error {
+		if !managed {
+			return nil
+		}
+		if err := s.revalidateManagedDevAllocation(alloc); err != nil {
+			return err
+		}
+		if adapterName != s.ProjectConfig.DatabaseAdapter() {
+			return fmt.Errorf("app-managed dev database adapter changed before setup effects")
+		}
+		return nil
+	}
+	if err := validate(); err != nil {
+		return err
+	}
 	template := s.ProjectConfig.DatabaseTemplate()
 	if template == "" {
 		return nil
@@ -832,7 +896,24 @@ func (s *Setup) cloneDatabaseWith(adapter database.Adapter, adapterName string, 
 		template = filepath.Join(s.MainRepo, template)
 	}
 
+	fallback := func(reason string) error {
+		if err := validate(); err != nil {
+			return err
+		}
+		err := s.fallbackEmptyDatabase(adapter, primary, target, reason)
+		if boundaryErr := validate(); boundaryErr != nil {
+			return boundaryErr
+		}
+		return err
+	}
+
 	exists, err := adapter.Exists(target)
+	if boundaryErr := validate(); boundaryErr != nil {
+		return boundaryErr
+	}
+	if managed && errors.Is(err, os.ErrPermission) {
+		return err
+	}
 	if err != nil {
 		return s.degradeDatabase(primary, "absent", fmt.Sprintf("cannot check for database %s: %v", primary, err))
 	}
@@ -842,13 +923,22 @@ func (s *Setup) cloneDatabaseWith(adapter database.Adapter, adapterName string, 
 	}
 
 	templateExists, err := adapter.Exists(template)
+	if boundaryErr := validate(); boundaryErr != nil {
+		return boundaryErr
+	}
+	if managed && errors.Is(err, os.ErrPermission) {
+		return err
+	}
 	if err != nil {
 		return s.degradeDatabase(primary, "absent", fmt.Sprintf("cannot check for template database %s: %v", s.ProjectConfig.DatabaseTemplate(), err))
 	}
 	if !templateExists {
+		if managed && alloc.MainWorktree {
+			return fmt.Errorf("app-managed dev SQLite main template is missing; setup cannot create the clone source")
+		}
 		mode, err := s.provisionTemplate(adapter, adapterName, template)
 		if err != nil {
-			return s.fallbackEmptyDatabase(adapter, primary, target, err.Error())
+			return fallback(err.Error())
 		}
 		if mode == provision.DBModeEmpty {
 			// The template now exists but holds no schema or data, so the
@@ -861,8 +951,18 @@ func (s *Setup) cloneDatabaseWith(adapter database.Adapter, adapterName string, 
 	}
 
 	s.log("Cloning database %s → %s", s.ProjectConfig.DatabaseTemplate(), primary)
-	if err := adapter.Clone(template, target); err != nil {
-		return s.fallbackEmptyDatabase(adapter, primary, target, err.Error())
+	if err := validate(); err != nil {
+		return err
+	}
+	err = adapter.Clone(template, target)
+	if boundaryErr := validate(); boundaryErr != nil {
+		return boundaryErr
+	}
+	if managed && errors.Is(err, os.ErrPermission) {
+		return err
+	}
+	if err != nil {
+		return fallback(err.Error())
 	}
 	return nil
 }
@@ -981,6 +1081,9 @@ func (s *Setup) fallbackEmptyDatabase(adapter database.Adapter, primary, target,
 		return fmt.Errorf("database not cloned (--strict): %s", reason)
 	}
 	if err := adapter.Create(target); err != nil {
+		if devresources.Active() && errors.Is(err, os.ErrPermission) {
+			return err
+		}
 		return s.degradeDatabase(primary, "absent", fmt.Sprintf("%s; creating an empty database also failed: %v", reason, err))
 	}
 	s.log("Created empty database %s", primary)

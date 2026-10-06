@@ -2,10 +2,12 @@ package database
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -450,5 +452,139 @@ func TestSQLiteDropReportsCompanionFailure(t *testing.T) {
 				t.Fatal("fixture did not exercise partial deletion", err)
 			}
 		})
+	}
+}
+
+func TestSQLiteManagedCloneIgnoresUserStartupAndPreservesSource(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", dir)
+	t.Setenv("TREELINE_MANAGED", "app")
+	t.Setenv("TREELINE_CHANNEL", "dev")
+	template := filepath.Join(dir, "template.db")
+	target := filepath.Join(dir, "clone.db")
+	createSQLiteTable(t, template, "widgets", 42)
+	before, err := os.ReadFile(template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(dir, "startup-executed")
+	startup := fmt.Sprintf(".output %q\n.print startup-ran\n.output stdout\nUPDATE widgets SET value = 99;\n", sentinel)
+	if err := os.WriteFile(filepath.Join(dir, ".sqliterc"), []byte(startup), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var arguments []string
+	s := &SQLite{newCommand: func(name string, args ...string) *exec.Cmd {
+		arguments = append([]string(nil), args...)
+		return exec.Command(name, args...)
+	}}
+	if err := s.Clone(template, target); err != nil {
+		t.Fatal(err)
+	}
+	wantPrefix := []string{"-init", os.DevNull, "-readonly", "-nofollow", template}
+	if len(arguments) != len(wantPrefix)+1 || !reflect.DeepEqual(arguments[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("managed clone arguments: %q", arguments)
+	}
+	if _, err := os.Lstat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("SQLite startup file executed: %v", err)
+	}
+	after, err := os.ReadFile(template)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("source changed: %v", err)
+	}
+	output, err := exec.Command("sqlite3", "-init", os.DevNull, "-readonly", target, "SELECT value FROM widgets").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(output)) != "42" {
+		t.Fatalf("clone row=%q error=%v", output, err)
+	}
+}
+
+func TestSQLiteCloneUnmanagedArgumentsUnchanged(t *testing.T) {
+	for _, mode := range [][2]string{{"app", "stable"}, {"", "dev"}} {
+		t.Run(mode[0]+mode[1], func(t *testing.T) {
+			t.Setenv("TREELINE_MANAGED", mode[0])
+			t.Setenv("TREELINE_CHANNEL", mode[1])
+			dir := t.TempDir()
+			template := filepath.Join(dir, "template.db")
+			if err := os.WriteFile(template, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+			var arguments []string
+			s := &SQLite{newCommand: func(name string, args ...string) *exec.Cmd {
+				arguments = append([]string(nil), args...)
+				return exec.Command("false")
+			}}
+			if err := s.Clone(template, filepath.Join(dir, "clone.db")); err == nil {
+				t.Fatal("expected injected clone failure")
+			}
+			if len(arguments) != 2 || arguments[0] != template || !strings.HasPrefix(arguments[1], ".backup ") {
+				t.Fatalf("unmanaged clone arguments changed: %q", arguments)
+			}
+		})
+	}
+}
+
+func TestSQLiteManagedCreateRefusesExistingTargets(t *testing.T) {
+	for _, kind := range []string{"regular", "symlink", "dangling symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Setenv("TREELINE_MANAGED", "app")
+			t.Setenv("TREELINE_CHANNEL", "dev")
+			dir := t.TempDir()
+			target := filepath.Join(dir, "target.db")
+			outside := filepath.Join(dir, "outside.db")
+			if err := os.WriteFile(outside, []byte("outside sentinel"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			switch kind {
+			case "regular":
+				err = os.WriteFile(target, []byte("keep target"), 0600)
+			case "symlink":
+				err = os.Symlink(outside, target)
+			case "dangling symlink":
+				err = os.Symlink(outside+"-missing", target)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := (&SQLite{}).Create(target); err == nil {
+				t.Fatal("existing destination accepted")
+			}
+			data, err := os.ReadFile(outside)
+			if err != nil || string(data) != "outside sentinel" {
+				t.Fatalf("outside changed: %q %v", data, err)
+			}
+			if kind == "regular" {
+				data, err := os.ReadFile(target)
+				if err != nil || string(data) != "keep target" {
+					t.Fatalf("destination changed: %q %v", data, err)
+				}
+			} else {
+				want := outside
+				if kind == "dangling symlink" {
+					want += "-missing"
+					if _, err := os.Lstat(want); !os.IsNotExist(err) {
+						t.Fatalf("dangling destination created: %v", err)
+					}
+				}
+				if link, err := os.Readlink(target); err != nil || link != want {
+					t.Fatalf("symlink changed: %q %v", link, err)
+				}
+			}
+		})
+	}
+}
+
+func TestSQLiteManagedCreatePrivateFile(t *testing.T) {
+	t.Setenv("TREELINE_MANAGED", "app")
+	t.Setenv("TREELINE_CHANNEL", "dev")
+	target := filepath.Join(t.TempDir(), "new.db")
+	if err := (&SQLite{}).Create(target); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(target)
+	if err != nil || info.Size() != 0 || info.Mode().Perm() != 0600 {
+		t.Fatalf("invalid created file: %v %v", info, err)
 	}
 }

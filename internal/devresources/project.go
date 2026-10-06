@@ -1,13 +1,14 @@
 package devresources
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
 	"github.com/git-treeline/cli/internal/config"
 )
 
-// ValidateProject admits the HTTP fixture configuration without running hooks
+// ValidateProject admits HTTP and SQLite fixture configuration without running hooks
 // or interpreting application commands. Callers validate filesystem containment.
 func ValidateProject(pc *config.ProjectConfig) error {
 	if pc == nil || pc.Validate() != nil || !identifier.MatchString(pc.Project()) {
@@ -24,18 +25,27 @@ func ValidateProject(pc *config.ProjectConfig) error {
 			if !ok {
 				return refusal
 			}
+			sqlite := database["adapter"] == "sqlite"
+			if sqlite && !validSQLiteName(pc.DatabaseTemplate()) {
+				return refusal
+			}
 			for name, entry := range database {
 				switch name {
 				case "adapter":
-					if entry != "postgresql" {
+					if entry != "postgresql" && entry != "sqlite" {
 						return refusal
 					}
 				case "name":
-					if entry != "{template}_{worktree}" {
+					if sqlite {
+						pattern, ok := entry.(string)
+						if !ok || !validSQLitePattern(pattern) {
+							return refusal
+						}
+					} else if entry != "{template}_{worktree}" {
 						return refusal
 					}
 				case "template":
-					if entry != nil && entry != "" {
+					if !sqlite && entry != nil && entry != "" {
 						return refusal
 					}
 				default:
@@ -83,9 +93,12 @@ func ValidateProject(pc *config.ProjectConfig) error {
 			return refusal
 		}
 		for key, value := range entries {
-			_, ok := value.(string)
+			pattern, ok := value.(string)
 			if !ok || strings.ContainsAny(key, "\x00\r\n=") || key == "" {
 				return refusal
+			}
+			if strings.Contains(pattern, "{redis_url}") {
+				return fmt.Errorf("managed dev cannot derive {redis_url} without an admitted Redis resource: %w", refusal)
 			}
 		}
 	}

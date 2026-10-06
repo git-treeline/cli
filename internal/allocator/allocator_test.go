@@ -130,6 +130,85 @@ func TestManagedDevAllocateRejectsConfiguredResources(t *testing.T) {
 	}
 }
 
+func TestManagedDevSQLiteAllocationRetainsAndReusesDatabase(t *testing.T) {
+	for _, main := range []bool{false, true} {
+		t.Run(fmt.Sprint("main=", main), func(t *testing.T) {
+			key := "fixture/feature"
+			if main {
+				key = "fixture"
+			}
+			al, reg := managedDevAllocator(t, key)
+			configPath := filepath.Join(al.ProjectConfig.ProjectRoot, config.ProjectConfigFile)
+			body := "project: fixture\nport_count: 1\ndatabase:\n  adapter: sqlite\n  template: db/template.sqlite3\n  name: 'db/{worktree}.sqlite3'\n"
+			if err := os.WriteFile(configPath, []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			root := al.ProjectConfig.ProjectRoot
+			name := filepath.Base(root)
+			first, err := al.Allocate(root, name, main, "feature")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "db_fixture_sqlite3"
+			if main {
+				want = "db/template.sqlite3"
+			}
+			if first.DatabaseAdapter != "sqlite" || !slices.Equal(first.Databases, []string{want}) {
+				t.Fatalf("database stripped or naming changed: %#v", first)
+			}
+			second, err := al.Allocate(root, name, main, "feature")
+			if err != nil || !second.Reused || !slices.Equal(second.Databases, first.Databases) {
+				t.Fatalf("reuse: %#v %v", second, err)
+			}
+			before, err := os.ReadFile(reg.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed := strings.ReplaceAll(body, "db/template.sqlite3", "db/replaced.sqlite3")
+			if !main {
+				changed = strings.ReplaceAll(body, "db/{worktree}.sqlite3", "other/{worktree}.sqlite3")
+			}
+			if err := os.WriteFile(configPath, []byte(changed), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := al.Allocate(root, name, main, "feature"); err == nil {
+				t.Fatal("changed database configuration reused retained allocation")
+			}
+			after, err := os.ReadFile(reg.Path)
+			if err != nil || !slices.Equal(before, after) {
+				t.Fatal("refusal changed retained registry", err)
+			}
+		})
+	}
+}
+
+func TestManagedDevSQLiteAllocationRefusesDriftBeforeRegistryWrite(t *testing.T) {
+	al, _ := managedDevAllocator(t, "fixture/feature")
+	configPath := filepath.Join(al.ProjectConfig.ProjectRoot, config.ProjectConfigFile)
+	body := "project: fixture\nport_count: 1\ndatabase:\n  adapter: sqlite\n  template: db/template.sqlite3\n  name: '{worktree}'\n"
+	if err := os.WriteFile(configPath, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	registryPath := filepath.Join(os.Getenv("GTL_HOME"), "registry.json")
+	before, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	al.PortFree = func(int) bool {
+		if err := os.WriteFile(configPath, []byte(strings.ReplaceAll(body, "'{worktree}'", "'changed_{worktree}'")), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return true
+	}
+	if _, err := al.Allocate(al.ProjectConfig.ProjectRoot, "fixture", false, "feature"); err == nil {
+		t.Fatal("changed database configuration allocated")
+	}
+	after, err := os.ReadFile(registryPath)
+	if err != nil || !slices.Equal(before, after) {
+		t.Fatal("refusal changed registry", err)
+	}
+}
+
 func TestManagedDevAllocateRefusesRetainedMismatchAndBusyOwnPort(t *testing.T) {
 	for _, test := range []struct {
 		name string

@@ -208,29 +208,53 @@ func (p *Policy) ValidateAllocation(a map[string]any) error {
 			return refusal
 		}
 	}
-	for _, key := range []string{"database", "redis_prefix"} {
-		if value, present := a[key]; present && value != nil {
-			if text, ok := value.(string); !ok || text != "" {
-				return refusal
+	adapter := ""
+	if value, present := a["database_adapter"]; present && value != nil {
+		var ok bool
+		adapter, ok = value.(string)
+		if !ok || adapter != "" && adapter != "sqlite" {
+			return refusal
+		}
+	}
+	primary := ""
+	if value, present := a["database"]; present && value != nil {
+		var ok bool
+		primary, ok = value.(string)
+		if !ok {
+			return refusal
+		}
+	}
+	var databases []string
+	if value, present := a["databases"]; present && value != nil {
+		switch v := value.(type) {
+		case []any:
+			for _, value := range v {
+				name, ok := value.(string)
+				if !ok {
+					return refusal
+				}
+				databases = append(databases, name)
 			}
+		case []string:
+			databases = v
+		default:
+			return refusal
+		}
+	}
+	if adapter == "sqlite" {
+		if len(databases) != 1 || databases[0] != primary || !validSQLiteName(primary) {
+			return refusal
+		}
+	} else if primary != "" || len(databases) != 0 {
+		return refusal
+	}
+	if value, present := a["redis_prefix"]; present && value != nil {
+		if text, ok := value.(string); !ok || text != "" {
+			return refusal
 		}
 	}
 	if value, present := a["redis_db"]; present && value != nil {
 		return refusal
-	}
-	if value, present := a["databases"]; present && value != nil {
-		switch v := value.(type) {
-		case []any:
-			if len(v) != 0 {
-				return refusal
-			}
-		case []string:
-			if len(v) != 0 {
-				return refusal
-			}
-		default:
-			return refusal
-		}
 	}
 	if value, present := a["database_extra"]; present && value != nil {
 		switch v := value.(type) {

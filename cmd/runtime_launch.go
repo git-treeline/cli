@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"slices"
 
+	"github.com/git-treeline/cli/internal/allocator"
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/devresources"
 	"github.com/git-treeline/cli/internal/format"
@@ -44,6 +45,14 @@ func validateManagedDevRuntime(dir string, allocation registry.Allocation, requi
 	}
 	if err := policy.ValidateAllocation(map[string]any(allocation)); err != nil {
 		return err
+	}
+	if err := allocator.ValidateManagedDevDatabaseBinding(pc, allocation); err != nil {
+		return err
+	}
+	for _, name := range registry.ExtractDatabases(allocation) {
+		if err := devresources.ValidateSQLiteFile(dir, name); err != nil {
+			return err
+		}
 	}
 	branch := worktree.CurrentBranch(dir)
 	main := false

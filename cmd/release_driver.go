@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/git-treeline/cli/internal/allocator"
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/devresources"
 	"github.com/git-treeline/cli/internal/format"
@@ -59,16 +60,17 @@ func validateManagedDevRelease(op registry.ReleaseOperation) error {
 		return nil
 	}
 	snapshot := op.Snapshot
-	if snapshot.DatabaseAdapter != "" || len(snapshot.Databases) != 0 || snapshot.RedisDB != nil {
-		return errors.New("managed dev release resources are unavailable")
-	}
 	allocation := registry.Allocation{
-		"worktree":      op.Target.Path,
-		"project":       snapshot.Project,
-		"branch":        snapshot.Branch,
-		"main_worktree": snapshot.MainWorktree,
-		"ports":         snapshot.Ports,
-		"databases":     snapshot.Databases,
+		"worktree":         op.Target.Path,
+		"project":          snapshot.Project,
+		"branch":           snapshot.Branch,
+		"main_worktree":    snapshot.MainWorktree,
+		"ports":            snapshot.Ports,
+		"database_adapter": snapshot.DatabaseAdapter,
+		"databases":        snapshot.Databases,
+	}
+	if len(snapshot.Databases) > 0 {
+		allocation["database"] = snapshot.Databases[0]
 	}
 	if snapshot.RedisDB != nil {
 		allocation["redis_db"] = *snapshot.RedisDB
@@ -91,13 +93,42 @@ func validateManagedDevRelease(op registry.ReleaseOperation) error {
 		if err := policy.ValidateAllocation(map[string]any(current)); err != nil {
 			return err
 		}
+		if registry.GetString(current, "database_adapter") != snapshot.DatabaseAdapter ||
+			!slices.Equal(registry.ExtractDatabases(current), snapshot.Databases) ||
+			(current["main_worktree"] == true) != snapshot.MainWorktree ||
+			registry.GetString(current, "project") != snapshot.Project ||
+			registry.GetString(current, "branch") != snapshot.Branch ||
+			!slices.Equal(registry.ExtractPorts(current), snapshot.Ports) {
+			return errors.New("managed dev release snapshot changed")
+		}
 	} else if remainingReleasePhase(op, registry.PhaseAllocation) {
 		return errors.New("managed dev release allocation proof unavailable")
 	}
 	if _, err := os.Stat(op.Target.Path); err == nil {
-		return setup.ValidateManagedDevProject(op.Target.Path, op.Target.Path, config.LoadProjectConfigReadOnlyQuiet(op.Target.Path))
+		pc := config.LoadProjectConfigReadOnlyQuiet(op.Target.Path)
+		if err := setup.ValidateManagedDevProject(op.Target.Path, op.Target.Path, pc); err != nil {
+			return err
+		}
+		if err := allocator.ValidateManagedDevDatabaseBinding(pc, allocation); err != nil {
+			return err
+		}
+		for _, name := range snapshot.Databases {
+			if err := devresources.ValidateSQLiteFile(op.Target.Path, name); err != nil {
+				return err
+			}
+			if _, err := os.Lstat(filepath.Join(op.Target.Path, name) + "-journal"); !os.IsNotExist(err) {
+				return errors.New("managed dev release SQLite journal unavailable for cleanup")
+			}
+		}
 	} else if !os.IsNotExist(err) || remainingReleasePhase(op, registry.PhaseWorktree) {
 		return errors.New("managed dev release target unavailable")
+	} else if op.Policy.DropDatabases {
+		for _, phase := range op.Phases {
+			if phase.Name == registry.PhaseDatabases && phase.State == "completed" {
+				return nil
+			}
+		}
+		return errors.New("managed dev release database cleanup incomplete")
 	}
 	return nil
 }
@@ -235,7 +266,7 @@ func (d *releaseDriver) preflight(ctx context.Context, op registry.ReleaseOperat
 			if registry.VerifyReleaseTarget(op.Target) != nil {
 				return errors.New("target changed")
 			}
-			return nil
+			return validateManagedDevRelease(op)
 		}})
 		if err != nil {
 			if errors.Is(err, format.ErrDatabaseCleanupConfig) {

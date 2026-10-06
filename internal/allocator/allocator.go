@@ -7,6 +7,7 @@ package allocator
 import (
 	"fmt"
 	"net"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -262,6 +263,9 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string, mainWorktr
 		if err := devPolicy.ValidateAllocation(map[string]any(entry)); err != nil {
 			return nil, fmt.Errorf("refusing retained app-managed dev allocation: %w", err)
 		}
+		if err := ValidateManagedDevDatabaseBinding(al.ProjectConfig, entry); err != nil {
+			return nil, err
+		}
 		expected, err := devPolicy.Ports(al.ProjectConfig.Project(), branch, mainWorktree, al.ProjectConfig.PortsNeeded())
 		if err != nil || registry.GetString(entry, "project") != al.ProjectConfig.Project() ||
 			registry.GetString(entry, "branch") != branch || entry["main_worktree"] == true != mainWorktree ||
@@ -360,7 +364,7 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string, mainWorktr
 	}
 	if devPolicy != nil {
 		fresh := config.LoadProjectConfigReadOnlyQuiet(al.ProjectConfig.ProjectRoot)
-		if err := devresources.ValidateProject(fresh); err != nil || fresh.Project() != project || fresh.PortsNeeded() != len(ports) {
+		if err := devresources.ValidateProject(fresh); err != nil || fresh.Project() != project || fresh.PortsNeeded() != len(ports) || ValidateManagedDevDatabaseBinding(fresh, entry) != nil {
 			return nil, fmt.Errorf("app-managed dev project changed before allocation reuse")
 		}
 		policy, err := devresources.Check()
@@ -385,10 +389,7 @@ func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*A
 	// auxiliary databases still render, with {database} = the template:
 	// otherwise a shared env block referencing {database_2} would write the
 	// literal token into the main repo's env file.
-	var mainDatabases []string
-	if t := al.ProjectConfig.DatabaseTemplate(); t != "" {
-		mainDatabases = append([]string{t}, al.renderExtraNames(t, sanitizeIdentifier(worktreeName))...)
-	}
+	mainDatabases := ExpectedDatabases(al.ProjectConfig, worktreeName, true)
 
 	// build selects the main worktree's port block against a snapshot of
 	// already-used ports. Like allocateNew it runs inside the registry lock for a
@@ -403,7 +404,7 @@ func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*A
 		if devresources.Active() {
 			var err error
 			fresh := config.LoadProjectConfigReadOnlyQuiet(al.ProjectConfig.ProjectRoot)
-			if err := devresources.ValidateProject(fresh); err != nil || fresh.Project() != project || fresh.PortsNeeded() != count {
+			if err := devresources.ValidateProject(fresh); err != nil || fresh.Project() != project || fresh.PortsNeeded() != count || fresh.DatabaseAdapter() != al.ProjectConfig.DatabaseAdapter() || !slices.Equal(ExpectedDatabases(fresh, worktreeName, true), mainDatabases) {
 				return nil, fmt.Errorf("app-managed dev project changed before allocation")
 			}
 			policy, err = devresources.Check()
@@ -443,10 +444,16 @@ func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*A
 			MainWorktree:    true,
 		}
 		if policy != nil {
-			allocation.Databases = nil
-			allocation.ExtraKeys = nil
-			allocation.DatabaseAdapter = ""
+			allocation.Branch = branch
+			if allocation.DatabaseAdapter != "sqlite" {
+				allocation.Databases = nil
+				allocation.ExtraKeys = nil
+				allocation.DatabaseAdapter = ""
+			}
 			if err := policy.ValidateAllocation(map[string]any(allocation.ToRegistryEntry())); err != nil {
+				return nil, err
+			}
+			if err := ValidateManagedDevDatabaseBinding(config.LoadProjectConfigReadOnlyQuiet(al.ProjectConfig.ProjectRoot), allocation.ToRegistryEntry()); err != nil {
 				return nil, err
 			}
 		}
@@ -493,7 +500,7 @@ func (al *Allocator) allocateNew(worktreePath, worktreeName, branch string) (*Al
 		if devresources.Active() {
 			var err error
 			fresh := config.LoadProjectConfigReadOnlyQuiet(al.ProjectConfig.ProjectRoot)
-			if err := devresources.ValidateProject(fresh); err != nil || fresh.Project() != project || fresh.PortsNeeded() != count {
+			if err := devresources.ValidateProject(fresh); err != nil || fresh.Project() != project || fresh.PortsNeeded() != count || fresh.DatabaseAdapter() != adapter || !slices.Equal(ExpectedDatabases(fresh, worktreeName, false), databases) {
 				return nil, fmt.Errorf("app-managed dev project changed before allocation")
 			}
 			policy, err = devresources.Check()
@@ -546,10 +553,15 @@ func (al *Allocator) allocateNew(worktreePath, worktreeName, branch string) (*Al
 			RedisPrefix:     redisPrefix,
 		}
 		if policy != nil {
-			allocation.Databases = nil
-			allocation.ExtraKeys = nil
-			allocation.DatabaseAdapter = ""
+			if allocation.DatabaseAdapter != "sqlite" {
+				allocation.Databases = nil
+				allocation.ExtraKeys = nil
+				allocation.DatabaseAdapter = ""
+			}
 			if err := policy.ValidateAllocation(map[string]any(allocation.ToRegistryEntry())); err != nil {
+				return nil, err
+			}
+			if err := ValidateManagedDevDatabaseBinding(config.LoadProjectConfigReadOnlyQuiet(al.ProjectConfig.ProjectRoot), allocation.ToRegistryEntry()); err != nil {
 				return nil, err
 			}
 		}
@@ -830,6 +842,36 @@ func sanitizeIdentifier(s string) string {
 	s = sanitizeRe.ReplaceAllString(s, "_")
 	s = collapseRe.ReplaceAllString(s, "_")
 	return strings.Trim(s, "_")
+}
+
+// ExpectedDatabases uses the allocation naming rules without allocating resources.
+func ExpectedDatabases(pc *config.ProjectConfig, worktreeName string, main bool) []string {
+	al := &Allocator{ProjectConfig: pc}
+	if !main {
+		return al.buildDatabaseNames(worktreeName)
+	}
+	if template := pc.DatabaseTemplate(); template != "" {
+		return append([]string{template}, al.renderExtraNames(template, sanitizeIdentifier(worktreeName))...)
+	}
+	return nil
+}
+
+// ValidateManagedDevDatabaseBinding keeps retained resources tied to the current
+// configuration. Structural resource admission remains the policy's responsibility.
+func ValidateManagedDevDatabaseBinding(pc *config.ProjectConfig, entry registry.Allocation) error {
+	if err := devresources.ValidateProject(pc); err != nil {
+		return err
+	}
+	var expected []string
+	adapter := ""
+	if pc.DatabaseAdapter() == "sqlite" {
+		adapter = "sqlite"
+		expected = ExpectedDatabases(pc, filepath.Base(registry.GetString(entry, "worktree")), entry["main_worktree"] == true)
+	}
+	if registry.GetString(entry, "project") != pc.Project() || registry.GetString(entry, "database_adapter") != adapter || !slices.Equal(registry.ExtractDatabases(entry), expected) {
+		return fmt.Errorf("app-managed dev database allocation no longer matches project configuration")
+	}
+	return nil
 }
 
 // buildDatabaseNames renders database.pattern into concrete names, in order.

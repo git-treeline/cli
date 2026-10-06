@@ -35,6 +35,9 @@ func (a releaseDatabasesAdapter) Run(ctx context.Context, op registry.ReleaseOpe
 	if !started {
 		return blocked
 	}
+	if err := validateManagedDevRelease(op); err != nil {
+		return blocked
+	}
 	keep, err := a.survivors(op)
 	if err != nil {
 		return blocked
@@ -58,7 +61,7 @@ func (a releaseDatabasesAdapter) Run(ctx context.Context, op registry.ReleaseOpe
 			if err != nil || !reflect.DeepEqual(currentKeep, keep) {
 				return errors.New("release_survivors_changed")
 			}
-			return nil
+			return validateManagedDevRelease(op)
 		},
 	})
 	if err != nil {
