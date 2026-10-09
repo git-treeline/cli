@@ -7,7 +7,6 @@ import (
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/format"
 	"github.com/git-treeline/cli/internal/proxy"
-	"github.com/git-treeline/cli/internal/service"
 	"github.com/spf13/cobra"
 )
 
@@ -60,8 +59,7 @@ Examples:
 		branch := format.GetStr(fa, "branch")
 		domain := uc.RouterDomain()
 		routerPort := uc.RouterPort()
-		svcRunning := service.IsRunning()
-		pfConfigured := service.IsPortForwardConfigured()
+		svcRunning, pfConfigured := routerStatus(uc)
 
 		routes := buildRoutes(ports, project, branch, domain, routerPort, svcRunning, pfConfigured)
 

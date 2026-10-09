@@ -11,6 +11,11 @@ import (
 	"github.com/git-treeline/cli/internal/service"
 )
 
+var (
+	routerServiceRunning        = service.IsRunning
+	routerPortForwardConfigured = service.IsPortForwardConfigured
+)
+
 // wtAlloc is the current directory's registry allocation, resolved once so
 // commands don't each repeat the cwd -> registry -> allocation lookup.
 type wtAlloc struct {
@@ -68,5 +73,13 @@ func (w *wtAlloc) PrimaryPort() (int, error) {
 // domain/port and the live socket / port-forward checks) shared by call
 // sites that resolve a URL for a project/branch/port from user config.
 func routerURLFor(uc *config.UserConfig, port int, project, branch string) string {
-	return proxy.BuildRouterURL(port, project, branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
+	running, forwarded := routerStatus(uc)
+	return proxy.BuildRouterURL(port, project, branch, uc.RouterDomain(), uc.RouterPort(), running, forwarded)
+}
+
+func routerStatus(uc *config.UserConfig) (bool, bool) {
+	if uc.RouterMode() == config.RouterModeDisabled {
+		return false, false
+	}
+	return routerServiceRunning(), routerPortForwardConfigured()
 }
