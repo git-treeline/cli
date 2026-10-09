@@ -51,11 +51,15 @@ func (e *SetupCommandError) Unwrap() error { return e.Err }
 // setup commands or cloning databases. StrictDB restores the hard failure
 // when the worktree database degrades (template missing, clone or fallback
 // failed) instead of continuing with a warning — for callers that treat
-// exit 0 as "environment fully ready".
+// exit 0 as "environment fully ready". AllocateOnly requires fresh creation
+// ownership and stops after resource enrollment. CompleteAllocation resumes
+// provisioning for an exact never-started generation under CompletionLocks.
 type Options struct {
-	DryRun      bool
-	RefreshOnly bool
-	StrictDB    bool
+	DryRun             bool
+	RefreshOnly        bool
+	StrictDB           bool
+	AllocateOnly       bool
+	CompleteAllocation string
 }
 
 // HydrateTemplateFromSource hydrates a missing template database from a
@@ -98,15 +102,16 @@ var RegistryPath string
 // Setup orchestrates worktree provisioning. It combines allocation, database
 // cloning, environment file generation, and setup command execution.
 type Setup struct {
-	WorktreePath  string
-	MainRepo      string
-	UserConfig    *config.UserConfig
-	ProjectConfig *config.ProjectConfig
-	Registry      *registry.Registry
-	Allocator     *allocator.Allocator
-	Log           io.Writer
-	Options       Options
-	Resolver      interpolation.ResolveFunc
+	WorktreePath    string
+	MainRepo        string
+	UserConfig      *config.UserConfig
+	ProjectConfig   *config.ProjectConfig
+	Registry        *registry.Registry
+	Allocator       *allocator.Allocator
+	Log             io.Writer
+	Options         Options
+	CompletionLocks *registry.LifecycleLocks
+	Resolver        interpolation.ResolveFunc
 
 	// DBDegradation is set when the database step degraded instead of
 	// failing (nil on a healthy run). Populated by Run; read by callers
@@ -137,7 +142,7 @@ func NewWithOptions(worktreePath string, mainRepo string, uc *config.UserConfig,
 	}
 
 	var pc *config.ProjectConfig
-	if options.DryRun || devresources.Active() {
+	if options.DryRun || options.AllocateOnly || options.CompleteAllocation != "" || devresources.Active() {
 		pc = config.LoadProjectConfigReadOnly(absPath)
 	} else {
 		pc = config.LoadProjectConfig(absPath)
@@ -158,6 +163,15 @@ func NewWithOptions(worktreePath string, mainRepo string, uc *config.UserConfig,
 }
 
 func (s *Setup) Run() (*allocator.Allocation, error) {
+	if s.Options.AllocateOnly && (s.Options.DryRun || s.Allocator.FreshTarget == nil || s.Allocator.FreshLocks == nil) {
+		return nil, fmt.Errorf("allocation-only setup requires fresh creation ownership")
+	}
+	if s.Options.CompleteAllocation != "" {
+		if err := s.validateAllocationCompletion(); err != nil {
+			return nil, err
+		}
+		s.Allocator.ReuseOnly = true
+	}
 	worktreeName := filepath.Base(s.WorktreePath)
 	isMain := s.WorktreePath == s.MainRepo
 	var devPolicy *devresources.Policy
@@ -192,7 +206,7 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	if err := s.ProjectConfig.Validate(); err != nil {
 		return nil, err
 	}
-	if !s.Options.DryRun && devPolicy == nil {
+	if !s.Options.DryRun && !s.Options.AllocateOnly && s.Options.CompleteAllocation == "" && devPolicy == nil {
 		if err := s.handleProjectRename(); err != nil {
 			return nil, err
 		}
@@ -211,6 +225,9 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	}
 
 	alloc.Branch = branch
+	if s.Options.AllocateOnly {
+		return alloc, nil
+	}
 	redisURL := s.Allocator.BuildRedisURL(alloc)
 
 	if s.Options.DryRun {
@@ -218,7 +235,7 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	}
 
 	if alloc.Reused {
-		if alloc.Branch != "" {
+		if alloc.Branch != "" && s.Options.CompleteAllocation == "" {
 			_ = s.Registry.UpdateField(s.WorktreePath, "branch", alloc.Branch)
 		}
 		s.log("Reusing existing allocation for '%s'", worktreeName)
@@ -281,6 +298,27 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 	}
 
 	return alloc, nil
+}
+
+func (s *Setup) validateAllocationCompletion() error {
+	if s.Options.DryRun || s.Options.AllocateOnly || s.Options.RefreshOnly || s.CompletionLocks == nil ||
+		!slices.Contains(s.CompletionLocks.Paths(), s.WorktreePath) || !slices.Contains(s.CompletionLocks.Paths(), s.MainRepo) ||
+		s.WorktreePath == s.MainRepo || worktree.DetectMainRepo(s.WorktreePath) != s.MainRepo {
+		return fmt.Errorf("allocation completion requires a locked linked worktree")
+	}
+	if _, err := registry.CaptureReleaseTarget(s.WorktreePath); err != nil {
+		return err
+	}
+	entry, err := s.Registry.FindForRelease(s.WorktreePath)
+	if err != nil {
+		return err
+	}
+	binding, err := registry.AllocationRuntimeBinding(entry)
+	if err != nil || entry == nil || entry["main_worktree"] == true || registry.GetString(entry, "worktree") != s.WorktreePath ||
+		registry.GetString(entry, "allocation_generation") != s.Options.CompleteAllocation || binding.Kind != "never_started" {
+		return fmt.Errorf("allocation completion identity or never-started ownership changed")
+	}
+	return nil
 }
 
 // ValidateManagedDevProject performs the read-only project and containment
@@ -508,8 +546,8 @@ func (s *Setup) runPostAllocation(alloc *allocator.Allocation, redisURL string) 
 		return nil
 	}
 
-	if alloc.PrimaryDatabase() != "" && !alloc.Reused {
-		if s.ProjectConfig.DatabaseSyncOnCreate() {
+	if alloc.PrimaryDatabase() != "" && (!alloc.Reused || s.Options.CompleteAllocation != "") {
+		if s.ProjectConfig.DatabaseSyncOnCreate() && s.Options.CompleteAllocation == "" {
 			if err := s.syncTemplateDatabase(); err != nil {
 				return err
 			}
@@ -922,6 +960,11 @@ func (s *Setup) cloneDatabaseWith(adapter database.Adapter, adapterName string, 
 		return nil
 	}
 
+	if s.Options.CompleteAllocation != "" && s.ProjectConfig.DatabaseSyncOnCreate() {
+		if err := s.syncTemplateDatabase(); err != nil {
+			return err
+		}
+	}
 	templateExists, err := adapter.Exists(template)
 	if boundaryErr := validate(); boundaryErr != nil {
 		return boundaryErr

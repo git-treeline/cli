@@ -972,11 +972,11 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 |---|---|---|
 | `gtl install` | | Set up git-treeline for this project and machine (config, hook, setup, optional HTTPS) |
 | `gtl init` | `--project` `--template-db` `--skip-agent-config` | Generate `.treeline.yml` (auto-detects framework, writes `AGENTS.md` section) |
-| `gtl new <branch>` | `--base` `--path` `--start` `--open` `--no-setup` `--strict` `--dry-run` `--force`/`-f` | Create worktree + allocate + setup in one step |
+| `gtl new <branch>` | `--base` `--path` `--start` `--open` `--no-setup` `--allocate-only` `--strict` `--dry-run` `--force`/`-f` | Create worktree + allocate + setup in one step; `--allocate-only` requires a fresh destination and defers environment/provisioning to `gtl setup --complete-allocation <generation>` |
 | `gtl claim <branch>` | `--path` `--no-setup` | Fetch a branch and ensure a worktree exists at its latest commit — adopts (never creates) the branch and fast-forwards; idempotent, prints only the worktree path to stdout |
 | `gtl review <PR#>` | `--path` `--start` `--open` `--no-setup` | Check out a GitHub PR into a worktree with full setup (requires `gh`) |
 | `gtl switch <branch-or-PR#>` | `--setup` `--restart` | Switch worktree to a different branch or PR — fetches, checks out, refreshes env |
-| `gtl setup [PATH]` | `--main-repo` `--dry-run` | Allocate resources and configure a worktree (idempotent) |
+| `gtl setup [PATH]` | `--main-repo` `--dry-run` `--complete-allocation <generation>` | Allocate resources and configure a worktree (idempotent) |
 | `gtl provision [PATH]` | `--dry-run` | Make a host meet a repo's declared prerequisites (apt/services/runtimes/template DB) before setup (idempotent) |
 | `gtl release [PATH]` | `--drop-db` `--remove-worktree` `--project` `--all` `--force`/`-f` `--dry-run` | Free allocated resources (confirms before releasing unless `--force`) |
 | `gtl port` | `--json` | Print the allocated port for the current worktree |

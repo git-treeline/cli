@@ -29,6 +29,7 @@ type Allocator struct {
 	// sequence, immediately after creating a previously absent worktree.
 	FreshTarget *registry.TargetIdentity
 	FreshLocks  *registry.LifecycleLocks
+	ReuseOnly   bool
 	// SupervisorLive reports whether the given worktree has its own live
 	// supervisor (its control socket responds). Used during reuse so a busy
 	// allocated port held by the worktree's own dev server isn't mistaken for a
@@ -234,6 +235,9 @@ func (al *Allocator) Allocate(worktreePath, worktreeName string, mainWorktree bo
 	} else if existing != nil {
 		return existing, nil
 	}
+	if al.ReuseOnly {
+		return nil, fmt.Errorf("retained allocation cannot be reused without resource changes")
+	}
 	if mainWorktree {
 		return al.allocateMain(worktreePath, worktreeName, b)
 	}
@@ -258,6 +262,12 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string, mainWorktr
 	entry := al.Registry.Find(worktreePath)
 	if entry == nil {
 		return nil, nil
+	}
+	if al.ReuseOnly && (mainWorktree || entry["main_worktree"] == true || registry.GetString(entry, "project") != al.ProjectConfig.Project() || registry.GetString(entry, "branch") != branch ||
+		!slices.Equal(registry.ExtractDatabases(entry), ExpectedDatabases(al.ProjectConfig, worktreeName, false)) ||
+		!slices.Equal(registry.ExtractExtraDatabaseKeys(entry), al.extraKeysFor(ExpectedDatabases(al.ProjectConfig, worktreeName, false))) ||
+		devPolicy == nil && registry.GetString(entry, "database_adapter") != al.ProjectConfig.DatabaseAdapter()) {
+		return nil, fmt.Errorf("retained allocation no longer matches project configuration")
 	}
 	if devPolicy != nil {
 		if err := devPolicy.ValidateAllocation(map[string]any(entry)); err != nil {
@@ -350,6 +360,9 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string, mainWorktr
 	for _, p := range ports {
 		if al.portFree(p) {
 			continue
+		}
+		if al.ReuseOnly {
+			return nil, fmt.Errorf("retained allocation port %d is busy", p)
 		}
 		if devPolicy != nil {
 			return nil, fmt.Errorf("refusing busy app-managed dev port %d", p)

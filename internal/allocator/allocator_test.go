@@ -1974,3 +1974,44 @@ func TestFreshAllocationPrefixedRedisCanPrepareRelease(t *testing.T) {
 		t.Fatalf("prefixed cleanup snapshot=%+v error=%v", op.Snapshot, err)
 	}
 }
+
+func TestReuseOnlyAllocationRefusesReplacement(t *testing.T) {
+	for _, variant := range []string{"unchanged", "busy", "ports", "project", "database", "missing"} {
+		t.Run(variant, func(t *testing.T) {
+			al, reg, root := freshAllocatorFixture(t)
+			al.PortFree = func(int) bool { return true }
+			if _, err := al.Allocate(root, "fresh", false, "fresh"); err != nil {
+				t.Fatal(err)
+			}
+			al.FreshTarget, al.FreshLocks, al.ReuseOnly = nil, nil, true
+			switch variant {
+			case "busy":
+				al.PortFree = func(int) bool { return false }
+			case "ports":
+				al.ProjectConfig.Data["port_count"] = 2
+			case "project":
+				al.ProjectConfig.Data["project"] = "different"
+			case "database":
+				al.ProjectConfig.Data["database"] = map[string]any{"adapter": "sqlite", "template": "fixture.db", "name": "clone"}
+			case "missing":
+				root = filepath.Join(root, "missing")
+			}
+			before, err := os.ReadFile(reg.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := al.Allocate(root, "fresh", false, "fresh")
+			if variant == "unchanged" {
+				if err != nil || got == nil || !got.Reused {
+					t.Fatal("retained allocation refused", err)
+				}
+			} else if err == nil {
+				t.Fatal("reuse-only replaced resources")
+			}
+			after, err := os.ReadFile(reg.Path)
+			if err != nil || string(before) != string(after) {
+				t.Fatal("reuse-only changed registry", err)
+			}
+		})
+	}
+}

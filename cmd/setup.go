@@ -19,10 +19,13 @@ import (
 
 var setupMainRepo string
 var setupDryRun bool
+var setupCompleteAllocation string
 
 func init() {
 	setupCmd.Flags().StringVar(&setupMainRepo, "main-repo", "", "Path to the main repository (auto-detected if omitted)")
 	setupCmd.Flags().BoolVar(&setupDryRun, "dry-run", false, "Print what would be allocated without writing anything")
+	setupCmd.Flags().StringVar(&setupCompleteAllocation, "complete-allocation", "", "Complete setup for the exact never-started allocation generation without replacing resources")
+	setupCmd.MarkFlagsMutuallyExclusive("complete-allocation", "dry-run")
 	rootCmd.AddCommand(setupCmd)
 }
 
@@ -55,6 +58,9 @@ var setupCmd = &cobra.Command{
 	Short: "Allocate resources and set up a worktree environment",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if cmd.Flags().Changed("complete-allocation") && setupCompleteAllocation == "" {
+			return fmt.Errorf("--complete-allocation requires an allocation generation")
+		}
 		if os.Getenv("GTL_DEFER_SETUP") == "1" {
 			return nil
 		}
@@ -82,6 +88,7 @@ var setupCmd = &cobra.Command{
 				return err
 			}
 		}
+		var completionLocks *registry.LifecycleLocks
 		if !setupDryRun {
 			setupAbs, err = registry.CanonicalLifecycleTarget(path)
 			if err != nil {
@@ -100,16 +107,20 @@ var setupCmd = &cobra.Command{
 				return err
 			}
 			defer locks.Close()
+			completionLocks = locks
 			if err := registry.New(setup.RegistryPath).CheckReleaseReservations(targets); err != nil {
 				return cliErr(cmd, err)
 			}
-			if err := checkDriftOrAbortForSetup(setupAbs); err != nil {
-				return cliErr(cmd, err)
+			if setupCompleteAllocation == "" {
+				if err := checkDriftOrAbortForSetup(setupAbs); err != nil {
+					return cliErr(cmd, err)
+				}
 			}
 		}
 
 		uc := config.LoadUserConfig("")
-		s := setup.NewWithOptions(setupAbs, mainRepo, uc, setup.Options{DryRun: setupDryRun})
+		s := setup.NewWithOptions(setupAbs, mainRepo, uc, setup.Options{DryRun: setupDryRun, CompleteAllocation: setupCompleteAllocation})
+		s.CompletionLocks = completionLocks
 		if _, err := s.Run(); err != nil {
 			return err
 		}
