@@ -26,6 +26,7 @@ import (
 
 var statusProject string
 var statusJSON bool
+var statusReadOnly bool
 var statusCheck bool
 var statusWatch bool
 var statusInterval int
@@ -45,6 +46,7 @@ func init() {
 		return projects, cobra.ShellCompDirectiveNoFileComp
 	})
 	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "Output as JSON")
+	statusCmd.Flags().BoolVar(&statusReadOnly, "read-only", false, "Read JSON without modifying configuration or state")
 	statusCmd.Flags().BoolVar(&statusCheck, "check", false, "Probe allocated ports to check if services are running")
 	statusCmd.Flags().BoolVar(&statusWatch, "watch", false, "Auto-refresh status on a loop (implies --check)")
 	statusCmd.Flags().IntVar(&statusInterval, "interval", 5, "Refresh interval in seconds (used with --watch)")
@@ -209,7 +211,7 @@ func renderStatus(ctx context.Context) error {
 	// way to tie a child's lifetime to its parent, so orphaned git probes are
 	// reaped by the next run instead. This keeps a repeatedly-killed poll from
 	// accumulating them — the process storm this bounding exists to prevent.
-	readOnly := appManagedDev()
+	readOnly := appManagedDev() || statusReadOnly
 	if !readOnly {
 		stateDir := platform.ConfigDir()
 		if n := process.ReapStale(stateDir); n > 0 {

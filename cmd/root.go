@@ -65,12 +65,12 @@ func readOnlyIntrospection(cmd *cobra.Command) (bool, error) {
 	if !readOnly {
 		return false, nil
 	}
-	allowed := cmd.Name() == "routes" || cmd.Name() == "doctor" || cmd.Name() == "env" ||
+	allowed := cmd.Name() == "status" || cmd.Name() == "routes" || cmd.Name() == "doctor" || cmd.Name() == "env" ||
 		(cmd.Name() == "show" && cmd.Parent() != nil && cmd.Parent().Name() == "env")
 	fix, _ := cmd.Flags().GetBool("fix")
 	template, _ := cmd.Flags().GetBool("template")
 	if !allowed || !jsonOutput || fix || template {
-		return false, fmt.Errorf("--read-only requires routes, env, env show, or doctor with --json and without --fix or --template")
+		return false, fmt.Errorf("--read-only requires status, routes, env, env show, or doctor with --json and without --fix or --template")
 	}
 	return true, nil
 }
