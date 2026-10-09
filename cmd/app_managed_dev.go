@@ -63,6 +63,8 @@ func guardAppManagedDev(cmd *cobra.Command, _ []string) error {
 			allowed = flag("json") && !flag("watch")
 		case "related":
 			allowed = flag("json")
+		case "provision":
+			allowed = flag("dry-run")
 		case "env", "routes", "doctor":
 			allowed = flag("json") && flag("read-only") && !flag("fix") && !flag("template")
 		case "claim":

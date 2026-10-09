@@ -51,7 +51,7 @@ func appDevFixture(t *testing.T) introspectionFixture {
 	}
 	writeIntrospectionFile(t, filepath.Join(stable, "registry.json"), `{"version":2,"allocations":[{"worktree":"/stable/work","allocation_generation":"must-not-be-read"}]}`)
 	writeIntrospectionFile(t, filepath.Join(stable, "config.json"), `{"database":"stable-sentinel","redis":"stable-sentinel"}`)
-	for _, command := range []string{"git", "sh", "bash", "touch", "launchctl", "systemctl", "sudo", "pfctl", "iptables", "redis-cli", "psql", "createdb", "dropdb", "cloudflared", "security", "curl", "open", "kill", "lsof"} {
+	for _, command := range []string{"git", "sh", "bash", "touch", "launchctl", "systemctl", "sudo", "pfctl", "iptables", "redis-cli", "psql", "createdb", "dropdb", "pg_dump", "pg_restore", "mise", "dpkg-query", "apt-get", "cloudflared", "security", "curl", "open", "kill", "lsof"} {
 		if err := os.WriteFile(filepath.Join(f.bin, command), []byte("#!/bin/sh\nprintf '%s\\n' \"$0\" >> \"$TRAP_LOG\"\nexit 1\n"), 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -142,6 +142,48 @@ func TestAppManagedDevResourceInspectionDoesNotWrite(t *testing.T) {
 			}
 			assertIntrospectionUnchanged(t, before, snapshotIntrospection(t, f.base))
 		})
+	}
+}
+
+func TestAppManagedDevProvisionDryRunDoesNotWrite(t *testing.T) {
+	for _, exists := range []bool{false, true} {
+		for _, source := range []bool{false, true} {
+			t.Run(fmt.Sprintf("existing=%t/source=%t", exists, source), func(t *testing.T) {
+				f := appDevFixture(t)
+				hydration := "hydrate: 'touch hydrate-ran'"
+				if source {
+					hydration = "source: production"
+				}
+				writeIntrospectionFile(t, filepath.Join(f.work, ".treeline.yml"), "project: fixture\nports_needed: 1\ndatabase: {template: fixture_template}\nprovision:\n  apt: [libvips]\n  services: [redis-server]\n  database: {"+hydration+"}\n")
+				writeIntrospectionFile(t, filepath.Join(f.work, ".node-version"), "22\n")
+				if exists {
+					privateAppDevState(t, f, `{"version":2,"allocations":[]}`)
+					// Any attempt to acquire a template lock must fail before effects.
+					writeIntrospectionFile(t, filepath.Join(f.state, "locks"), "not a lock directory")
+				}
+				before := snapshotIntrospection(t, f.base)
+				out, stderr, err := runAppDev(t, f, f.state, "provision", ".", "--dry-run")
+				if err != nil {
+					t.Fatalf("dry-run refused: %v %s", err, stderr)
+				}
+				for _, expected := range []string{"apt packages: libvips", "services: redis-server", "language runtimes via mise", "fixture_template"} {
+					if !strings.Contains(out, expected) {
+						t.Fatalf("missing %q in plan: %s", expected, out)
+					}
+				}
+				if strings.Contains(out+stderr, "9.9.9") || strings.Contains(out, "Provisioning complete") {
+					t.Fatalf("dry-run reached execution or update hooks: %s %s", out, stderr)
+				}
+				assertIntrospectionUnchanged(t, before, snapshotIntrospection(t, f.base))
+				for _, args := range [][]string{{"provision", "."}, {"provision", ".", "--dry-run=false"}} {
+					out, stderr, err := runAppDev(t, f, f.state, args...)
+					if err == nil || !strings.Contains(stderr, "app-managed dev resources are not configured") || strings.TrimSpace(out) != "" {
+						t.Fatalf("real provisioning escaped policy: %v %s %s", err, out, stderr)
+					}
+					assertIntrospectionUnchanged(t, before, snapshotIntrospection(t, f.base))
+				}
+			})
+		}
 	}
 }
 
