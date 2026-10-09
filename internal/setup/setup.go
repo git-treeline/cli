@@ -333,7 +333,10 @@ func ValidateManagedDevProject(worktreePath, mainRepo string, pc *config.Project
 	if err := validateManagedDevSetupTarget(worktreePath, mainRepo); err != nil {
 		return err
 	}
-	return validateManagedDevEnvFiles(worktreePath, mainRepo, pc)
+	if err := validateManagedDevEnvFiles(worktreePath, mainRepo, pc); err != nil {
+		return err
+	}
+	return validateManagedDevCopyFiles(worktreePath, mainRepo, pc)
 }
 
 func validateManagedDevSetupTarget(worktreePath, mainRepo string) error {
@@ -461,6 +464,46 @@ func validateManagedDevEnvFiles(worktreePath, mainRepo string, pc *config.Projec
 	}
 	for _, source := range []string{pc.EnvFileSource(), ".env"} {
 		if err := check(main, source, "env seed"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateManagedDevCopyFiles(worktreePath, mainRepo string, pc *config.ProjectConfig) error {
+	worktree, err := registry.CanonicalLifecycleTarget(worktreePath)
+	if err != nil {
+		return err
+	}
+	main, err := registry.CanonicalLifecycleTarget(mainRepo)
+	if err != nil {
+		return err
+	}
+	check := func(root, relative, kind string) error {
+		path := filepath.Join(root, relative)
+		parent, err := registry.CanonicalLifecycleTarget(filepath.Dir(path))
+		canonical := filepath.Join(parent, filepath.Base(path))
+		if err != nil || canonical == root || !strings.HasPrefix(canonical, root+string(filepath.Separator)) {
+			return fmt.Errorf("app-managed dev copy %s escapes its repository", kind)
+		}
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("app-managed dev copy %s is not a regular file", kind)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || stat.Nlink != 1 {
+			return fmt.Errorf("app-managed dev copy %s must not be hard-linked", kind)
+		}
+		return nil
+	}
+	for _, relative := range pc.CopyFiles() {
+		if err := check(main, relative, "source"); err != nil {
+			return err
+		}
+		if err := check(worktree, relative, "destination"); err != nil {
 			return err
 		}
 	}
@@ -605,6 +648,12 @@ func (s *Setup) printDryRun(alloc *allocator.Allocation, redisURL string) error 
 }
 
 func (s *Setup) copyFiles() error {
+	managed := devresources.Active()
+	if managed {
+		if err := validateManagedDevCopyFiles(s.WorktreePath, s.MainRepo, s.ProjectConfig); err != nil {
+			return err
+		}
+	}
 	files := s.ProjectConfig.CopyFiles()
 	if len(files) == 0 {
 		return nil
@@ -642,9 +691,19 @@ func (s *Setup) copyFiles() error {
 		if err := destinationRoot.MkdirAll(filepath.Dir(destinationName), 0o755); err != nil {
 			return fmt.Errorf("creating copy_files destination directory for %q within worktree: %w", file, err)
 		}
-		data, err := sourceRoot.ReadFile(sourceName)
+		var data []byte
+		if managed {
+			data, info, err = readManagedCopySource(sourceRoot, sourceName)
+		} else {
+			data, err = sourceRoot.ReadFile(sourceName)
+		}
 		if err != nil {
 			return fmt.Errorf("reading copy_files source %q within main repository: %w", file, err)
+		}
+		if managed {
+			if err := validateManagedDevCopyFiles(s.WorktreePath, s.MainRepo, s.ProjectConfig); err != nil {
+				return err
+			}
 		}
 		if err := atomicWriteRoot(destinationRoot, destinationName, data, info.Mode().Perm()); err != nil {
 			return fmt.Errorf("writing copy_files destination %q within worktree: %w", file, err)
@@ -652,6 +711,28 @@ func (s *Setup) copyFiles() error {
 		s.log("Copied %s", file)
 	}
 	return nil
+}
+
+func readManagedCopySource(root *os.Root, path string) ([]byte, os.FileInfo, error) {
+	before, err := root.Lstat(path)
+	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("source is not a regular file")
+	}
+	stat, ok := before.Sys().(*syscall.Stat_t)
+	if !ok || stat.Nlink != 1 {
+		return nil, nil, fmt.Errorf("source must not be hard-linked")
+	}
+	handle, err := root.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer handle.Close()
+	opened, err := handle.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		return nil, nil, fmt.Errorf("source identity changed")
+	}
+	data, err := io.ReadAll(handle)
+	return data, opened, err
 }
 
 func (s *Setup) buildEnvVars(alloc interpolation.Allocation, redisURL string) (map[string]string, error) {

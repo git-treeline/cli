@@ -231,13 +231,13 @@ func TestInactiveCheckDoesNotReadState(t *testing.T) {
 func TestValidateProject(t *testing.T) {
 	root := t.TempDir()
 	file := filepath.Join(root, config.ProjectConfigFile)
-	for name, body := range map[string]string{"http": "project: fixture\nport_count: 1\nenv: {PORT: '{port}'}\ncommands: {start: 'node server.js'}\n", "database": "project: fixture\ndatabase: {template: shared}\n", "redis": "project: fixture\nredis: {url: 'redis://localhost'}\n", "hook": "project: fixture\nhooks: {post_setup: [touch shared]}\n", "setup": "project: fixture\ncommands: {setup: [touch shared]}\n", "stop": "project: fixture\ncommands: {stop: 'killall node'}\n", "provision": "project: fixture\nprovision: {}\n", "env escape": "project: fixture\nenv_file: ../outside\n", "copy": "project: fixture\ncopy_files: [.env]\n", "related": "project: fixture\nrelated: [normal]\n", "editor": "project: fixture\neditor: {command: code}\n"} {
+	for name, body := range map[string]string{"http": "project: fixture\nport_count: 1\nenv: {PORT: '{port}'}\ncommands: {start: 'node server.js'}\n", "copy": "project: fixture\ncopy_files: [.env, config/master.key]\n", "database": "project: fixture\ndatabase: {template: shared}\n", "redis": "project: fixture\nredis: {url: 'redis://localhost'}\n", "hook": "project: fixture\nhooks: {post_setup: [touch shared]}\n", "setup": "project: fixture\ncommands: {setup: [touch shared]}\n", "stop": "project: fixture\ncommands: {stop: 'killall node'}\n", "provision": "project: fixture\nprovision: {}\n", "env escape": "project: fixture\nenv_file: ../outside\n", "copy escape": "project: fixture\ncopy_files: [../outside]\n", "copy metadata": "project: fixture\ncopy_files: [.git/config]\n", "copy absolute": "project: fixture\ncopy_files: [/tmp/outside]\n", "related": "project: fixture\nrelated: [normal]\n", "editor": "project: fixture\neditor: {command: code}\n"} {
 		t.Run(name, func(t *testing.T) {
 			if err := os.WriteFile(file, []byte(body), 0600); err != nil {
 				t.Fatal(err)
 			}
 			err := ValidateProject(config.LoadProjectConfigReadOnlyQuiet(root))
-			if (name == "http") != (err == nil) {
+			if (name == "http" || name == "copy") != (err == nil) {
 				t.Fatalf("unexpected validation: %v", err)
 			}
 		})

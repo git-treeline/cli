@@ -284,7 +284,6 @@ func TestValidateManagedDevProjectRejectsUnsafeConfigBeforeEffects(t *testing.T)
 
 	cases := map[string]string{
 		"missing SQLite template": "database:\n  adapter: sqlite\n  name: fixture.sqlite3\n",
-		"copy files":              "copy_files:\n  - .env\n",
 		"hooks":                   "hooks:\n  pre_setup:\n    - touch denied\n",
 		"setup command":           "commands:\n  setup:\n    - touch denied\n",
 		"provision":               "provision:\n  apt:\n    - redis\n",
@@ -373,6 +372,79 @@ func TestValidateManagedDevProjectRejectsEnvTargetAliases(t *testing.T) {
 	}
 	if got, err := os.ReadFile(outside); err != nil || string(got) != "untouched\n" {
 		t.Fatalf("outside file changed: %q, %v", got, err)
+	}
+}
+
+func TestValidateManagedDevCopyFilesRejectsAliases(t *testing.T) {
+	for _, kind := range []string{"regular", "source symlink", "source hardlink", "destination symlink", "destination hardlink", "source parent symlink", "destination parent symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			main := filepath.Join(root, "main")
+			worktree := filepath.Join(root, "worktree")
+			outside := filepath.Join(root, "outside")
+			for _, directory := range []string{main, worktree, outside} {
+				if err := os.MkdirAll(directory, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(main, config.ProjectConfigFile), []byte("project: fixture\ncopy_files: [config/key]\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(outside, "key"), []byte("outside"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(main, "config"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(worktree, "config"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			source := filepath.Join(main, "config", "key")
+			destination := filepath.Join(worktree, "config", "key")
+			var err error
+			switch kind {
+			case "regular":
+				err = os.WriteFile(source, []byte("source"), 0o600)
+			case "source symlink":
+				err = os.Symlink(filepath.Join(outside, "key"), source)
+			case "source hardlink":
+				err = os.Link(filepath.Join(outside, "key"), source)
+			case "destination symlink":
+				err = os.WriteFile(source, []byte("source"), 0o600)
+				if err == nil {
+					err = os.Symlink(filepath.Join(outside, "key"), destination)
+				}
+			case "destination hardlink":
+				err = os.WriteFile(source, []byte("source"), 0o600)
+				if err == nil {
+					err = os.Link(filepath.Join(outside, "key"), destination)
+				}
+			case "source parent symlink":
+				err = os.Remove(filepath.Join(main, "config"))
+				if err == nil {
+					err = os.Symlink(outside, filepath.Join(main, "config"))
+				}
+			case "destination parent symlink":
+				err = os.WriteFile(source, []byte("source"), 0o600)
+				if err == nil {
+					err = os.Remove(filepath.Join(worktree, "config"))
+				}
+				if err == nil {
+					err = os.Symlink(outside, filepath.Join(worktree, "config"))
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			pc := config.LoadProjectConfigReadOnly(main)
+			got := validateManagedDevCopyFiles(worktree, main, pc)
+			if (got == nil) != (kind == "regular") {
+				t.Fatalf("admitted=%t, want %t: %v", got == nil, kind == "regular", got)
+			}
+			if data, err := os.ReadFile(filepath.Join(outside, "key")); err != nil || string(data) != "outside" {
+				t.Fatalf("outside file changed: %q, %v", data, err)
+			}
+		})
 	}
 }
 
@@ -592,6 +664,30 @@ copy_files:
 	if string(data) != "supersecret" {
 		t.Errorf("expected copied content, got %q", string(data))
 	}
+}
+
+func TestCopyFilesManagedDevCopiesValidatedRegularFile(t *testing.T) {
+	t.Setenv("TREELINE_MANAGED", "app")
+	t.Setenv("TREELINE_CHANNEL", "dev")
+	s, mainRepo, worktree := testSetup(t, `
+project: test
+copy_files:
+  - config/master.key
+`)
+	if err := os.MkdirAll(filepath.Join(mainRepo, "config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mainRepo, "config", "master.key"), []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.copyFiles(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(worktree, "config", "master.key"))
+	if err != nil || string(data) != "private" {
+		t.Fatalf("managed copy = %q, %v", data, err)
+	}
+	assertFileMode(t, filepath.Join(worktree, "config", "master.key"), 0o600)
 }
 
 func TestCopyFiles_SkipsMissing(t *testing.T) {

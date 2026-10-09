@@ -8,7 +8,7 @@ import (
 	"github.com/git-treeline/cli/internal/config"
 )
 
-// ValidateProject admits HTTP and SQLite fixture configuration without running hooks
+// ValidateProject admits HTTP, SQLite and contained file-copy configuration without running hooks
 // or interpreting application commands. Callers validate filesystem containment.
 func ValidateProject(pc *config.ProjectConfig) error {
 	if pc == nil || pc.Validate() != nil || !identifier.MatchString(pc.Project()) {
@@ -57,7 +57,18 @@ func ValidateProject(pc *config.ProjectConfig) error {
 			if !ok || len(entries) != 0 {
 				return refusal
 			}
-		case "copy_files", "related":
+		case "copy_files":
+			entries, ok := value.([]any)
+			if !ok || len(entries) > 256 {
+				return refusal
+			}
+			for _, entry := range entries {
+				name, ok := entry.(string)
+				if !ok || !validSQLiteName(name) {
+					return refusal
+				}
+			}
+		case "related":
 			entries, ok := value.([]any)
 			if !ok || len(entries) != 0 {
 				return refusal
