@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"runtime"
 	"strings"
 
@@ -27,6 +26,9 @@ func SyncHosts(hostnames []string) error {
 	if len(hostnames) == 0 {
 		return CleanHosts()
 	}
+	if err := validateHostsNames(hostnames); err != nil {
+		return err
+	}
 
 	block := buildHostsBlock(hostnames)
 
@@ -40,6 +42,25 @@ func SyncHosts(hostnames []string) error {
 		return err
 	}
 	return writeHosts(content, "update /etc/hosts for Safari support")
+}
+
+func validateHostsNames(hostnames []string) error {
+	for _, host := range hostnames {
+		if host == "" || len(host) > 253 {
+			return fmt.Errorf("invalid hosts-file hostname %q", host)
+		}
+		for _, label := range strings.Split(host, ".") {
+			if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+				return fmt.Errorf("invalid hosts-file hostname %q", host)
+			}
+			for _, c := range label {
+				if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' {
+					return fmt.Errorf("invalid hosts-file hostname %q", host)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // CleanHosts removes all git-treeline entries from /etc/hosts.
@@ -181,24 +202,11 @@ func parseManagedHosts(content string) []string {
 }
 
 func writeHosts(content, prompt string) error {
-	tmp, err := os.CreateTemp("", "treeline-hosts-*")
+	script, err := platform.StagePrivilegedFiles([]platform.PrivilegedFile{
+		{Name: "hosts", Data: []byte(content)},
+	}, "/bin/cp hosts "+platform.ShellQuote(hostsPath))
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-	if _, err := fmt.Fprint(tmp, content); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("flushing temp hosts file: %w", err)
-	}
-
-	script := fmt.Sprintf("/bin/cp '%s' '%s'", tmp.Name(), hostsPath)
-	cmd := exec.Command("sudo", "-p",
-		fmt.Sprintf("\nEnter your password to %s: ", prompt),
-		"sh", "-c", script)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return platform.RunPrivilegedScript(fmt.Sprintf("\nEnter your password to %s: ", prompt), script)
 }

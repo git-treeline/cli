@@ -3,8 +3,9 @@ package service
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"runtime"
+
+	"github.com/git-treeline/cli/internal/platform"
 )
 
 // PfReloadDaemonLabel is the launchd label for our boot-time pf reloader.
@@ -81,7 +82,7 @@ repair "" || rc=1
 repair ".dev" || rc=1
 
 /sbin/pfctl -f "$CONF" 2>/dev/null || rc=1
-/sbin/pfctl -e 2>/dev/null
+/sbin/pfctl -e 2>/dev/null || true
 exit $rc
 `
 
@@ -169,29 +170,30 @@ func pfReloadDaemonPlistBody() string { return pfReloadDaemonPlist }
 // LaunchDaemon. The fragment ends with `launchctl bootstrap`, whose exit
 // code becomes the fragment's exit code — so a failed bootstrap surfaces
 // as a non-zero exit. The caller writes pfReloadDaemonPlist and
-// pfEnsureScript to the two temp paths before invoking the script.
+// pfEnsureScript into private root-owned staging before invoking the fragment.
 func pfReloadDaemonInstallFragment(tmpPlistPath, tmpScriptPath string) string {
+	q := platform.ShellQuote
 	target := PfReloadDaemonPath()
 	scriptDir := "/Library/Application Support/dev.git-treeline"
 	return fmt.Sprintf(
-		"/bin/mkdir -p '%s' && "+
-			"/bin/cp '%s' '%s' && "+
-			"/usr/sbin/chown root:wheel '%s' && "+
-			"/bin/chmod 755 '%s' && "+
-			"/bin/cp '%s' '%s' && "+
-			"/usr/sbin/chown root:wheel '%s' && "+
-			"/bin/chmod 644 '%s' && "+
-			"(/bin/launchctl bootout system/%s 2>/dev/null; true) && "+
-			"/bin/launchctl bootstrap system '%s'",
-		scriptDir,
-		tmpScriptPath, pfEnsureScriptPath,
-		pfEnsureScriptPath,
-		pfEnsureScriptPath,
-		tmpPlistPath, target,
-		target,
-		target,
+		"/bin/mkdir -p %s && "+
+			"/bin/cp %s %s && "+
+			"/usr/sbin/chown root:wheel %s && "+
+			"/bin/chmod 755 %s && "+
+			"/bin/cp %s %s && "+
+			"/usr/sbin/chown root:wheel %s && "+
+			"/bin/chmod 644 %s && "+
+			"(/bin/launchctl bootout system/%s 2>/dev/null || true) && "+
+			"/bin/launchctl bootstrap system %s",
+		q(scriptDir),
+		q(tmpScriptPath), q(pfEnsureScriptPath),
+		q(pfEnsureScriptPath),
+		q(pfEnsureScriptPath),
+		q(tmpPlistPath), q(target),
+		q(target),
+		q(target),
 		PfReloadDaemonLabel,
-		target,
+		q(target),
 	)
 }
 
@@ -213,55 +215,22 @@ func InstallPfReloadDaemon() error {
 		return nil
 	}
 
-	tmpPlist, tmpScript, cleanup, err := writePfDaemonTempFiles()
+	script, err := platform.StagePrivilegedFiles(pfDaemonFiles(),
+		pfReloadDaemonInstallFragment("daemon.plist", "ensure.sh"))
 	if err != nil {
 		return err
 	}
-	defer cleanup()
-
-	cmd := exec.Command("sudo", "-p",
-		"\nEnter your password to install the boot-time pf reloader: ",
-		"sh", "-c", pfReloadDaemonInstallFragment(tmpPlist, tmpScript))
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := platform.RunPrivilegedScript("\nEnter your password to install the boot-time pf reloader: ", script); err != nil {
 		return fmt.Errorf("pf-reload daemon install failed: %w", err)
 	}
 	return nil
 }
 
-// writePfDaemonTempFiles renders the daemon plist and repair script to
-// temp files for a root install fragment to copy into place. The caller
-// must invoke cleanup (safe even on partial failure).
-func writePfDaemonTempFiles() (tmpPlistPath, tmpScriptPath string, cleanup func(), err error) {
-	var paths []string
-	cleanup = func() {
-		for _, p := range paths {
-			_ = os.Remove(p)
-		}
+func pfDaemonFiles() []platform.PrivilegedFile {
+	return []platform.PrivilegedFile{
+		{Name: "daemon.plist", Data: []byte(pfReloadDaemonPlist)},
+		{Name: "ensure.sh", Data: []byte(pfEnsureScript)},
 	}
-	write := func(pattern, content string) (string, error) {
-		f, err := os.CreateTemp("", pattern)
-		if err != nil {
-			return "", err
-		}
-		paths = append(paths, f.Name())
-		if _, err := f.WriteString(content); err != nil {
-			_ = f.Close()
-			return "", err
-		}
-		return f.Name(), f.Close()
-	}
-	if tmpPlistPath, err = write("treeline-pfreload-*.plist", pfReloadDaemonPlist); err != nil {
-		cleanup()
-		return "", "", func() {}, fmt.Errorf("creating temp plist: %w", err)
-	}
-	if tmpScriptPath, err = write("treeline-pf-ensure-*.sh", pfEnsureScript); err != nil {
-		cleanup()
-		return "", "", func() {}, fmt.Errorf("creating temp pf-ensure script: %w", err)
-	}
-	return tmpPlistPath, tmpScriptPath, cleanup, nil
 }
 
 // UninstallPfReloadDaemon removes the LaunchDaemon. Symmetric with install
@@ -275,20 +244,11 @@ func UninstallPfReloadDaemon() error {
 	}
 	target := PfReloadDaemonPath()
 	script := fmt.Sprintf(
-		"/bin/launchctl bootout system/%s 2>/dev/null; "+
+		"/bin/launchctl bootout system/%s 2>/dev/null || true; "+
 			"/bin/rm -f '%s' '%s'",
 		PfReloadDaemonLabel,
 		target,
 		pfEnsureScriptPath,
 	)
-	cmd := exec.Command("sudo", "-p",
-		"\nEnter your password to remove the boot-time pf reloader: ",
-		"sh", "-c", script)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("pf-reload daemon uninstall failed: %w", err)
-	}
-	return nil
+	return platform.RunPrivilegedScript("\nEnter your password to remove the boot-time pf reloader: ", script)
 }

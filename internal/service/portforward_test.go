@@ -1,9 +1,44 @@
 package service
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/git-treeline/cli/internal/platform"
 )
+
+func TestDarwinInstallDoesNotBootstrapAfterLoadFailure(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "bootstrapped")
+	var replacements []string
+	for command, body := range map[string]string{
+		"/bin/mkdir":      "exit 0",
+		"/bin/cp":         "exit 0",
+		"/bin/chmod":      "exit 0",
+		"/usr/sbin/chown": "exit 0",
+		"/sbin/pfctl":     "case \"$1\" in -f) exit 7;; *) exit 0;; esac",
+		"/bin/launchctl":  "printf reached > " + platform.ShellQuote(marker),
+	} {
+		stub := filepath.Join(dir, filepath.Base(command))
+		if err := os.WriteFile(stub, []byte("#!/bin/sh\n"+body+"\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		replacements = append(replacements, command, platform.ShellQuote(stub))
+	}
+	// Every privileged executable is replaced; the generated control flow runs
+	// against fixtures only, without sudo or system-file changes.
+	script := strings.NewReplacer(replacements...).Replace(darwinPortForwardScript("anchor", "conf", "plist", "script"))
+	cmd := exec.Command("/bin/sh", "-c", "set -e\n"+script)
+	if err := cmd.Run(); err == nil {
+		t.Fatal("firewall load failure was masked")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("daemon bootstrapped despite failed rule load: %v", err)
+	}
+}
 
 const samplePfConf = `scrub-anchor "com.apple/*"
 nat-anchor "com.apple/*"
@@ -113,11 +148,9 @@ func TestDarwinPortForwardScript(t *testing.T) {
 		t.Errorf("script must gate validation with `|| exit 1` so a bad pf.conf cannot be installed\nscript: %s", script)
 	}
 
-	// Invariant 2: pfctl -ef is masked because pf is often already
-	// enabled (non-zero exit is expected). Mask must use a brace group,
-	// not a subshell, to match the existing reloadPf style.
-	if !strings.Contains(script, "{ /sbin/pfctl -ef '/etc/pf.conf' 2>/dev/null; true; }") {
-		t.Errorf("pfctl -ef must be masked via brace group `{ ...; true; }`\nscript: %s", script)
+	// Loading failures must stop installation; only an already-enabled pf is tolerated.
+	if !strings.Contains(script, "/sbin/pfctl -f '/etc/pf.conf' 2>/dev/null && { /sbin/pfctl -e 2>/dev/null || true; }") {
+		t.Errorf("load failure must propagate before enabling pf: %s", script)
 	}
 
 	// Invariant 3 (the whole point of the fix): daemon fragment is
@@ -130,7 +163,7 @@ func TestDarwinPortForwardScript(t *testing.T) {
 		t.Errorf("daemon fragment must be the final segment so its exit code drives the script\nscript: %s", script)
 	}
 	if !strings.Contains(script, "true; } && "+daemonFrag[:30]) {
-		t.Errorf("daemon fragment must be joined to the pfctl-ef mask with `&&`, not `;` — else daemon failure is silently swallowed\nscript: %s", script)
+		t.Errorf("daemon fragment must be joined to the pfctl enable mask with `&&`, not `;` — else daemon failure is silently swallowed\nscript: %s", script)
 	}
 }
 
@@ -144,7 +177,7 @@ func TestReloadPfAndInstallDaemonScript(t *testing.T) {
 	if !strings.Contains(script, "/sbin/pfctl -f '/etc/pf.conf' 2>/dev/null && ") {
 		t.Errorf("pfctl -f failure must propagate via `&&`, not be masked\nscript: %s", script)
 	}
-	if !strings.Contains(script, "{ /sbin/pfctl -e 2>/dev/null; true; }") {
+	if !strings.Contains(script, "{ /sbin/pfctl -e 2>/dev/null || true; }") {
 		t.Errorf("only pfctl -e should be masked via brace group\nscript: %s", script)
 	}
 

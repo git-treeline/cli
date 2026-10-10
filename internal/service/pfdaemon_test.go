@@ -43,7 +43,7 @@ func TestPfReloadDaemonInstallFragment(t *testing.T) {
 
 	// bootout failures must be swallowed so they don't break the chain on a
 	// fresh install where the label isn't already loaded.
-	if !strings.Contains(frag, "bootout system/dev.treeline.pfreload 2>/dev/null; true") {
+	if !strings.Contains(frag, "bootout system/dev.treeline.pfreload 2>/dev/null || true") {
 		t.Errorf("fragment must swallow bootout failures\nfragment: %s", frag)
 	}
 }
