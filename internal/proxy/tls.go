@@ -292,6 +292,13 @@ func validateCA(certPEM, keyPEM []byte, domain string) error {
 }
 
 func validateCACertificate(cert *x509.Certificate, domain string) error {
+	// Name constraints do not restrict the root itself when it is presented as
+	// a directly trusted leaf. Generated roots have no subject identities.
+	for _, extension := range cert.Extensions {
+		if extension.Id.Equal([]int{2, 5, 29, 17}) {
+			return fmt.Errorf("CA certificate must not contain subject alternative names")
+		}
+	}
 	if !cert.BasicConstraintsValid || !cert.IsCA {
 		return fmt.Errorf("CA certificate has invalid CA basic constraints")
 	}

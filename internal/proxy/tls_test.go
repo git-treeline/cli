@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -424,6 +425,61 @@ func TestTrustCA_RejectsMismatchedKeyBeforePrivilege(t *testing.T) {
 	}
 	if called {
 		t.Error("invalid CA must be rejected before privilege elevation")
+	}
+}
+
+func TestTrustCA_RejectsRootSANBeforePrivilege(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*x509.Certificate)
+	}{
+		{name: "DNS", mutate: func(cert *x509.Certificate) {
+			cert.DNSNames = []string{"outside.example.com"}
+		}},
+		{name: "IP", mutate: func(cert *x509.Certificate) {
+			cert.IPAddresses = []net.IP{net.ParseIP("192.0.2.1")}
+		}},
+		{name: "email", mutate: func(cert *x509.Certificate) {
+			cert.EmailAddresses = []string{"user@example.com"}
+		}},
+		{name: "URI", mutate: func(cert *x509.Certificate) {
+			cert.URIs = []*url.URL{{Scheme: "https", Host: "outside.example.com"}}
+		}},
+		{name: "unsupported registered ID", mutate: func(cert *x509.Certificate) {
+			cert.ExtraExtensions = []pkix.Extension{{
+				Id:    asn1.ObjectIdentifier{2, 5, 29, 17},
+				Value: []byte{0x30, 0x04, 0x88, 0x02, 0x2a, 0x03}, // GeneralNames: registeredID 1.2.3.
+			}}
+		}},
+		{name: "empty extension", mutate: func(cert *x509.Certificate) {
+			cert.ExtraExtensions = []pkix.Extension{{
+				Id:    asn1.ObjectIdentifier{2, 5, 29, 17},
+				Value: []byte{0x30, 0x00},
+			}}
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withTempCertsDir(t)
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("PATH", "")
+			writeCAFixture(t, "prt.dev", tt.mutate)
+			called := false
+			origRunner := privilegedScriptRunner
+			privilegedScriptRunner = func(_, _ string) error { called = true; return nil }
+			t.Cleanup(func() { privilegedScriptRunner = origRunner })
+
+			if err := TrustCA(caCertPath(), "prt.dev"); err == nil || !strings.Contains(err.Error(), "subject alternative names") {
+				t.Errorf("expected root SAN rejection, got %v", err)
+			}
+			if called {
+				t.Error("root SAN must be rejected before privilege elevation")
+			}
+			if !CANeedsRegen("prt.dev") {
+				t.Error("a root with a SAN extension must require regeneration")
+			}
+		})
 	}
 }
 

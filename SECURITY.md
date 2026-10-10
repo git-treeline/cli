@@ -18,7 +18,7 @@ Some operations require `sudo` and will prompt for your password:
 
 The router process itself runs unprivileged. Installation, repair, and removal require privilege. A root-owned macOS repair script and Linux forwarding service can also restore forwarding at boot. Privileged installers stage captured content in a private root-owned directory after authorization, rather than reopening caller-writable source files. Linux forwarding selects `iptables` only from system directories.
 
-The configured router domain must be a narrow DNS suffix, not a public suffix, IP address, or wildcard. Reused CA certificates must match the intended DNS and loopback IP constraints and their private key. System trust installation validates and installs the same certificate snapshot.
+The configured router domain must be a narrow DNS suffix, not a public suffix, IP address, or wildcard. Reused CA certificates must match the intended DNS and loopback IP constraints and their private key, and must not contain a subject alternative name extension on the root itself. System trust installation validates and installs the same certificate snapshot.
 
 ## Public tunnels and the same-user trust boundary
 
