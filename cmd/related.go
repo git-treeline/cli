@@ -54,7 +54,8 @@ when it isn't currently checked out (dangling).`,
 			selfRef = registry.RepoRef{Repo: repo, Branch: worktree.CurrentBranch(abs)}
 		}
 
-		entries := buildRelated(reg, idx, abs, selfRef)
+		pc := config.LoadProjectConfig(worktree.DetectRepoRoot(abs))
+		entries := buildRelated(idx, selfRef, reg.EdgesFor(selfRef), pc.RelatedRepos())
 
 		if relatedJSON {
 			data, err := json.MarshalIndent(entries, "", "  ")
@@ -158,7 +159,7 @@ func resolveIndexPath(idx *worktreeIndex, selfPath string) string {
 // buildRelated assembles the related[] entries for the worktree identified by
 // selfRef. Edges (explicit relate) and config siblings (declared topology) are
 // merged into one list, deduped by (repo, branch) with edges taking priority.
-func buildRelated(reg *registry.Registry, idx *worktreeIndex, selfPath string, selfRef registry.RepoRef) []relatedEntry {
+func buildRelated(idx *worktreeIndex, selfRef registry.RepoRef, edges []registry.Edge, relatedRepos []config.RelatedRepo) []relatedEntry {
 	seen := make(map[registry.RepoRef]bool)
 	// Always a non-nil slice so an empty result marshals to [] not null,
 	// giving Treeline a stable array contract.
@@ -188,7 +189,7 @@ func buildRelated(reg *registry.Registry, idx *worktreeIndex, selfPath string, s
 	}
 
 	// 1. Explicit runtime edges. These are specific (repo, branch) pairs.
-	for _, e := range reg.EdgesFor(selfRef) {
+	for _, e := range edges {
 		other := e.Other(selfRef)
 		typ := e.Type
 		if typ == "" {
@@ -199,9 +200,7 @@ func buildRelated(reg *registry.Registry, idx *worktreeIndex, selfPath string, s
 
 	// 2. Declared structural siblings from .treeline.yml. A related_repo names a
 	// repo, not a branch; expand it to every live worktree of that repo.
-	root := worktree.DetectRepoRoot(selfPath)
-	pc := config.LoadProjectConfig(root)
-	for _, rr := range pc.RelatedRepos() {
+	for _, rr := range relatedRepos {
 		matchedLive := false
 		for path, ref := range idx.refByPath {
 			if ref.Repo != rr.Repo || ref == selfRef {
