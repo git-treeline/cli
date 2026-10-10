@@ -147,7 +147,7 @@ func Check() (*Policy, error) {
 		if !ok {
 			return nil, refusal
 		}
-		if normalAllocationUsesPostgreSQLNamespace(allocation) {
+		if normalAllocationUsesPostgreSQLNamespace(allocation) || normalAllocationUsesRedisNamespace(allocation) {
 			return nil, refusal
 		}
 		ports, err := allocationPorts(allocation)
@@ -257,7 +257,8 @@ func (p *Policy) ValidateAllocation(a map[string]any) error {
 		return refusal
 	}
 	if value, present := a["redis_prefix"]; present && value != nil {
-		if text, ok := value.(string); !ok || text != "" {
+		worktree, _ := a["worktree"].(string)
+		if text, ok := value.(string); !ok || text != "" && !validRedisPrefix(project, worktree, text) {
 			return refusal
 		}
 	}

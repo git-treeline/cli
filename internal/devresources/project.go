@@ -1,7 +1,6 @@
 package devresources
 
 import (
-	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -112,14 +111,12 @@ func ValidateProject(pc *config.ProjectConfig) error {
 			return refusal
 		}
 		for key, value := range entries {
-			pattern, ok := value.(string)
+			_, ok := value.(string)
 			if !ok || strings.ContainsAny(key, "\x00\r\n=") || key == "" {
 				return refusal
 			}
-			if strings.Contains(pattern, "{redis_url}") {
-				return fmt.Errorf("managed dev cannot derive {redis_url} without an admitted Redis resource: %w", refusal)
-			}
 		}
 	}
-	return nil
+	_, err := RedisRequested(pc)
+	return err
 }

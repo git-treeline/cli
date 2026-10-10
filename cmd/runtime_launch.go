@@ -46,7 +46,7 @@ func validateManagedDevRuntime(dir string, allocation registry.Allocation, requi
 	if err := policy.ValidateAllocation(map[string]any(allocation)); err != nil {
 		return err
 	}
-	if err := allocator.ValidateManagedDevDatabaseBinding(pc, allocation); err != nil {
+	if err := allocator.ValidateManagedDevResourceBinding(pc, allocation); err != nil {
 		return err
 	}
 	if pc.DatabaseAdapter() == "sqlite" {

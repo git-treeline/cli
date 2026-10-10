@@ -112,6 +112,13 @@ func validateManagedDevRelease(op registry.ReleaseOperation) error {
 		if err := allocator.ValidateManagedDevDatabaseBinding(pc, allocation); err != nil {
 			return err
 		}
+		// Redis prefixes are allocation metadata, absent from cleanup snapshots.
+		// Revalidate the live binding; after retirement no Redis effect remains.
+		if current != nil {
+			if err := devresources.ValidateRedisBinding(pc, map[string]any(current)); err != nil {
+				return err
+			}
+		}
 		if pc.DatabaseAdapter() == "sqlite" {
 			for _, name := range snapshot.Databases {
 				if err := devresources.ValidateSQLiteFile(op.Target.Path, name); err != nil {

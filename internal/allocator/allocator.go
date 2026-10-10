@@ -199,7 +199,8 @@ func New(uc *config.UserConfig, pc *config.ProjectConfig, reg *registry.Registry
 // Allocate returns an allocation for the given worktree. If an existing
 // allocation is found in the registry, it is reused (idempotent). Otherwise
 // a new allocation is created. When mainWorktree is true, base resources
-// (port_base, template DB, no redis prefix) are returned directly.
+// (port_base, template DB) are returned directly. Redis prefixes on main
+// remain absent except for opted-in managed-dev fixtures.
 // Branch is optional — when provided, enables branch-specific port reservations.
 func (al *Allocator) Allocate(worktreePath, worktreeName string, mainWorktree bool, branch ...string) (*Allocation, error) {
 	if err := al.validatePortConfig(); err != nil {
@@ -218,6 +219,12 @@ func (al *Allocator) Allocate(worktreePath, worktreeName string, mainWorktree bo
 			return nil, fmt.Errorf("validating app-managed dev project: %w", err)
 		}
 		al.ProjectConfig = fresh
+		if requested, err := devresources.RedisRequested(fresh); err != nil || requested && (al.UserConfig.RedisStrategy() != "prefixed" || al.UserConfig.RedisURL() != devresources.RedisURL) {
+			return nil, fmt.Errorf("app-managed dev Redis requires the default local prefixed configuration")
+		}
+		if _, err := devresources.RedisPrefix(fresh, worktreePath); err != nil {
+			return nil, err
+		}
 		devPolicy, err = devresources.Check()
 		if err != nil {
 			return nil, fmt.Errorf("validating app-managed dev resources: %w", err)
@@ -273,7 +280,7 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string, mainWorktr
 		if err := devPolicy.ValidateAllocation(map[string]any(entry)); err != nil {
 			return nil, fmt.Errorf("refusing retained app-managed dev allocation: %w", err)
 		}
-		if err := ValidateManagedDevDatabaseBinding(al.ProjectConfig, entry); err != nil {
+		if err := ValidateManagedDevResourceBinding(al.ProjectConfig, entry); err != nil {
 			return nil, err
 		}
 		expected, err := devPolicy.Ports(al.ProjectConfig.Project(), branch, mainWorktree, al.ProjectConfig.PortsNeeded())
@@ -377,7 +384,7 @@ func (al *Allocator) reuseExisting(worktreePath, worktreeName string, mainWorktr
 	}
 	if devPolicy != nil {
 		fresh := config.LoadProjectConfigReadOnlyQuiet(al.ProjectConfig.ProjectRoot)
-		if err := devresources.ValidateProject(fresh); err != nil || fresh.Project() != project || fresh.PortsNeeded() != len(ports) || ValidateManagedDevDatabaseBinding(fresh, entry) != nil {
+		if err := devresources.ValidateProject(fresh); err != nil || fresh.Project() != project || fresh.PortsNeeded() != len(ports) || ValidateManagedDevResourceBinding(fresh, entry) != nil {
 			return nil, fmt.Errorf("app-managed dev project changed before allocation reuse")
 		}
 		policy, err := devresources.Check()
@@ -458,6 +465,11 @@ func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*A
 		}
 		if policy != nil {
 			allocation.Branch = branch
+			var err error
+			allocation.RedisPrefix, err = devresources.RedisPrefix(al.ProjectConfig, worktreePath)
+			if err != nil {
+				return nil, err
+			}
 			if allocation.DatabaseAdapter != "sqlite" && len(allocation.Databases) == 0 {
 				allocation.Databases = nil
 				allocation.ExtraKeys = nil
@@ -466,7 +478,7 @@ func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*A
 			if err := policy.ValidateAllocation(map[string]any(allocation.ToRegistryEntry())); err != nil {
 				return nil, err
 			}
-			if err := ValidateManagedDevDatabaseBinding(config.LoadProjectConfigReadOnlyQuiet(al.ProjectConfig.ProjectRoot), allocation.ToRegistryEntry()); err != nil {
+			if err := ValidateManagedDevResourceBinding(config.LoadProjectConfigReadOnlyQuiet(al.ProjectConfig.ProjectRoot), allocation.ToRegistryEntry()); err != nil {
 				return nil, err
 			}
 		}
@@ -545,7 +557,13 @@ func (al *Allocator) allocateNew(worktreePath, worktreeName, branch string) (*Al
 			return nil, fmt.Errorf("no available port block of size %d found (all ports in use or reserved)", count)
 		}
 		redisDB, redisPrefix := 0, ""
-		if policy == nil {
+		if policy != nil {
+			var err error
+			redisPrefix, err = devresources.RedisPrefix(al.ProjectConfig, worktreePath)
+			if err != nil {
+				return nil, err
+			}
+		} else {
 			var rerr error
 			redisDB, redisPrefix, rerr = al.allocateRedisFrom(worktreeName, used.RedisDbs)
 			if rerr != nil {
@@ -574,7 +592,7 @@ func (al *Allocator) allocateNew(worktreePath, worktreeName, branch string) (*Al
 			if err := policy.ValidateAllocation(map[string]any(allocation.ToRegistryEntry())); err != nil {
 				return nil, err
 			}
-			if err := ValidateManagedDevDatabaseBinding(config.LoadProjectConfigReadOnlyQuiet(al.ProjectConfig.ProjectRoot), allocation.ToRegistryEntry()); err != nil {
+			if err := ValidateManagedDevResourceBinding(config.LoadProjectConfigReadOnlyQuiet(al.ProjectConfig.ProjectRoot), allocation.ToRegistryEntry()); err != nil {
 				return nil, err
 			}
 		}
@@ -869,8 +887,15 @@ func ExpectedDatabases(pc *config.ProjectConfig, worktreeName string, main bool)
 	return nil
 }
 
-// ValidateManagedDevDatabaseBinding keeps retained resources tied to the current
+// ValidateManagedDevResourceBinding keeps retained resources tied to the current
 // configuration. Structural resource admission remains the policy's responsibility.
+func ValidateManagedDevResourceBinding(pc *config.ProjectConfig, entry registry.Allocation) error {
+	if err := ValidateManagedDevDatabaseBinding(pc, entry); err != nil {
+		return err
+	}
+	return devresources.ValidateRedisBinding(pc, map[string]any(entry))
+}
+
 func ValidateManagedDevDatabaseBinding(pc *config.ProjectConfig, entry registry.Allocation) error {
 	if err := devresources.ValidateProject(pc); err != nil {
 		return err

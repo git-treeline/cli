@@ -198,7 +198,7 @@ func (s *Setup) Run() (*allocator.Allocation, error) {
 			if err != nil || registry.GetString(existing, "project") != s.ProjectConfig.Project() ||
 				registry.GetString(existing, "branch") != branch || existing["main_worktree"] == true != isMain ||
 				!slices.Equal(registry.ExtractPorts(existing), expected) ||
-				allocator.ValidateManagedDevDatabaseBinding(s.ProjectConfig, existing) != nil {
+				allocator.ValidateManagedDevResourceBinding(s.ProjectConfig, existing) != nil {
 				return nil, fmt.Errorf("refusing retained app-managed dev allocation before setup: project, branch, port mapping, or database identity changed")
 			}
 		}
@@ -550,7 +550,7 @@ func (s *Setup) revalidateManagedDevAllocation(alloc *allocator.Allocation) erro
 	expected, err := policy.Ports(fresh.Project(), alloc.Branch, isMain, fresh.PortsNeeded())
 	if err != nil || fresh.Project() != alloc.Project || !slices.Equal(expected, alloc.Ports) ||
 		alloc.MainWorktree != isMain || alloc.Worktree != s.WorktreePath ||
-		allocator.ValidateManagedDevDatabaseBinding(fresh, alloc.ToRegistryEntry()) != nil ||
+		allocator.ValidateManagedDevResourceBinding(fresh, alloc.ToRegistryEntry()) != nil ||
 		fresh.DatabaseTemplate() != s.ProjectConfig.DatabaseTemplate() ||
 		!slices.Equal(fresh.DatabaseConnArgs(), s.ProjectConfig.DatabaseConnArgs()) ||
 		policy.ValidateAllocation(map[string]any(alloc.ToRegistryEntry())) != nil {
@@ -568,6 +568,9 @@ func (s *Setup) revalidateManagedDevAllocation(alloc *allocator.Allocation) erro
 
 func (s *Setup) runPostAllocation(alloc *allocator.Allocation, redisURL string) error {
 	if devresources.Active() {
+		if requested, err := devresources.RedisRequested(s.ProjectConfig); err != nil || requested && redisURL != devresources.RedisURL {
+			return fmt.Errorf("app-managed dev Redis connection changed before setup effects")
+		}
 		if err := s.revalidateManagedDevAllocation(alloc); err != nil {
 			return err
 		}
