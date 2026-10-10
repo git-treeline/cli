@@ -8,7 +8,6 @@ import (
 var (
 	subtle    = lipgloss.Color("#30363d")
 	highlight = lipgloss.Color("#22c55e")
-	accentLt  = lipgloss.Color("#4ade80")
 	danger    = lipgloss.Color("#FF6666")
 	dimmed    = lipgloss.Color("#8b949e")
 
@@ -37,8 +36,6 @@ var (
 			Bold(true).
 			Foreground(highlight)
 
-	normalRow = lipgloss.NewStyle()
-
 	portStyle = lipgloss.NewStyle().
 			Foreground(dimmed)
 
@@ -53,10 +50,6 @@ var (
 			Background(lipgloss.Color("#151d28")).
 			PaddingLeft(1).
 			PaddingRight(1)
-
-	helpKeyStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(accentLt)
 
 	helpDescStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#8b949e"))

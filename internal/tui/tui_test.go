@@ -1,8 +1,11 @@
 package tui
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -447,73 +450,6 @@ func TestInputMode_RejectsWhitespaceCharacters(t *testing.T) {
 	}
 }
 
-// --- statusMsg ---
-
-func TestStatusMsgClearedOnTick(t *testing.T) {
-	m := buildTestModel()
-	m.statusMsg = "env synced"
-
-	result, _ := m.Update(tickMsg{})
-	rm := result.(Model)
-	if rm.statusMsg != "" {
-		t.Errorf("expected statusMsg cleared on tick, got %q", rm.statusMsg)
-	}
-}
-
-func TestEnvSyncResultMsg_SetsStatusOnSuccess(t *testing.T) {
-	m := buildTestModel()
-	result, _ := m.Update(envSyncResultMsg{})
-	rm := result.(Model)
-	if rm.statusMsg != "env synced" {
-		t.Errorf("expected 'env synced', got %q", rm.statusMsg)
-	}
-}
-
-func TestEnvSyncResultMsg_SetsStatusOnError(t *testing.T) {
-	m := buildTestModel()
-	result, _ := m.Update(envSyncResultMsg{err: errors.New("fail")})
-	rm := result.(Model)
-	if rm.statusMsg != "env sync failed: fail" {
-		t.Errorf("expected error status, got %q", rm.statusMsg)
-	}
-}
-
-func TestNewWorktreeResultMsg_SetsStatus(t *testing.T) {
-	m := buildTestModel()
-	result, _ := m.Update(newWorktreeResultMsg{})
-	rm := result.(Model)
-	if rm.statusMsg != "worktree created" {
-		t.Errorf("expected 'worktree created', got %q", rm.statusMsg)
-	}
-}
-
-func TestNewWorktreeResultMsg_SetsStatusOnError(t *testing.T) {
-	m := buildTestModel()
-	result, _ := m.Update(newWorktreeResultMsg{err: errors.New("exists")})
-	rm := result.(Model)
-	if rm.statusMsg != "create failed: exists" {
-		t.Errorf("expected error status, got %q", rm.statusMsg)
-	}
-}
-
-func TestReleaseResultMsg_SetsStatusOnSuccess(t *testing.T) {
-	m := buildTestModel()
-	result, _ := m.Update(releaseResultMsg{})
-	rm := result.(Model)
-	if rm.statusMsg != "worktree released" {
-		t.Errorf("expected 'worktree released', got %q", rm.statusMsg)
-	}
-}
-
-func TestReleaseResultMsg_SetsStatusOnError(t *testing.T) {
-	m := buildTestModel()
-	result, _ := m.Update(releaseResultMsg{err: errors.New("busy")})
-	rm := result.(Model)
-	if rm.statusMsg != "release failed: busy" {
-		t.Errorf("expected error status, got %q", rm.statusMsg)
-	}
-}
-
 func TestGtlBinaryPath_ResolvesRunningExecutable(t *testing.T) {
 	got := gtlBinaryPath()
 	if got == "" {
@@ -593,28 +529,11 @@ type callRecord struct {
 
 func recordingDeps(calls *[]callRecord) actionDeps {
 	return actionDeps{
-		supervisorSend: func(sockPath, command string) (string, error) {
-			*calls = append(*calls, callRecord{"supervisorSend", []string{sockPath, command}})
+		runCommand: func(_ context.Context, path string, args ...string) (string, error) {
+			*calls = append(*calls, callRecord{"runCommand", append([]string{path}, args...)})
 			return "ok", nil
 		},
-		supervisorSock: func(worktreePath string) string {
-			return "/tmp/sock/" + worktreePath
-		},
-		openURL: func(url string) {
-			*calls = append(*calls, callRecord{"openURL", []string{url}})
-		},
-		releaseWorktree: func(wtPath string) error {
-			*calls = append(*calls, callRecord{"releaseWorktree", []string{wtPath}})
-			return nil
-		},
-		syncEnv: func(wtPath string) error {
-			*calls = append(*calls, callRecord{"syncEnv", []string{wtPath}})
-			return nil
-		},
-		createWorktree: func(existingPath, branch string) error {
-			*calls = append(*calls, callRecord{"createWorktree", []string{existingPath, branch}})
-			return nil
-		},
+		openURL: func(url string) { *calls = append(*calls, callRecord{"openURL", []string{url}}) },
 	}
 }
 
@@ -692,15 +611,15 @@ func TestEnvSync_PassesSelectedWorktreePath(t *testing.T) {
 		t.Fatal("expected non-nil cmd")
 	}
 	msg := cmd()
-	result := msg.(envSyncResultMsg)
+	result := msg.(operationResultMsg).operation
 	if result.err != nil {
 		t.Errorf("expected nil error, got %v", result.err)
 	}
 	if len(calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(calls))
 	}
-	if calls[0].action != "syncEnv" {
-		t.Fatalf("expected syncEnv, got %s", calls[0].action)
+	if calls[0].action != "runCommand" {
+		t.Fatalf("expected runCommand got %s", calls[0].action)
 	}
 	if calls[0].args[0] != "/home/dev/api" {
 		t.Errorf("expected /home/dev/api, got %s", calls[0].args[0])
@@ -720,12 +639,12 @@ func TestEnvSync_NilWhenNoSelection(t *testing.T) {
 func TestEnvSync_PropagatesError(t *testing.T) {
 	var calls []callRecord
 	m := buildTestModelWithDeps(&calls)
-	m.deps.syncEnv = func(string) error {
-		return errors.New("permission denied")
+	m.deps.runCommand = func(context.Context, string, ...string) (string, error) {
+		return "diagnostic output", errors.New("permission denied")
 	}
 	cmd := m.syncEnv()
 	msg := cmd()
-	result := msg.(envSyncResultMsg)
+	result := msg.(operationResultMsg).operation
 	if result.err == nil || result.err.Error() != "permission denied" {
 		t.Errorf("expected permission denied error, got %v", result.err)
 	}
@@ -739,21 +658,21 @@ func TestCreateWorktree_PassesBranchAndExistingPath(t *testing.T) {
 		t.Fatal("expected non-nil cmd")
 	}
 	msg := cmd()
-	result := msg.(newWorktreeResultMsg)
+	result := msg.(operationResultMsg).operation
 	if result.err != nil {
 		t.Errorf("expected nil error, got %v", result.err)
 	}
 	if len(calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(calls))
 	}
-	if calls[0].action != "createWorktree" {
-		t.Fatalf("expected createWorktree, got %s", calls[0].action)
+	if calls[0].action != "runCommand" {
+		t.Fatalf("expected runCommand got %s", calls[0].action)
 	}
 	if calls[0].args[0] != "/home/dev/api" {
 		t.Errorf("expected existing worktree path, got %s", calls[0].args[0])
 	}
-	if calls[0].args[1] != "feature-new" {
-		t.Errorf("expected branch feature-new, got %s", calls[0].args[1])
+	if calls[0].args[4] != "feature-new" {
+		t.Errorf("expected branch feature-new, got %s", calls[0].args[4])
 	}
 }
 
@@ -779,8 +698,8 @@ func TestToggleSupervisor_SendsStop(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(calls))
 	}
-	if calls[0].action != "supervisorSend" {
-		t.Fatalf("expected supervisorSend, got %s", calls[0].action)
+	if calls[0].action != "runCommand" {
+		t.Fatalf("expected runCommand, got %s", calls[0].action)
 	}
 	if calls[0].args[1] != "stop" {
 		t.Errorf("expected stop command for running supervisor, got %s", calls[0].args[1])
@@ -813,8 +732,8 @@ func TestReleaseWorktree_PassesPath(t *testing.T) {
 	m := buildTestModelWithDeps(&calls)
 	cmd := m.releaseWorktree(m.selectedWorktree())
 	cmd()
-	if len(calls) != 1 || calls[0].action != "releaseWorktree" {
-		t.Fatalf("expected releaseWorktree call, got %v", calls)
+	if len(calls) != 1 || calls[0].action != "runCommand" {
+		t.Fatalf("expected runCommand, got %v", calls)
 	}
 	if calls[0].args[0] != "/home/dev/api" {
 		t.Errorf("expected /home/dev/api, got %s", calls[0].args[0])
@@ -830,8 +749,8 @@ func TestKeyE_TriggersEnvSync(t *testing.T) {
 		t.Fatal("expected non-nil cmd from 'e' key")
 	}
 	cmd()
-	if len(calls) != 1 || calls[0].action != "syncEnv" {
-		t.Fatalf("expected syncEnv call, got %v", calls)
+	if len(calls) != 1 || calls[0].action != "runCommand" {
+		t.Fatalf("expected runCommand, got %v", calls)
 	}
 	if calls[0].args[0] != "/home/dev/api" {
 		t.Errorf("expected /home/dev/api, got %s", calls[0].args[0])
@@ -852,6 +771,7 @@ func TestInputMode_EnterTriggersCreate(t *testing.T) {
 	var calls []callRecord
 	m := buildTestModelWithDeps(&calls)
 	m.inputMode = "new_worktree"
+	m.inputTarget = m.selectedWorktree()
 	m.inputText = "feature-new"
 
 	result, cmd := m.updateInput(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
@@ -864,10 +784,10 @@ func TestInputMode_EnterTriggersCreate(t *testing.T) {
 	}
 	// Execute the cmd and verify the handoff
 	cmd()
-	if len(calls) != 1 || calls[0].action != "createWorktree" {
-		t.Fatalf("expected createWorktree call, got %v", calls)
+	if len(calls) != 1 || calls[0].action != "runCommand" {
+		t.Fatalf("expected runCommand, got %v", calls)
 	}
-	if calls[0].args[1] != "feature-new" {
+	if calls[0].args[4] != "feature-new" {
 		t.Errorf("expected branch feature-new, got %s", calls[0].args[1])
 	}
 }
@@ -945,8 +865,8 @@ func TestConfirm_YReleasesWorktree(t *testing.T) {
 		t.Fatal("expected non-nil cmd from confirm")
 	}
 	cmd()
-	if len(calls) != 1 || calls[0].action != "releaseWorktree" {
-		t.Fatalf("expected releaseWorktree call, got %v", calls)
+	if len(calls) != 1 || calls[0].action != "runCommand" {
+		t.Fatalf("expected runCommand, got %v", calls)
 	}
 	if calls[0].args[0] != "/home/dev/api" {
 		t.Errorf("expected /home/dev/api, got %s", calls[0].args[0])
@@ -990,8 +910,8 @@ func TestConfirm_ReleasesCapturedTargetAfterListReorder(t *testing.T) {
 		t.Fatal("expected non-nil release cmd")
 	}
 	cmd()
-	if len(calls) != 1 || calls[0].action != "releaseWorktree" {
-		t.Fatalf("expected releaseWorktree call, got %v", calls)
+	if len(calls) != 1 || calls[0].action != "runCommand" {
+		t.Fatalf("expected runCommand, got %v", calls)
 	}
 	if calls[0].args[0] != "/home/dev/api" {
 		t.Errorf("expected originally-selected /home/dev/api released, got %s", calls[0].args[0])
@@ -1065,5 +985,366 @@ func TestOpenInBrowser_NoOpWhenNoPorts(t *testing.T) {
 	m.openInBrowser()
 	if len(calls) != 0 {
 		t.Errorf("expected no calls when no ports, got %v", calls)
+	}
+}
+
+func press(m Model, key string) (Model, tea.Cmd) {
+	result, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: rune(key[0]), Text: key}))
+	return result.(Model), cmd
+}
+
+func TestActionsUseCanonicalCLIInSelectedDirectory(t *testing.T) {
+	tests := []struct {
+		name   string
+		key    string
+		cursor int
+		args   []string
+	}{
+		{"stop", "s", 1, []string{"stop"}},
+		{"cold start", "s", 2, []string{"start", "--await"}},
+		{"restart", "r", 2, []string{"restart"}},
+		{"env sync", "e", 2, []string{"env", "sync"}},
+		{"health", "h", 2, []string{"doctor"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls []callRecord
+			m := buildTestModelWithDeps(&calls)
+			m.cursor = tt.cursor
+			target := m.selectedPath()
+			m, cmd := press(m, tt.key)
+			if cmd == nil || !m.busy() {
+				t.Fatal("action must immediately enter running state")
+			}
+			m.cursor = 1
+			cmd()
+			want := append([]string{target}, tt.args...)
+			if len(calls) != 1 || !reflect.DeepEqual(calls[0].args, want) {
+				t.Fatalf("calls=%v, want %v", calls, want)
+			}
+		})
+	}
+}
+
+func TestOperationErrorAndOutputPersistAcrossPolling(t *testing.T) {
+	var calls []callRecord
+	m := buildTestModelWithDeps(&calls)
+	m.deps.runCommand = func(context.Context, string, ...string) (string, error) {
+		return "port 3000 is in use", errors.New("start failed")
+	}
+	m, cmd := press(m, "s")
+	result, _ := m.Update(cmd())
+	m = result.(Model)
+	if m.busy() || m.operation.err == nil || m.operation.output != "port 3000 is in use" {
+		t.Fatalf("lost operation result: %+v", m.operation)
+	}
+	status := m.statusMsg
+	result, _ = m.Update(tickMsg{})
+	m = result.(Model)
+	result, _ = m.Update(dataMsg{snapshot: m.snapshot})
+	m = result.(Model)
+	if m.statusMsg != status || !strings.Contains(status, "failed") {
+		t.Fatalf("operation failure was cleared: %q", m.statusMsg)
+	}
+}
+
+func TestBusyOperationBlocksOtherActionsAndPrompts(t *testing.T) {
+	var calls []callRecord
+	m := buildTestModelWithDeps(&calls)
+	m, pending := press(m, "r")
+	for _, key := range []string{"s", "r", "e", "h", "n", "d"} {
+		var cmd tea.Cmd
+		m, cmd = press(m, key)
+		if cmd != nil || m.inputMode != "" || m.confirmKind != "" {
+			t.Fatalf("%q initiated another operation", key)
+		}
+	}
+	pending()
+	if len(calls) != 1 {
+		t.Fatalf("got %d calls", len(calls))
+	}
+}
+
+func TestHealthResultBelongsToCapturedWorktreeAndBecomesStale(t *testing.T) {
+	var calls []callRecord
+	m := buildTestModelWithDeps(&calls)
+	target := m.selectedPath()
+	m, cmd := press(m, "h")
+	m.cursor = 2
+	result, _ := m.Update(cmd())
+	m = result.(Model)
+	if m.health[target].output != "ok" || m.health[target].stale {
+		t.Fatalf("missing fresh report for %s", target)
+	}
+	if _, ok := m.health[m.selectedPath()]; ok {
+		t.Fatal("health report assigned to current selection")
+	}
+	m.cursor = 1
+	m, _ = press(m, "e")
+	if !m.health[target].stale {
+		t.Fatal("mutation must invalidate prior health diagnosis")
+	}
+}
+
+func TestPollPreservesSelectedWorktreeAcrossInsertion(t *testing.T) {
+	var calls []callRecord
+	m := buildTestModelWithDeps(&calls)
+	m.cursor = 2
+	target := m.selectedPath()
+	snap := m.snapshot
+	snap.Worktrees = append([]WorktreeStatus{{Project: "api", WorktreePath: "/new", Branch: "new"}}, snap.Worktrees...)
+	result, _ := m.Update(dataMsg{snapshot: snap})
+	m = result.(Model)
+	if m.selectedPath() != target || m.cursor != 3 {
+		t.Fatalf("selection changed after poll: %s at %d", m.selectedPath(), m.cursor)
+	}
+}
+
+func TestNewWorktreeUsesPromptTargetAfterPollRemovesSelection(t *testing.T) {
+	var calls []callRecord
+	m := buildTestModelWithDeps(&calls)
+	target := m.selectedPath()
+	m, _ = press(m, "n")
+	snap := m.snapshot
+	snap.Worktrees = snap.Worktrees[1:]
+	result, _ := m.Update(dataMsg{snapshot: snap})
+	m = result.(Model)
+	m.inputText = "feature-new"
+	result, cmd := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	m = result.(Model)
+	if cmd == nil || !m.busy() {
+		t.Fatal("create did not start")
+	}
+	cmd()
+	want := []string{target, "new", "--force", "--", "feature-new"}
+	if !reflect.DeepEqual(calls[0].args, want) {
+		t.Fatalf("got %v, want %v", calls[0].args, want)
+	}
+}
+
+func TestQuitCancelsActiveCommandFromEveryMode(t *testing.T) {
+	for _, mode := range []string{"normal", "input", "filter", "help", "confirm"} {
+		t.Run(mode, func(t *testing.T) {
+			var calls []callRecord
+			m := buildTestModelWithDeps(&calls)
+			var commandContext context.Context
+			m.deps.runCommand = func(ctx context.Context, _ string, _ ...string) (string, error) { commandContext = ctx; return "", nil }
+			m, cmd := press(m, "r")
+			completion := cmd()
+			switch mode {
+			case "input":
+				m.inputMode = "new_worktree"
+			case "filter":
+				m.filterMode = true
+			case "help":
+				m.showHelp = true
+			case "confirm":
+				m.confirmKind = "release"
+			}
+			result, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: 'c', Mod: tea.ModCtrl}))
+			m = result.(Model)
+			if m.quitting || !m.pendingQuit || commandContext.Err() != context.Canceled {
+				t.Fatal("quit must cancel and wait for active command completion")
+			}
+			result, quitCmd := m.Update(completion)
+			if !result.(Model).quitting || quitCmd == nil {
+				t.Fatal("command completion must finish pending quit")
+			}
+		})
+	}
+}
+
+func TestDetailFocusScrollsWithoutChangingSelection(t *testing.T) {
+	var calls []callRecord
+	m := buildTestModelWithDeps(&calls)
+	m.height = 12
+	m.operation = &operationState{name: "Health", output: strings.Repeat("diagnosis\n", 80)}
+	m, _ = press(m, "3")
+	cursor := m.cursor
+	m, _ = press(m, "j")
+	if m.detailScroll != 1 || m.cursor != cursor {
+		t.Fatalf("detail navigation moved selection or failed to scroll: %+v", m)
+	}
+	result, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnd}))
+	m = result.(Model)
+	want := m.detailLineCount(m.detailPanelWidth()) - m.detailViewportHeight()
+	if m.detailScroll != want {
+		t.Fatalf("end scroll=%d, want %d", m.detailScroll, want)
+	}
+	result, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyHome}))
+	m = result.(Model)
+	if m.detailScroll != 0 {
+		t.Fatal("home must scroll to top")
+	}
+	result, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyLeft}))
+	m = result.(Model)
+	m, _ = press(m, "j")
+	if m.cursor == cursor {
+		t.Fatal("left must return navigation to list")
+	}
+}
+
+func TestMutationFocusesActivityOutput(t *testing.T) {
+	var calls []callRecord
+	m := buildTestModelWithDeps(&calls)
+	m.detailTab = tabHealth
+	m.detailScroll = 10
+	m, _ = press(m, "r")
+	if m.detailTab != tabActivity || m.focus != paneDetail || m.detailScroll != 0 {
+		t.Fatal("mutation must reveal activity output from the beginning")
+	}
+}
+
+func TestBackspacePreservesUnicode(t *testing.T) {
+	m := buildTestModel()
+	m.filterMode = true
+	m.filterText = "feature-特"
+	result, _ := m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace}))
+	m = result.(Model)
+	if m.filterText != "feature-" {
+		t.Fatalf("backspace corrupted filter: %q", m.filterText)
+	}
+	m.filterMode = false
+	m.inputMode = "new_worktree"
+	m.inputText = "feature-特"
+	result, _ = m.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyBackspace}))
+	if result.(Model).inputText != "feature-" {
+		t.Fatalf("backspace corrupted branch: %q", result.(Model).inputText)
+	}
+}
+
+func TestPollingDoesNotOverlap(t *testing.T) {
+	m := buildTestModel()
+	result, cmd := m.Update(tickMsg{})
+	m = result.(Model)
+	if !m.polling || cmd == nil {
+		t.Fatal("idle tick must start polling")
+	}
+	// A new poll and its next tick are returned as a batch. While that poll
+	// remains pending, another tick must schedule only the subsequent tick.
+	if _, ok := cmd().(tea.BatchMsg); !ok {
+		t.Fatal("idle tick must batch poll and next tick")
+	}
+	result, _ = m.Update(tickMsg{})
+	m = result.(Model)
+	if !m.polling {
+		t.Fatal("tick must preserve pending poll")
+	}
+	result, cmd = m.Update(operationResultMsg{operation: operationState{name: "Restart"}})
+	m = result.(Model)
+	if cmd != nil || !m.polling {
+		t.Fatal("operation completion must not start an overlapping poll")
+	}
+	result, _ = m.Update(dataMsg{snapshot: m.snapshot})
+	m = result.(Model)
+	if m.polling {
+		t.Fatal("poll result must clear pending state")
+	}
+	result, cmd = m.Update(operationResultMsg{operation: operationState{name: "Restart"}})
+	if cmd == nil || !result.(Model).polling {
+		t.Fatal("operation completion should poll when idle")
+	}
+}
+
+func TestFilterFromCompactDetailsRevealsList(t *testing.T) {
+	m := buildTestModel()
+	m.width = compactWidth - 1
+	m.focus = paneDetail
+	m.detailTab = tabActivity
+	m, _ = press(m, "/")
+	if !m.filterMode || m.focus != paneList {
+		t.Fatal("filter must reveal its input and worktree list from compact details")
+	}
+	m, _ = press(m, "redesign")
+	if wt := m.selectedWorktree(); wt == nil || wt.Branch != "redesign" {
+		t.Fatalf("filter did not select matching worktree: %v", wt)
+	}
+}
+
+func TestResizeKeepsSelectedWorktreeVisible(t *testing.T) {
+	m := buildTestModel()
+	m.cursor = len(m.flatList) - 1
+	m.scrollOffset = 0
+	selected := m.selectedWorktree().Branch
+	result, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 8})
+	m = result.(Model)
+	if m.selectedWorktree().Branch != selected {
+		t.Fatal("resize changed selected worktree")
+	}
+	if lines := m.renderedLinesBetween(m.scrollOffset, m.cursor); lines > m.listVisibleLines() {
+		t.Fatalf("selected worktree needs %d rows but viewport has %d", lines, m.listVisibleLines())
+	}
+}
+
+func TestHealthRetainsCheckedBranchAfterExternalSwitch(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pending=%v", pending), func(t *testing.T) {
+			var calls []callRecord
+			m := buildTestModelWithDeps(&calls)
+			path := m.selectedPath()
+			m, cmd := press(m, "h")
+			completion := cmd()
+			if !pending {
+				result, _ := m.Update(completion)
+				m = result.(Model)
+			}
+			snap := m.snapshot
+			snap.Worktrees = append([]WorktreeStatus(nil), snap.Worktrees...)
+			snap.Worktrees[0].Branch = "switched-branch"
+			result, _ := m.Update(dataMsg{snapshot: snap})
+			m = result.(Model)
+			if pending {
+				result, _ = m.Update(completion)
+				m = result.(Model)
+			}
+			if report := m.health[path]; report.branch != "main" || !report.stale {
+				t.Fatalf("report was relabeled or stayed fresh: %+v", report)
+			}
+		})
+	}
+}
+
+func TestHealthForRemovedTargetIsStale(t *testing.T) {
+	var calls []callRecord
+	m := buildTestModelWithDeps(&calls)
+	path := m.selectedPath()
+	m, cmd := press(m, "h")
+	snap := m.snapshot
+	snap.Worktrees = snap.Worktrees[1:]
+	result, _ := m.Update(dataMsg{snapshot: snap})
+	m = result.(Model)
+	result, _ = m.Update(cmd())
+	m = result.(Model)
+	if !m.health[path].stale {
+		t.Fatal("removed worktree report must not remain fresh")
+	}
+}
+
+func TestReleaseRequiresVisibleConfirmation(t *testing.T) {
+	var calls []callRecord
+	m := buildTestModelWithDeps(&calls)
+	m, _ = press(m, "d")
+	target := m.confirmTarget
+	m.width, m.height = 30, 8
+	m, cmd := press(m, "y")
+	if cmd != nil || m.confirmKind != "release" || m.confirmTarget != target {
+		t.Fatal("clipped confirmation must remain open without releasing")
+	}
+	result, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = result.(Model)
+	m, cmd = press(m, "y")
+	if cmd == nil || m.confirmKind != "" {
+		t.Fatal("resized visible confirmation must allow release")
+	}
+	cmd()
+	if len(calls) != 1 {
+		t.Fatalf("expected one release, got %v", calls)
+	}
+	m = buildTestModelWithDeps(&calls)
+	m, _ = press(m, "d")
+	m.width, m.height = 30, 8
+	m, cmd = press(m, "n")
+	if cmd != nil || m.confirmKind != "" {
+		t.Fatal("small confirmation must allow cancellation")
 	}
 }

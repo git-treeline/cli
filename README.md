@@ -538,6 +538,33 @@ git-treeline speaks [MCP](https://modelcontextprotocol.io/) natively. Add this t
 
 Once configured, agents can query allocations (`status`, `port`, `list`), check project health (`doctor`), read config values (`config_get`), get database names (`db_name`), and control the supervised dev server (`start`, `stop`, `restart`) — all as structured JSON without parsing CLI output.
 
+### 20. Diagnose and recover worktrees in the dashboard
+
+Run `gtl dashboard` (aliases: `gtl dash`, `gtl ui`) to browse allocated worktrees
+across projects. Select a worktree with the arrow keys or `j`/`k`.
+
+- `1`: resource overview. `2` or `h`: run doctor and inspect Health. `3`: inspect
+  the latest operation in Activity.
+- `s`: start or stop the selected server. Starting a new supervisor waits for
+  readiness; it continues running after the dashboard exits.
+- `r`: restart with the current runtime environment. `e`: sync the env file and
+  editor settings. `o`: open in the browser.
+- `n`: create a worktree using the selected worktree as the CLI context.
+  `d`: confirm allocation release, retaining its directory and databases.
+- `Tab`: switch between the list and details. In details, use arrows, `j`/`k`,
+  Page Up/Down, or Home/End to scroll. `Esc` returns to the list and clears its
+  filter; `/` filters worktrees. `?` shows help.
+
+Actions use the same workflows and validation as their CLI commands. Activity
+shows the target, progress, and captured completion output, including errors,
+until the next operation. One operation runs at a time; quitting cancels an
+unfinished command and waits for it to exit. Captured output retains the last
+64 KiB and marks omitted output. Activity is command output, not live app logs.
+
+Health is a diagnostic snapshot: actions mark the affected worktree's previous
+report stale. Press `h` to recheck after recovery. On narrow terminals, `Tab`
+switches between the full-width worktree list and details.
+
 ## Port-dependent data
 
 If your app stores URLs that include the port (e.g., OAuth redirect URIs, webhook endpoints), the cloned database will have stale values pointing to the wrong port. Use `commands.setup` to patch them — setup commands run after the env file is written, so `PORT` is available:

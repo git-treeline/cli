@@ -1,16 +1,18 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 )
 
-type envSyncResultMsg struct{ err error }
-type newWorktreeResultMsg struct{ err error }
-type releaseResultMsg struct{ err error }
+type operationResultMsg struct {
+	operation operationState
+}
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -18,6 +20,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.ensureCursorVisible()
+		m.clampDetailScroll()
 		return m, nil
 
 	case dataMsg:
@@ -30,43 +34,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pollErr = nil
+		selected := m.selectedPath()
 		m.snapshot = msg.snapshot
-		m.flatList = buildFlatList(m.snapshot, m.filterText)
-		m.clampCursor()
+		for path, report := range m.health {
+			report.stale = report.stale || !m.hasWorktree(path, report.branch)
+			m.health[path] = report
+		}
+		m.rebuildList(selected)
+		m.clampDetailScroll()
 		return m, nil
 
 	case tickMsg:
-		m.statusMsg = ""
+		if m.polling {
+			return m, doTick()
+		}
 		m.polling = true
 		return m, tea.Batch(doPoll(), doTick())
 
-	case supervisorResultMsg:
-		m.polling = true
-		return m, doPoll()
-
-	case releaseResultMsg:
-		if msg.err != nil {
-			m.statusMsg = "release failed: " + msg.err.Error()
-		} else {
-			m.statusMsg = "worktree released"
+	case operationResultMsg:
+		if m.operationCancel != nil {
+			m.operationCancel()
+			m.operationCancel = nil
 		}
-		m.polling = true
-		return m, doPoll()
-
-	case envSyncResultMsg:
-		if msg.err != nil {
-			m.statusMsg = "env sync failed: " + msg.err.Error()
-		} else {
-			m.statusMsg = "env synced"
+		op := msg.operation
+		op.running = false
+		m.operation = &op
+		if op.name == "Health" {
+			if m.health == nil {
+				m.health = make(map[string]healthReport)
+			}
+			m.health[op.path] = healthReport{branch: op.branch, output: op.output, err: op.err, stale: !m.hasWorktree(op.path, op.branch)}
 		}
-		m.polling = true
-		return m, doPoll()
-
-	case newWorktreeResultMsg:
-		if msg.err != nil {
-			m.statusMsg = "create failed: " + msg.err.Error()
-		} else {
-			m.statusMsg = "worktree created"
+		m.statusMsg = op.name + " completed: " + op.branch
+		if op.err != nil {
+			m.statusMsg = op.name + " failed: " + op.branch + " — " + op.err.Error()
+		}
+		m.clampDetailScroll()
+		if m.pendingQuit {
+			m.quitting = true
+			return m, tea.Quit
+		}
+		if m.polling {
+			return m, nil
 		}
 		m.polling = true
 		return m, doPoll()
@@ -77,6 +86,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyPressMsg:
+		if msg.String() == "ctrl+c" {
+			return m.quit()
+		}
+		if m.pendingQuit {
+			return m, nil
+		}
 		if m.inputMode != "" {
 			return m.updateInput(msg)
 		}
@@ -102,14 +117,50 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
-		m.quitting = true
-		return m, tea.Quit
+		return m.quit()
 
 	case "j", "down":
-		m.moveCursor(1)
+		if m.focus == paneDetail {
+			m.scrollDetail(1)
+		} else {
+			m.moveCursor(1)
+		}
 	case "k", "up":
-		m.moveCursor(-1)
+		if m.focus == paneDetail {
+			m.scrollDetail(-1)
+		} else {
+			m.moveCursor(-1)
+		}
 
+	case "pgdown", "pgup", "home", "end":
+		if m.focus == paneDetail {
+			switch msg.String() {
+			case "pgdown":
+				m.scrollDetail(m.detailViewportHeight())
+			case "pgup":
+				m.scrollDetail(-m.detailViewportHeight())
+			case "home":
+				m.detailScroll = 0
+			case "end":
+				m.detailScroll = m.detailLineCount(m.detailPanelWidth())
+				m.clampDetailScroll()
+			}
+		}
+	case "1", "2", "3", "h":
+		m.focus = paneDetail
+		m.detailScroll = 0
+		switch msg.String() {
+		case "1":
+			m.detailTab = tabOverview
+		case "3":
+			m.detailTab = tabActivity
+		default:
+			m.detailTab = tabHealth
+			cmd := m.checkHealth()
+			return m, cmd
+		}
+	case "left":
+		m.focus = paneList
 	case "tab":
 		if m.focus == paneList {
 			m.focus = paneDetail
@@ -121,12 +172,17 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.focus = paneDetail
 
 	case "s":
-		return m, m.toggleSupervisor()
+		cmd := m.toggleSupervisor()
+		return m, cmd
 	case "r":
-		return m, m.restartSupervisor()
+		cmd := m.restartSupervisor()
+		return m, cmd
 	case "o":
 		m.openInBrowser()
 	case "d":
+		if m.busy() {
+			return m, nil
+		}
 		if wt := m.selectedWorktree(); wt != nil {
 			target := *wt
 			m.confirmTarget = &target
@@ -134,14 +190,25 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "e":
-		return m, m.syncEnv()
+		cmd := m.syncEnv()
+		return m, cmd
 
 	case "n":
+		if m.busy() {
+			return m, nil
+		}
+		wt := m.selectedWorktree()
+		if wt == nil {
+			return m, nil
+		}
+		target := *wt
+		m.inputTarget = &target
 		m.inputMode = "new_worktree"
 		m.inputText = ""
 		return m, nil
 
 	case "/":
+		m.focus = paneList
 		m.filterMode = true
 		m.filterText = ""
 
@@ -149,10 +216,10 @@ func (m Model) updateNormal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.showHelp = true
 
 	case "escape", "esc":
+		m.focus = paneList
 		if m.filterText != "" {
 			m.filterText = ""
-			m.flatList = buildFlatList(m.snapshot, "")
-			m.clampCursor()
+			m.rebuildList(m.selectedPath())
 		}
 	}
 	return m, nil
@@ -165,15 +232,15 @@ func (m Model) updateFilter(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "backspace":
 		if len(m.filterText) > 0 {
-			m.filterText = m.filterText[:len(m.filterText)-1]
+			_, size := utf8.DecodeLastRuneInString(m.filterText)
+			m.filterText = m.filterText[:len(m.filterText)-size]
 		}
 	default:
 		if msg.Key().Text != "" {
 			m.filterText += msg.Key().Text
 		}
 	}
-	m.flatList = buildFlatList(m.snapshot, m.filterText)
-	m.clampCursor()
+	m.rebuildList(m.selectedPath())
 	return m, nil
 }
 
@@ -181,6 +248,9 @@ func (m Model) updateConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y":
 		if m.confirmKind == "release" {
+			if !m.releaseConfirmationFits() {
+				return m, nil
+			}
 			cmd := m.releaseWorktree(m.confirmTarget)
 			m.confirmKind = ""
 			m.confirmTarget = nil
@@ -201,6 +271,9 @@ func (m *Model) moveCursor(delta int) {
 		next += delta
 	}
 	if next >= 0 && next < len(m.flatList) {
+		if m.cursor != next {
+			m.detailScroll = 0
+		}
 		m.cursor = next
 	}
 	m.ensureCursorVisible()
@@ -229,7 +302,10 @@ func (m *Model) ensureCursorVisible() {
 	// If the cursor would render below the visible area, bump scrollOffset up.
 	for {
 		lines := m.renderedLinesBetween(m.scrollOffset, m.cursor)
-		if lines < maxLines-scrollMargin {
+		if lines <= max(1, maxLines-scrollMargin) {
+			break
+		}
+		if m.scrollOffset >= m.cursor {
 			break
 		}
 		m.scrollOffset++
@@ -258,11 +334,7 @@ func (m *Model) renderedLinesBetween(from, to int) int {
 }
 
 func (m *Model) listVisibleLines() int {
-	contentHeight := m.height - statusBarHeight - borderChrome
-	if contentHeight < minContentHeight {
-		contentHeight = minContentHeight
-	}
-	return contentHeight - 1
+	return max(0, m.height-statusBarHeight-borderChrome-1)
 }
 
 // listIndexAtRow maps a row within the list panel's content area (row 0 is
@@ -319,12 +391,24 @@ func (m *Model) clampCursor() {
 }
 
 func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
+	if m.pendingQuit || m.inputMode != "" || m.filterMode || m.showHelp || m.confirmKind != "" {
+		return m, nil
+	}
 	leftWidth := int(float64(m.width) * listPanelRatio)
 	mouse := msg.Mouse()
+	if m.width < compactWidth {
+		if m.focus == paneDetail {
+			return m, nil
+		}
+		leftWidth = m.width
+	}
 	if mouse.X < leftWidth {
 		m.focus = paneList
 		// Row 0 is the top border, row 1 the panel title.
 		if idx := m.listIndexAtRow(mouse.Y - 2); idx >= 0 {
+			if m.cursor != idx {
+				m.detailScroll = 0
+			}
 			m.cursor = idx
 			m.ensureCursorVisible()
 		}
@@ -334,38 +418,118 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// --- Supervisor actions ---
+func (m Model) quit() (tea.Model, tea.Cmd) {
+	if m.busy() {
+		m.pendingQuit = true
+		m.inputMode, m.confirmKind = "", ""
+		m.filterMode, m.showHelp = false, false
+		m.inputTarget, m.confirmTarget = nil, nil
+		m.statusMsg = "Cancelling " + m.operation.name + "…"
+		if m.operationCancel != nil {
+			m.operationCancel()
+		}
+		return m, nil
+	}
+	m.quitting = true
+	return m, tea.Quit
+}
 
-type supervisorResultMsg struct{}
+func (m Model) busy() bool { return m.operation != nil && m.operation.running }
 
-func (m *Model) toggleSupervisor() tea.Cmd {
-	wt := m.selectedWorktree()
-	if wt == nil {
+func (m *Model) beginOperation(name string, wt *WorktreeStatus, args ...string) tea.Cmd {
+	if m.busy() || wt == nil || wt.WorktreePath == "" {
 		return nil
 	}
-	sockPath := m.deps.supervisorSock(wt.WorktreePath)
-	command := "start"
-	if wt.Supervisor == "running" {
-		command = "stop"
+	if m.lifecycle == nil {
+		m.lifecycle = newCommandLifecycle()
 	}
-	send := m.deps.supervisorSend
+	lifecycle := m.lifecycle
+	ctx, cancel := context.WithCancel(lifecycle.ctx)
+	m.operationCancel = cancel
+	op := operationState{name: name, path: wt.WorktreePath, branch: wt.Branch, running: true}
+	m.operation = &op
+	m.statusMsg = name + " in progress: " + wt.Branch
+	if name != "Health" {
+		m.detailTab = tabActivity
+		m.focus = paneDetail
+		m.detailScroll = 0
+		if report, ok := m.health[wt.WorktreePath]; ok {
+			report.stale = true
+			m.health[wt.WorktreePath] = report
+		}
+	}
+	run := m.deps.runCommand
 	return func() tea.Msg {
-		_, _ = send(sockPath, command)
-		return supervisorResultMsg{}
+		result := op
+		defer cancel()
+		if !lifecycle.start() {
+			result.err = context.Canceled
+			result.running = false
+			return operationResultMsg{operation: result}
+		}
+		defer lifecycle.running.Done()
+		result.output, result.err = run(ctx, result.path, args...)
+		result.running = false
+		return operationResultMsg{operation: result}
 	}
 }
 
-func (m *Model) restartSupervisor() tea.Cmd {
+func (m *Model) toggleSupervisor() tea.Cmd {
 	wt := m.selectedWorktree()
-	if wt == nil {
-		return nil
+	if wt != nil && wt.Supervisor == "running" {
+		return m.beginOperation("Stop", wt, "stop")
 	}
-	sockPath := m.deps.supervisorSock(wt.WorktreePath)
-	send := m.deps.supervisorSend
-	return func() tea.Msg {
-		_, _ = send(sockPath, "restart")
-		return supervisorResultMsg{}
+	return m.beginOperation("Start", wt, "start", "--await")
+}
+
+func (m *Model) restartSupervisor() tea.Cmd {
+	return m.beginOperation("Restart", m.selectedWorktree(), "restart")
+}
+
+func (m *Model) checkHealth() tea.Cmd {
+	return m.beginOperation("Health", m.selectedWorktree(), "doctor")
+}
+
+func (m *Model) selectedPath() string {
+	if wt := m.selectedWorktree(); wt != nil {
+		return wt.WorktreePath
 	}
+	return ""
+}
+
+func (m Model) hasWorktree(path, branch string) bool {
+	for _, wt := range m.snapshot.Worktrees {
+		if wt.WorktreePath == path && wt.Branch == branch {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Model) rebuildList(selected string) {
+	m.flatList = buildFlatList(m.snapshot, m.filterText)
+	if selected != "" {
+		for i, entry := range m.flatList {
+			if entry.wt != nil && entry.wt.WorktreePath == selected {
+				m.cursor = i
+				break
+			}
+		}
+	}
+	m.clampCursor()
+	if m.selectedPath() != selected {
+		m.detailScroll = 0
+	}
+}
+
+func (m *Model) scrollDetail(delta int) {
+	m.detailScroll += delta
+	m.clampDetailScroll()
+}
+
+func (m *Model) clampDetailScroll() {
+	limit := max(0, m.detailLineCount(m.detailPanelWidth())-m.detailViewportHeight())
+	m.detailScroll = max(0, min(m.detailScroll, limit))
 }
 
 func (m Model) updateInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -374,17 +538,22 @@ func (m Model) updateInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		branch := strings.TrimSpace(m.inputText)
 		m.inputMode = ""
 		m.inputText = ""
+		target := m.inputTarget
+		m.inputTarget = nil
 		if branch == "" {
 			return m, nil
 		}
-		return m, m.createWorktree(branch)
+		cmd := m.beginOperation("Create", target, "new", "--force", "--", branch)
+		return m, cmd
 	case "escape", "esc":
+		m.inputTarget = nil
 		m.inputMode = ""
 		m.inputText = ""
 		return m, nil
 	case "backspace":
 		if len(m.inputText) > 0 {
-			m.inputText = m.inputText[:len(m.inputText)-1]
+			_, size := utf8.DecodeLastRuneInString(m.inputText)
+			m.inputText = m.inputText[:len(m.inputText)-size]
 		}
 	default:
 		ch := msg.Key().Text
@@ -396,27 +565,11 @@ func (m Model) updateInput(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) syncEnv() tea.Cmd {
-	wt := m.selectedWorktree()
-	if wt == nil || wt.WorktreePath == "" {
-		return nil
-	}
-	wtPath := wt.WorktreePath
-	fn := m.deps.syncEnv
-	return func() tea.Msg {
-		return envSyncResultMsg{err: fn(wtPath)}
-	}
+	return m.beginOperation("Env sync", m.selectedWorktree(), "env", "sync")
 }
 
 func (m *Model) createWorktree(branch string) tea.Cmd {
-	wt := m.selectedWorktree()
-	if wt == nil || wt.WorktreePath == "" {
-		return nil
-	}
-	existingPath := wt.WorktreePath
-	fn := m.deps.createWorktree
-	return func() tea.Msg {
-		return newWorktreeResultMsg{err: fn(existingPath, branch)}
-	}
+	return m.beginOperation("Create", m.selectedWorktree(), "new", "--force", "--", branch)
 }
 
 func (m *Model) openInBrowser() {
@@ -435,9 +588,5 @@ func (m *Model) releaseWorktree(wt *WorktreeStatus) tea.Cmd {
 	if wt == nil {
 		return nil
 	}
-	wtPath := wt.WorktreePath
-	fn := m.deps.releaseWorktree
-	return func() tea.Msg {
-		return releaseResultMsg{err: fn(wtPath)}
-	}
+	return m.beginOperation("Release", wt, "release", "--force", wt.WorktreePath)
 }

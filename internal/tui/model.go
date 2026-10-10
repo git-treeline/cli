@@ -1,21 +1,18 @@
 package tui
 
 import (
-	"fmt"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/git-treeline/cli/internal/config"
-	"github.com/git-treeline/cli/internal/setup"
-	"github.com/git-treeline/cli/internal/supervisor"
-	"github.com/git-treeline/cli/internal/worktree"
 )
 
 const pollInterval = 2 * time.Second
@@ -31,37 +28,62 @@ const (
 // actionDeps holds injectable functions for side-effectful operations.
 // Production code sets these to real implementations; tests use stubs.
 type actionDeps struct {
-	supervisorSend  func(sockPath, command string) (string, error)
-	supervisorSock  func(worktreePath string) string
-	openURL         func(url string)
-	releaseWorktree func(worktreePath string) error
-	syncEnv         func(worktreePath string) error
-	createWorktree  func(existingWorktreePath, branch string) error
+	runCommand func(context.Context, string, ...string) (string, error)
+	openURL    func(string)
+}
+
+type detailTab int
+
+const (
+	tabOverview detailTab = iota
+	tabHealth
+	tabActivity
+)
+
+type operationState struct {
+	name, path, branch, output string
+	err                        error
+	running                    bool
+}
+
+type healthReport struct {
+	branch string
+	output string
+	err    error
+	stale  bool
 }
 
 // Model is the root Bubble Tea model for the gtl dashboard.
 type Model struct {
-	snapshot      Snapshot
-	width         int
-	height        int
-	focus         focusPane
-	cursor        int // selected index into flatList
-	scrollOffset  int // first visible index in the list panel
-	flatList      []flatEntry
-	ready         bool
-	polling       bool
-	spinner       spinner.Model
-	filterMode    bool
-	filterText    string
-	showHelp      bool
-	confirmKind   string          // "release" or ""
-	confirmTarget *WorktreeStatus // worktree captured when the confirm overlay opened
-	quitting      bool
-	inputMode     string // "" or "new_worktree"
-	inputText     string
-	statusMsg     string // transient status message
-	pollErr       error  // last poll failure; snapshot below is then stale
-	deps          actionDeps
+	snapshot        Snapshot
+	width           int
+	height          int
+	focus           focusPane
+	cursor          int // selected index into flatList
+	scrollOffset    int // first visible index in the list panel
+	flatList        []flatEntry
+	ready           bool
+	polling         bool
+	spinner         spinner.Model
+	filterMode      bool
+	filterText      string
+	showHelp        bool
+	confirmKind     string          // "release" or ""
+	confirmTarget   *WorktreeStatus // worktree captured when the confirm overlay opened
+	pendingQuit     bool
+	quitting        bool
+	inputMode       string // "" or "new_worktree"
+	inputText       string
+	statusMsg       string // last operation result
+	pollErr         error  // last poll failure; snapshot below is then stale
+	inputTarget     *WorktreeStatus
+	detailTab       detailTab
+	detailScroll    int
+	operation       *operationState
+	health          map[string]healthReport
+	lifecycle       *commandLifecycle
+	operationCancel context.CancelFunc
+	deps            actionDeps
 }
 
 // flatEntry is a denormalized row in the worktree list.
@@ -92,48 +114,7 @@ func doPoll() tea.Cmd {
 }
 
 func defaultDeps() actionDeps {
-	return actionDeps{
-		supervisorSend: supervisor.Send,
-		supervisorSock: supervisor.SocketPath,
-		openURL:        openURLDefault,
-		releaseWorktree: func(wtPath string) error {
-			return exec.Command(gtlBinaryPath(), "release", "--force", wtPath).Run()
-		},
-		syncEnv: func(wtPath string) error {
-			uc := config.LoadUserConfig("")
-			return setup.RegenerateEnvFile(wtPath, uc)
-		},
-		createWorktree: func(existingWorktreePath, branch string) error {
-			mainRepo := worktree.DetectMainRepo(existingWorktreePath)
-			if mainRepo == "" {
-				return fmt.Errorf("cannot detect main repo from %s", existingWorktreePath)
-			}
-			uc := config.LoadUserConfig("")
-			pc := config.LoadProjectConfig(mainRepo)
-			projectName := pc.Project()
-
-			wtPath := uc.ResolveWorktreePath(mainRepo, projectName, branch)
-			if wtPath == "" {
-				wtPath = mainRepo + "-" + branch
-			}
-
-			if worktree.BranchExists(branch) {
-				_ = worktree.Fetch("origin", branch)
-				if err := worktree.Create(wtPath, branch, false, ""); err != nil {
-					return err
-				}
-			} else {
-				base := worktree.DetectDefaultBranch(mainRepo)
-				if err := worktree.Create(wtPath, branch, true, base); err != nil {
-					return err
-				}
-			}
-
-			s := setup.New(wtPath, mainRepo, uc)
-			_, err := s.Run()
-			return err
-		},
-	}
+	return actionDeps{runCommand: runCLI, openURL: openURLDefault}
 }
 
 // gtlBinaryPath resolves the path used to re-invoke the CLI for actions like
@@ -174,7 +155,46 @@ func NewModel() Model {
 		spinner.WithSpinner(spinner.MiniDot),
 		spinner.WithStyle(lipgloss.NewStyle().Foreground(highlight)),
 	)
-	return Model{spinner: s, polling: true, deps: defaultDeps()}
+	return Model{spinner: s, polling: true, deps: defaultDeps(), health: make(map[string]healthReport), lifecycle: newCommandLifecycle()}
+}
+
+// Close cancels pending dashboard commands and waits for running commands to finish.
+// The initial model owns the lifecycle shared by all Bubble Tea model copies.
+func (m Model) Close() {
+	if m.lifecycle != nil {
+		m.lifecycle.close()
+	}
+}
+
+type commandLifecycle struct {
+	mutex   sync.Mutex
+	closed  bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	running sync.WaitGroup
+}
+
+func newCommandLifecycle() *commandLifecycle {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &commandLifecycle{ctx: ctx, cancel: cancel}
+}
+
+func (l *commandLifecycle) start() bool {
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+	if l.closed {
+		return false
+	}
+	l.running.Add(1)
+	return true
+}
+
+func (l *commandLifecycle) close() {
+	l.mutex.Lock()
+	l.closed = true
+	l.cancel()
+	l.mutex.Unlock()
+	l.running.Wait()
 }
 
 func (m Model) Init() tea.Cmd {
