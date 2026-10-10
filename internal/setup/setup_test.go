@@ -1631,43 +1631,115 @@ database:
 	}
 }
 
-func TestSyncTemplateDatabase_RunsMigrateInMainRepo(t *testing.T) {
-	dir := t.TempDir()
-	mainRepo := filepath.Join(dir, "main")
-	worktreeDir := filepath.Join(dir, "worktree")
-	_ = os.MkdirAll(mainRepo, 0o755)
-	_ = os.MkdirAll(worktreeDir, 0o755)
-
-	gitInitRepo(t, mainRepo)
-
-	bareRepo := filepath.Join(dir, "bare.git")
-	if out, err := exec.Command("git", "clone", "--bare", mainRepo, bareRepo).CombinedOutput(); err != nil {
-		t.Fatalf("git clone --bare: %s", out)
-	}
-	if out, err := exec.Command("git", "-C", mainRepo, "remote", "add", "origin", bareRepo).CombinedOutput(); err != nil {
-		t.Fatalf("git remote add: %s", out)
-	}
-
-	yml := "project: test\nmerge_target: main\ncommands:\n  migrate: touch migrate_ran\n"
-	_ = os.WriteFile(filepath.Join(mainRepo, ".treeline.yml"), []byte(yml), 0o644)
-
-	pc := config.LoadProjectConfig(mainRepo)
+func TestSyncTemplateDatabase_RunsMigrateInIsolatedCheckout(t *testing.T) {
+	isolateEnvOwnership(t)
+	mainRepo := templateRepo(t)
+	cwdFile := filepath.Join(t.TempDir(), "migration-cwd")
+	t.Setenv("TEMPLATE_TEST_CWD", cwdFile)
 	s := &Setup{
-		WorktreePath:  worktreeDir,
 		MainRepo:      mainRepo,
-		ProjectConfig: pc,
+		ProjectConfig: templateConfig(mainRepo, `pwd > "$TEMPLATE_TEST_CWD"`),
 		Log:           &bytes.Buffer{},
 	}
-
 	if err := s.syncTemplateDatabase(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(mainRepo, "migrate_ran")); err != nil {
-		t.Error("expected migrate command to have run in main repo")
+	scratch := strings.TrimSpace(templateRead(t, cwdFile))
+	if scratch == mainRepo {
+		t.Fatal("migration ran in primary checkout")
+	}
+	if _, err := os.Stat(scratch); !os.IsNotExist(err) {
+		t.Errorf("scratch checkout was not removed: %v", err)
+	}
+}
+
+func TestRun_SyncOnCreate_MissingBinding(t *testing.T) {
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		t.Skip("sqlite3 not available")
+	}
+	for _, strict := range []bool{false, true} {
+		t.Run(fmt.Sprintf("strict=%v", strict), func(t *testing.T) {
+			s, mainRepo, worktree := testSetup(t, `project: test
+database:
+  adapter: sqlite
+  template: template.sqlite3
+  pattern: "{worktree}.sqlite3"
+  sync_on_create: true
+commands:
+  migrate: touch migration-ran
+env:
+  PORT: "{port}"
+`)
+			s.Options.StrictDB = strict
+			createSetupSQLiteFixture(t, filepath.Join(mainRepo, "template.sqlite3"), 42)
+			alloc, err := s.Run()
+			if strict {
+				var configErr *TemplateConfigError
+				if !errors.As(err, &configErr) {
+					t.Fatalf("expected configuration rejection, got %v", err)
+				}
+				if s.Registry.Find(worktree) != nil {
+					t.Fatal("strict rejection retained allocation")
+				}
+				if _, err := os.Stat(filepath.Join(worktree, "worktree.sqlite3")); !os.IsNotExist(err) {
+					t.Fatalf("strict rejection cloned database: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Run() failed: %v", err)
+			}
+			if alloc == nil || s.Registry.Find(worktree) == nil {
+				t.Fatal("successful setup did not retain allocation")
+			}
+			if got := setupSQLiteValue(t, filepath.Join(worktree, alloc.PrimaryDatabase())); got != "42" {
+				t.Fatalf("clone contents = %q, want existing template contents", got)
+			}
+			if s.DBDegradation != nil {
+				t.Fatalf("healthy clone reported degradation: %+v", s.DBDegradation)
+			}
+			log := plainOutput(s)
+			if !strings.Contains(log, "Template database was NOT refreshed") || !strings.Contains(log, `POSTGRES_DATABASE: "{database}"`) {
+				t.Fatalf("missing skipped refresh warning or remediation: %s", log)
+			}
+		})
+	}
+}
+
+func TestRun_SyncOnCreate_MigrateFailureRemainsFatal(t *testing.T) {
+	s, mainRepo, worktree := testSetup(t, `project: test
+merge_target: main
+database:
+  adapter: sqlite
+  template: template.sqlite3
+  pattern: "{worktree}.sqlite3"
+  sync_on_create: true
+commands:
+  migrate: 'echo migration-executed; exit 23'
+env:
+  DATABASE_PATH: "{database}"
+`)
+	gitInitRepo(t, mainRepo)
+	remote := filepath.Join(t.TempDir(), "origin.git")
+	templateUpdateGit(t, mainRepo, "clone", "--bare", mainRepo, remote)
+	templateUpdateGit(t, mainRepo, "remote", "add", "origin", remote)
+	_, err := s.Run()
+	if err == nil || !strings.Contains(err.Error(), "template migration failed") || !strings.Contains(err.Error(), "exit status 23") {
+		t.Fatalf("expected real migration failure, got %v", err)
+	}
+	if !strings.Contains(plainOutput(s), "migration-executed") {
+		t.Fatal("migration did not execute")
+	}
+	if s.Registry.Find(worktree) != nil {
+		t.Fatal("migration failure retained allocation")
 	}
 }
 
 func TestRun_SyncOnCreate_SQLite(t *testing.T) {
+	isolateEnvOwnership(t)
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		t.Skip("sqlite3 not available")
+	}
 	dir := t.TempDir()
 	mainRepo := filepath.Join(dir, "main")
 	worktreeDir := filepath.Join(dir, "worktree")
@@ -1694,9 +1766,10 @@ database:
   pattern: "db/{worktree}.sqlite3"
   sync_on_create: true
 commands:
-  migrate: touch migrate_ran
+  migrate: sqlite3 "$DATABASE_PATH" "UPDATE widgets SET value = 99"
 env:
   PORT: "{port}"
+  DATABASE_PATH: "{database}"
 `
 	_ = os.WriteFile(filepath.Join(mainRepo, ".treeline.yml"), []byte(yml), 0o644)
 	_ = os.WriteFile(filepath.Join(mainRepo, ".env"), []byte(""), 0o644)
@@ -1730,13 +1803,13 @@ env:
 		t.Fatal("expected database name to be set")
 	}
 
-	if _, err := os.Stat(filepath.Join(mainRepo, "migrate_ran")); err != nil {
-		t.Error("expected migrate command to have run")
+	if got := setupSQLiteValue(t, filepath.Join(mainRepo, "db/development.sqlite3")); got != "99" {
+		t.Errorf("template was not migrated before cloning: %q", got)
 	}
 
 	clonedPath := filepath.Join(worktreeDir, alloc.PrimaryDatabase())
-	if got := setupSQLiteValue(t, clonedPath); got != "42" {
-		t.Errorf("expected cloned content, got %q", got)
+	if got := setupSQLiteValue(t, clonedPath); got != "99" {
+		t.Errorf("expected migrated template content in clone, got %q", got)
 	}
 }
 

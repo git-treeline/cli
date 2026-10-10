@@ -328,6 +328,63 @@ gtl db drop                          # just drop the database
 
 `db restore` auto-detects the dump format (pg_dump custom format vs plain SQL) and uses `pg_restore` or `psql` accordingly.
 
+#### Update the root template database
+
+`gtl db template update` fetches `merge_target` from `origin` and runs
+`commands.migrate` in a temporary detached checkout. Without `merge_target`, it
+uses `origin/HEAD`, falling back to `main`. The primary checkout can be on another
+branch or have uncommitted changes; existing checkout branches are left alone.
+This operation requires Git 2.29 or newer and checks the version before fetching.
+
+The command reads `.treeline.yml` from the invoking checkout and requires an
+`env` mapping that connects the migration command to `database.template`:
+
+```yaml
+database:
+  template: myapp_development
+env:
+  POSTGRES_DATABASE: "{database}"
+commands:
+  migrate: bin/rails db:migrate
+```
+
+Use the variable your application actually reads for its primary database.
+`{database}`, `{database.name}`, and `{database_1}` resolve to the root template
+for this operation; relative SQLite template paths resolve against the primary
+checkout. The mapping is applied to both the temporary env file and the migration
+process. A `DATABASE_URL` found in the configured env file, `.env`, `.env.local`,
+or the selected environment's dotenv files must also use a primary database
+token in `env.DATABASE_URL`. The selected environment comes from literal
+`RAILS_ENV`, `RACK_ENV`, or `NODE_ENV` settings, with development as the default.
+Conflicting unbound URLs stop the update before migrations run. Custom loaders
+must also honor the explicit process environment.
+
+Configured `copy_files` and the primary checkout's env seed supply local
+configuration. The application loads the seed through its usual dotenv loader;
+the seed's quoting and interpolation are preserved. Ordinary inherited variables
+(such as `PGUSER`) remain available; explicit env mappings override them.
+Worktree database selectors and Bundler checkout overrides are removed from the
+inherited environment. Auxiliary URLs such as `SHADOW_DATABASE_URL` need an
+explicit migration-safe env mapping; a shadow database must be separate from
+the root template. No ports or databases are allocated, and ordinary setup
+commands and hooks do not run. If dependencies
+need preparation in a fresh checkout, include that in `commands.migrate` (for
+example, `bundle install --quiet && bin/rails db:migrate`). The migration command
+must honor the configured database environment; arbitrary commands can still
+have their own side effects.
+
+`database.sync_on_create` uses the same update process before cloning. If a
+primary database env mapping is missing, automatic sync warns that the template
+was **not refreshed** and continues using the existing template. Strict database
+mode and explicit `db template update` reject that missing configuration. Unsafe
+targets, Git failures, migration failures, and cleanup failures still stop setup.
+Existing worktree databases keep their current state; run `gtl db reset` in a worktree to
+re-clone from the updated template. Temporary checkouts are removed after success
+or failure; a cleanup failure reports the retained path. Concurrent template
+updates for the same repository are rejected.
+Cancellation gives the migration process group one second to exit after SIGTERM,
+then kills remaining members before removing the temporary checkout.
+
 #### Pull a remote database into the worktree
 
 `gtl db pull` fetches a production/staging database into the **current worktree's** database — handy for developing migrations against realistic data. The template (db root) is never touched.
