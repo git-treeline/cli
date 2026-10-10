@@ -457,37 +457,88 @@ func TestCreationLifecycleExistingRegistryCompatibility(t *testing.T) {
 	}
 }
 
-func TestCreationLifecycleHostClaimKeepsLegacyEnrollmentStrict(t *testing.T) {
+func TestCreationLifecycleFreshEnrollmentUpgradesLegacyWithoutAdoptingRuntime(t *testing.T) {
 	for _, version := range []int{2, 3} {
-		t.Run(fmt.Sprintf("schema-%d", version), func(t *testing.T) {
-			main, destination := creationFixture(t)
-			t.Setenv("TREELINE_MANAGED", "")
-			t.Setenv("TREELINE_CHANNEL", "")
-			reg := registry.New("")
-			writeIntrospectionFile(t, reg.Path, fmt.Sprintf(`{"version":%d,"allocations":[]}`, version))
-			runGit(t, main, "worktree", "add", "-b", "feature", destination)
-			locks, err := registry.AcquireLifecycleLocks(context.Background(), []string{main, destination})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer func() {
-				if err := locks.Close(); err != nil {
-					t.Error(err)
+		for _, command := range []string{"host-claim", "allocate-only"} {
+			t.Run(fmt.Sprintf("schema-%d/%s", version, command), func(t *testing.T) {
+				var main, destination string
+				if command == "allocate-only" {
+					main, destination = allocationOnlyFixture(t)
+				} else {
+					main, destination = creationFixture(t)
 				}
-			}()
-			request := hostClaimRequest{Source: registry.TargetIdentity{Path: main}, Target: hostClaimTarget{Path: destination}}
-			outcome, err := hostClaimSetup(claimCmd, request, config.LoadUserConfig(""), locks)
-			if err == nil || !strings.Contains(err.Error(), "fresh runtime enrollment requires schema 4") || outcome != "rolled_back" {
-				t.Fatalf("host claim adopted legacy registry: outcome=%s err=%v", outcome, err)
-			}
-			if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("refused host claim retained worktree: %v", err)
-			}
-			snapshot, err := reg.SnapshotStrict()
-			if err != nil || snapshot.Version != 3 || len(snapshot.Allocations) != 0 {
-				t.Fatalf("host claim enrolled legacy state: %+v: %v", snapshot, err)
-			}
-		})
+				t.Setenv("TREELINE_MANAGED", "")
+				t.Setenv("TREELINE_CHANNEL", "")
+				reg := registry.New("")
+				existing := registry.Allocation{"worktree": main, "project": "lifecycle_fixture", "port": 42100, "database": "retained_database", "redis_db": 7}
+				if version == 3 {
+					existing["allocation_generation"] = uuid.NewString()
+				}
+				raw, err := json.Marshal(registry.RegistryData{Version: version, Allocations: []registry.Allocation{existing}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeIntrospectionFile(t, reg.Path, string(raw))
+				before, err := reg.FindForRelease(main)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if command == "allocate-only" {
+					if err := newCmd.RunE(newCmd, []string{"feature"}); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := os.Stat(filepath.Join(destination, "setup-command-ran")); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("allocation-only ran setup: %v", err)
+					}
+				} else {
+					runGit(t, main, "worktree", "add", "-b", "feature", destination)
+					locks, err := registry.AcquireLifecycleLocks(context.Background(), []string{main, destination})
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer func() {
+						if err := locks.Close(); err != nil {
+							t.Error(err)
+						}
+					}()
+					request := hostClaimRequest{Source: registry.TargetIdentity{Path: main}, Target: hostClaimTarget{Path: destination}}
+					outcome, err := hostClaimSetup(claimCmd, request, config.LoadUserConfig(""), locks)
+					if err != nil || outcome != "retained" {
+						t.Fatalf("host claim failed: outcome=%s err=%v", outcome, err)
+					}
+					if _, err := os.Stat(filepath.Join(destination, "setup-command-ran")); err != nil {
+						t.Fatalf("host claim did not complete setup: %v", err)
+					}
+				}
+				snapshot, err := reg.SnapshotStrict()
+				if err != nil || snapshot.Version != 4 || len(snapshot.Allocations) != 2 {
+					t.Fatalf("host claim did not enroll fresh target: %+v: %v", snapshot, err)
+				}
+				fresh, err := reg.FindForRelease(destination)
+				if err != nil || fresh == nil || slices.Contains(registry.ExtractPorts(fresh), 42100) {
+					t.Fatalf("fresh allocation missing or reused legacy port: %+v: %v", fresh, err)
+				}
+				binding, err := registry.AllocationRuntimeBinding(fresh)
+				if err != nil || binding.Kind != "never_started" {
+					t.Fatalf("fresh runtime ownership missing: %+v: %v", binding, err)
+				}
+				retained, err := reg.FindForRelease(main)
+				if err != nil {
+					t.Fatal(err)
+				}
+				binding, err = registry.AllocationRuntimeBinding(retained)
+				if err != nil || binding.Kind != "unknown" || registry.GetString(retained, "allocation_generation") == "" {
+					t.Fatalf("legacy runtime ownership adopted: %+v: %v", retained, err)
+				}
+				delete(retained, "runtime_binding")
+				if version == 2 {
+					delete(retained, "allocation_generation")
+				}
+				if !reflect.DeepEqual(before, retained) {
+					t.Fatalf("legacy allocation changed: before=%v after=%v", before, retained)
+				}
+			})
+		}
 	}
 }
 

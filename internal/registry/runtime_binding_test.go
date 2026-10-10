@@ -231,9 +231,106 @@ func TestFreshAllocationTxUsesCurrentResourcesAndRefusesAdoption(t *testing.T) {
 	}
 }
 
+func legacyFreshEnrollmentFixture(t *testing.T, version int) (*Registry, RegistryData) {
+	t.Helper()
+	reg, request := enrolledRequest(t)
+	if err := reg.Allocate(Allocation{"worktree": filepath.Join(t.TempDir(), "sibling"), "ports": []int{4100, 4101}, "redis_db": 2, "databases": []string{"sibling_primary", "sibling_test"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := reg.PrepareRelease(request); err != nil {
+		t.Fatal(err)
+	}
+	data, err := reg.readReleaseStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data.Version = version
+	data.Edges = []Edge{{A: RepoRef{Repo: "fixture/a", Branch: "main"}, B: RepoRef{Repo: "fixture/b", Branch: "feature"}, CreatedAt: "2026-10-10T00:00:00Z"}}
+	for _, allocation := range data.Allocations {
+		delete(allocation, "runtime_binding")
+		if version < 3 {
+			delete(allocation, "allocation_generation")
+		}
+	}
+	if version < 3 {
+		data.ReleaseOperations = nil
+	} else {
+		data.ReleaseOperations[0].RuntimeBinding = nil
+	}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(reg.Path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return reg, data
+}
+
+func TestFreshAllocationTxUpgradesLegacyWithoutAdoptingRuntime(t *testing.T) {
+	for _, version := range []int{1, 2, 3} {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
+			reg, before := legacyFreshEnrollmentFixture(t, version)
+			raw, _ := os.ReadFile(reg.Path)
+			if _, err := reg.SnapshotStrict(); err != nil {
+				t.Fatal(err)
+			}
+			readRaw, _ := os.ReadFile(reg.Path)
+			if !bytes.Equal(raw, readRaw) {
+				t.Fatal("read migrated legacy registry")
+			}
+			root, dir := lifecycleFixture(t)
+			target, err := CaptureReleaseTarget(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			locks := acquireForTest(t, dir, root)
+			entry, err := reg.EnrollFreshAllocationTx(locks, target, func(used UsedResources) (Allocation, error) {
+				if !slices.Equal(used.Ports, []int{3010, 4100, 4101}) || !slices.Equal(used.RedisDbs, []int{2}) {
+					t.Fatalf("legacy resources lost: %+v", used)
+				}
+				return Allocation{"port": 4102, "redis_db": 3}, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			after, err := reg.readReleaseStore()
+			if err != nil || after.Version != 4 || len(after.Allocations) != 3 {
+				t.Fatalf("upgrade failed: %+v: %v", after, err)
+			}
+			if !sameJSON(before.Edges, after.Edges) || !sameJSON(before.ReleaseOperations, after.ReleaseOperations) {
+				t.Fatal("upgrade changed edges or release history")
+			}
+			for i, old := range before.Allocations {
+				retained := after.Allocations[i]
+				binding, err := AllocationRuntimeBinding(retained)
+				if err != nil || binding.Kind != "unknown" || !canonicalUUID(GetString(retained, "allocation_generation")) {
+					t.Fatalf("legacy ownership adopted or generation absent: %+v: %v", retained, err)
+				}
+				delete(retained, "runtime_binding")
+				if version < 3 {
+					delete(retained, "allocation_generation")
+				}
+				if !sameJSON(old, retained) {
+					t.Fatalf("legacy allocation changed: before=%v after=%v", old, retained)
+				}
+			}
+			binding, err := AllocationRuntimeBinding(entry)
+			if err != nil || binding.Kind != "never_started" || !canonicalUUID(GetString(entry, "allocation_generation")) {
+				t.Fatalf("fresh allocation not enrolled: %+v: %v", entry, err)
+			}
+			if version == 3 {
+				if _, _, err := reg.PrepareRelease(before.ReleaseOperations[0].ReleaseRequest); err == nil {
+					t.Fatal("upgrade made historical release executable")
+				}
+			}
+		})
+	}
+}
+
 func TestFreshAllocationTxFailureNeverEnrollsOrMigrates(t *testing.T) {
-	for _, legacy := range []bool{false, true} {
-		t.Run(fmt.Sprint(legacy), func(t *testing.T) {
+	for _, version := range []int{1, 2, 3, 4} {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
 			root, dir := lifecycleFixture(t)
 			target, err := CaptureReleaseTarget(root)
 			if err != nil {
@@ -241,25 +338,66 @@ func TestFreshAllocationTxFailureNeverEnrollsOrMigrates(t *testing.T) {
 			}
 			locks := acquireForTest(t, dir, root)
 			reg := New(filepath.Join(t.TempDir(), "registry.json"))
-			if legacy {
-				if err := os.WriteFile(reg.Path, []byte(`{"version":3,"allocations":[]}`), 0600); err != nil {
-					t.Fatal(err)
-				}
+			if version < 4 {
+				reg, _ = legacyFreshEnrollmentFixture(t, version)
 			}
 			before, _ := os.ReadFile(reg.Path)
 			calls := 0
 			if _, err := reg.EnrollFreshAllocationTx(locks, target, func(UsedResources) (Allocation, error) {
 				calls++
 				return nil, fmt.Errorf("injected computation failure")
-			}); err == nil {
-				t.Fatal("failure accepted")
-			}
-			if legacy && calls != 0 {
-				t.Fatal("legacy store computed a fresh allocation")
+			}); err == nil || !strings.Contains(err.Error(), "injected computation failure") || calls != 1 {
+				t.Fatalf("callback failure not retained: calls=%d err=%v", calls, err)
 			}
 			after, _ := os.ReadFile(reg.Path)
-			if string(before) != string(after) {
+			if !bytes.Equal(before, after) {
 				t.Fatal("failed computation changed store")
+			}
+		})
+	}
+}
+
+func TestFreshAllocationTxMalformedLegacyNeverComputesOrWrites(t *testing.T) {
+	for _, variant := range []string{"schema2 runtime binding", "schema2 release history", "schema3 generation", "duplicate target"} {
+		t.Run(variant, func(t *testing.T) {
+			reg, data := legacyFreshEnrollmentFixture(t, 3)
+			switch variant {
+			case "schema2 runtime binding":
+				data.Version, data.ReleaseOperations = 2, nil
+				for _, allocation := range data.Allocations {
+					delete(allocation, "allocation_generation")
+				}
+				data.Allocations[0]["runtime_binding"] = RuntimeBinding{Kind: "never_started"}
+			case "schema2 release history":
+				data.Version = 2
+				for _, allocation := range data.Allocations {
+					delete(allocation, "allocation_generation")
+				}
+			case "schema3 generation":
+				data.Allocations[0]["allocation_generation"] = "invalid"
+			case "duplicate target":
+				data.Allocations[1]["worktree"] = data.Allocations[0]["worktree"]
+			}
+			before, _ := json.Marshal(data)
+			if err := os.WriteFile(reg.Path, before, 0600); err != nil {
+				t.Fatal(err)
+			}
+			root, dir := lifecycleFixture(t)
+			target, err := CaptureReleaseTarget(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			locks := acquireForTest(t, dir, root)
+			calls := 0
+			if _, err := reg.EnrollFreshAllocationTx(locks, target, func(UsedResources) (Allocation, error) {
+				calls++
+				return Allocation{"port": 4200}, nil
+			}); err == nil || calls != 0 {
+				t.Fatalf("malformed store admitted: calls=%d err=%v", calls, err)
+			}
+			after, _ := os.ReadFile(reg.Path)
+			if !bytes.Equal(before, after) {
+				t.Fatal("malformed store rewritten")
 			}
 		})
 	}

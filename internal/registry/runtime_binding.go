@@ -79,9 +79,6 @@ func (r *Registry) EnrollFreshAllocationTx(locks *LifecycleLocks, target TargetI
 	var result Allocation
 	err := withRuntimeTargetLock(locks, target, func() error {
 		return r.registryTransaction(func(data *RegistryData) error {
-			if data.Version != 4 {
-				return fmt.Errorf("fresh runtime enrollment requires schema 4; no automatic legacy migration")
-			}
 			if err := verifyTarget(target, false); err != nil {
 				return err
 			}
@@ -124,6 +121,10 @@ func (r *Registry) EnrollFreshAllocationTx(locks *LifecycleLocks, target TargetI
 			allocation["worktree"] = target.Path
 			allocation["allocation_generation"] = uuid.NewString()
 			allocation["runtime_binding"] = RuntimeBinding{Kind: "never_started"}
+			// Fresh creation does not adopt existing runtimes. Preserve legacy
+			// allocations with unknown ownership in the same atomic transaction.
+			data.Version = 4
+			upgradeEnrollments(data)
 			data.Allocations = append(data.Allocations, allocation)
 			result = allocation
 			return nil
