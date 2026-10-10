@@ -1,3 +1,8 @@
+## [Unreleased]
+
+- **Template database updates no longer pull into the primary checkout.** Both `gtl db template update` and `database.sync_on_create` use a temporary detached checkout of the remote merge target and bind migration env variables to the root template. Existing branches and worktree databases stay unchanged. Git 2.29+ is required. Migration dependencies must be available or prepared by `commands.migrate`; normal setup commands and hooks do not run.
+- **Template migration targeting is explicit.** An env mapping using a primary database token is required for manual updates and strict setup. Automatic sync warns and skips the refresh when that mapping is missing, preserving creation from the existing template. Unbound database URLs in common dotenv files and implicit auxiliary URL targets are rejected. Ordinary inherited settings are preserved, configuration failures show actionable hints, and cancellation gives the entire migration process group a bounded graceful shutdown.
+
 ## [0.58.2]
 
 - **Database pulls and refreshes protect the template.** `gtl db pull` and `gtl db refresh` refuse the main worktree, including older allocations without a main-worktree flag, and any target matching the configured template. `--force` cannot bypass this guard; use `gtl db template update` to refresh the clone source.
