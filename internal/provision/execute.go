@@ -223,7 +223,9 @@ func runServices(a Action, d Deps) error {
 
 func validatePackageOperands(packages []string) error {
 	for _, pkg := range packages {
-		if !aptPackageOperand.MatchString(pkg) {
+		// APT interprets a trailing '-' as removal, even after '--' and
+		// on architecture/version/release-qualified operands.
+		if !aptPackageOperand.MatchString(pkg) || strings.HasSuffix(pkg, "-") {
 			return fmt.Errorf("invalid apt package operand %q", pkg)
 		}
 	}

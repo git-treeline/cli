@@ -126,17 +126,28 @@ func TestRun_RejectsUnsafePackageOperandsBeforeEffects(t *testing.T) {
 		"./payload.deb",
 		"/tmp/payload.deb",
 		"pkg name",
+		"openssh-server-",
+		"openssh-server:amd64-",
+		"openssh-server=1.0-1-",
+		"openssh-server/bookworm-backports-",
 	} {
-		t.Run(operand, func(t *testing.T) {
-			f := newFakeSys()
-			err := Run([]Action{{Kind: ActionApt, Packages: []string{operand}}}, "/repo", f.deps("linux"))
-			if err == nil || !strings.Contains(err.Error(), "invalid apt package operand") {
-				t.Fatalf("expected invalid operand error, got %v", err)
-			}
-			if len(f.calls) != 0 {
-				t.Fatalf("unsafe operand reached system effects: %v", f.calls)
-			}
-		})
+		for _, kind := range []ActionKind{ActionApt, ActionService} {
+			t.Run(string(kind)+"/"+operand, func(t *testing.T) {
+				f := newFakeSys()
+				d := f.deps("linux")
+				d.PackageInstalled = func(pkg string) (bool, error) {
+					t.Fatalf("unsafe operand reached package probe: %q", pkg)
+					return false, nil
+				}
+				err := Run([]Action{{Kind: kind, Packages: []string{operand}}}, "/repo", d)
+				if err == nil || !strings.Contains(err.Error(), "invalid apt package operand") {
+					t.Fatalf("expected invalid operand error, got %v", err)
+				}
+				if len(f.calls) != 0 {
+					t.Fatalf("unsafe operand reached system effects: %v", f.calls)
+				}
+			})
+		}
 	}
 }
 
@@ -145,7 +156,9 @@ func TestRun_AptAcceptsDebianPackageSelectors(t *testing.T) {
 		"libstdc++6",
 		"postgresql-16:amd64",
 		"postgresql-client=16.4-1.pgdg120+1",
+		"postgresql-client:amd64=16.4-1.pgdg120+1",
 		"postgresql-client/bookworm-backports",
+		"postgresql-client:amd64/bookworm-backports",
 	} {
 		t.Run(operand, func(t *testing.T) {
 			f := newFakeSys()

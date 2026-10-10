@@ -189,7 +189,7 @@ func aptUpdate() error {
 }
 
 func aptInstall(pkgs []string) error {
-	args := append([]string{"apt-get", "install", "-y", "--"}, pkgs...)
+	args := append([]string{"apt-get", "install", "-y", "--no-remove", "--"}, pkgs...)
 	return sudoCommand(args...)
 }
 

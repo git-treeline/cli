@@ -703,7 +703,7 @@ See [Framework examples](#framework-examples) for complete examples. Available f
 | `hooks.<name>.auto` | `true` to run this hook on every fresh `gtl start` (default: `false`, requires `--with`) |
 | `hooks.<name>.pre_start` | Shell command(s) run before the supervisor launches — string or array of strings |
 | `hooks.<name>.post_stop` | Shell command(s) run in reverse order when the supervisor exits (Ctrl+C) — string or array |
-| `provision.apt` | Archive package names a host needs before setup (Linux; installed with `sudo apt-get`). Apt options and local package paths are rejected. Skipped on macOS |
+| `provision.apt` | Archive package names a host needs before setup (Linux; installed with `sudo apt-get`). Apt options, local package paths, and operands ending in `-` are rejected. Installs abort if they would remove an installed package. Skipped on macOS |
 | `provision.services` | Service packages to apt-install and `systemctl enable --now` (Linux). Skipped on macOS |
 | `provision.database.source` | A `database.sources.<env>` name to hydrate the template database from (preferred — real data) |
 | `provision.database.hydrate` | Fallback shell command, run in the repo dir, to fill the template when no `source` is set (e.g. `bin/rails db:schema:load db:seed`) |
