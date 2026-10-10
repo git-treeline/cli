@@ -1,7 +1,15 @@
 ## [Unreleased]
 
+## [0.58.3]
+
 - **Template database updates no longer pull into the primary checkout.** Both `gtl db template update` and `database.sync_on_create` use a temporary detached checkout of the remote merge target and bind migration env variables to the root template. Existing branches and worktree databases stay unchanged. Git 2.29+ is required. Migration dependencies must be available or prepared by `commands.migrate`; normal setup commands and hooks do not run.
 - **Template migration targeting is explicit.** An env mapping using a primary database token is required for manual updates and strict setup. Automatic sync warns and skips the refresh when that mapping is missing, preserving creation from the existing template. Unbound database URLs in common dotenv files and implicit auxiliary URL targets are rejected. Ordinary inherited settings are preserved, configuration failures show actionable hints, and cancellation gives the entire migration process group a bounded graceful shutdown.
+
+- **Privileged router installation uses captured, validated content.** CA trust, hosts updates, and firewall/daemon installation stage files in private root-owned directories after authorization. Linux forwarding selects system executables, failed firewall loads stop installation, and macOS daemon directories remain readable for health checks.
+- **Managed project paths stay within their roots.** Env files, seed files, and configured copies reject absolute paths, parent traversal, and escaping symlinks. Rooted file operations protect setup, refresh, and CLI/MCP env reads; database source names and dump directories receive additional validation.
+- **Destructive actions and credentials are handled more safely.** Port cleanup requires an explicit yes. Database overwrite/drop prompts identify connection targets, and status/error output redacts Redis and PostgreSQL URL credentials. Provisioning rejects removal-style package operands and aborts installs that would remove an existing package.
+- **Local HTTPS authority and development exposure are restricted.** Router domains must be localhost or a valid narrow DNS suffix. Existing CA roots must match the expected constraints and private key and contain no subject alternative names; failed old-CA removal stops rotation. Generated Vite and Django commands bind to loopback, and backend status pages no longer load third-party JavaScript.
+- **Status checks avoid repeated work.** Relationship probes are bounded and registry reads reuse a snapshot. The CLI uses Go 1.26.9 security fixes. GitHub CI and E2E tests run on Linux; macOS testing stays local, with release signing and notarization retained.
 
 ## [0.58.2]
 
