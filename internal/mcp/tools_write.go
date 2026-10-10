@@ -29,6 +29,13 @@ func handleConfigSet(_ context.Context, req mcplib.CallToolRequest) (*mcplib.Cal
 	if err != nil {
 		return mcplib.NewToolResultError("value parameter is required"), nil
 	}
+	if key == "router.domain" {
+		domain, err := config.ValidateRouterDomain(rawValue)
+		if err != nil {
+			return mcplib.NewToolResultError(err.Error()), nil
+		}
+		rawValue = domain
+	}
 
 	// Parse value: numbers, booleans, then string (matches CLI behavior).
 	var value any

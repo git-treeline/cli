@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/envparse"
+	"github.com/git-treeline/cli/internal/setup"
 	"github.com/spf13/cobra"
 )
 
@@ -47,6 +49,9 @@ var envShowCmd = &cobra.Command{
 		}
 		absPath, _ := filepath.Abs(cwd)
 		pc := config.LoadProjectConfig(absPath)
+		if err := pc.Validate(); err != nil {
+			return cliErr(cmd, err)
+		}
 
 		if envTemplate {
 			tmpl := pc.EnvTemplate()
@@ -69,17 +74,19 @@ var envShowCmd = &cobra.Command{
 		}
 
 		envPath := filepath.Join(absPath, pc.EnvFileTarget())
-		if _, err := os.Stat(envPath); err != nil {
-			if os.IsNotExist(err) {
+		envFile, err := setup.OpenFileForRead(absPath, pc.EnvFileTarget(), "env_file.path")
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
 				return cliErr(cmd, &CliError{
 					Message: fmt.Sprintf("Env file does not exist: %s", envPath),
 					Hint:    "Run 'gtl setup' to generate it from .treeline.yml env: template.",
 				})
 			}
-			return err
+			return cliErr(cmd, err)
 		}
+		defer func() { _ = envFile.Close() }()
 
-		entries, err := envparse.ParseFile(envPath)
+		entries, err := envparse.Parse(envFile)
 		if err != nil {
 			return err
 		}

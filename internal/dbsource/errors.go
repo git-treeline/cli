@@ -42,20 +42,15 @@ func (e *UnknownViaError) Error() string {
 	return fmt.Sprintf("unknown source type %q for env %q", e.Via, e.Env)
 }
 
-// URLParseError wraps a failure to interpret a postgres:// URL.
+// URLParseError reports a failure to interpret a postgres:// URL without
+// retaining the raw parser error, which may include URL credentials.
 type URLParseError struct {
 	Reason string
-	Err    error
 }
 
 func (e *URLParseError) Error() string {
-	if e.Err != nil {
-		return fmt.Sprintf("%s: %v", e.Reason, e.Err)
-	}
 	return e.Reason
 }
-
-func (e *URLParseError) Unwrap() error { return e.Err }
 
 // SpecError means a source's config is incomplete (missing app/env field).
 type SpecError struct {

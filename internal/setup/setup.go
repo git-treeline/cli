@@ -329,28 +329,49 @@ func (s *Setup) printDryRun(alloc *allocator.Allocation, redisURL string) error 
 }
 
 func (s *Setup) copyFiles() error {
-	for _, file := range s.ProjectConfig.CopyFiles() {
-		src := filepath.Join(s.MainRepo, file)
-		dest := filepath.Join(s.WorktreePath, file)
-		info, err := os.Stat(src)
+	files := s.ProjectConfig.CopyFiles()
+	if len(files) == 0 {
+		return nil
+	}
+	sourceRoot, err := openRoot(s.MainRepo, "copy_files source")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = sourceRoot.Close() }()
+	destinationRoot, err := openRoot(s.WorktreePath, "copy_files destination")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = destinationRoot.Close() }()
+
+	for _, file := range files {
+		sourceName, err := containedRootName(sourceRoot, file, "copy_files source", true)
+		if err != nil {
+			return err
+		}
+		info, err := sourceRoot.Stat(sourceName)
 		if os.IsNotExist(err) {
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("statting %s: %w", file, err)
+			return fmt.Errorf("checking copy_files source %q within main repository: %w", file, err)
 		}
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("copy source %s is not a regular file", file)
 		}
-		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			return fmt.Errorf("creating destination directory for %s: %w", file, err)
-		}
-		data, err := os.ReadFile(src)
+		destinationName, err := containedRootName(destinationRoot, file, "copy_files destination", false)
 		if err != nil {
-			return fmt.Errorf("reading %s: %w", file, err)
+			return err
 		}
-		if err := platform.AtomicWriteFile(dest, data, info.Mode().Perm()); err != nil {
-			return fmt.Errorf("writing %s: %w", file, err)
+		if err := destinationRoot.MkdirAll(filepath.Dir(destinationName), 0o755); err != nil {
+			return fmt.Errorf("creating copy_files destination directory for %q within worktree: %w", file, err)
+		}
+		data, err := sourceRoot.ReadFile(sourceName)
+		if err != nil {
+			return fmt.Errorf("reading copy_files source %q within main repository: %w", file, err)
+		}
+		if err := atomicWriteRoot(destinationRoot, destinationName, data, info.Mode().Perm()); err != nil {
+			return fmt.Errorf("writing copy_files destination %q within worktree: %w", file, err)
 		}
 		s.log("Copied %s", file)
 	}
@@ -432,28 +453,55 @@ func RegenerateEnvFile(worktreePath string, uc *config.UserConfig) error {
 
 func (s *Setup) writeEnvFile(vars map[string]string) error {
 	target := s.ProjectConfig.EnvFileTarget()
-	envPath := filepath.Join(s.WorktreePath, target)
-	if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
-		return fmt.Errorf("creating env file directory: %w", err)
+	worktreeRoot, err := openRoot(s.WorktreePath, "env_file.path")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = worktreeRoot.Close() }()
+	targetName, err := containedRootName(worktreeRoot, target, "env_file.path", false)
+	if err != nil {
+		return err
+	}
+	if err := worktreeRoot.MkdirAll(filepath.Dir(targetName), 0o755); err != nil {
+		return fmt.Errorf("creating env_file.path directory for %q within worktree: %w", target, err)
 	}
 
 	// Seed from the main repo's env file only on first provisioning. On a
 	// re-run (setup/refresh) the worktree env already exists and may hold
 	// manual edits — copying the seed over it would destroy them before the
 	// managed-env pass below re-applies Treeline's vars. Update-in-place instead.
-	if _, err := os.Stat(envPath); err != nil {
-		source := filepath.Join(s.MainRepo, s.ProjectConfig.EnvFileSource())
-		if _, err := os.Stat(source); err != nil {
-			source = filepath.Join(s.MainRepo, ".env")
+	if _, err := worktreeRoot.Stat(targetName); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("checking env_file.path %q within worktree: %w", target, err)
 		}
-		if data, err := os.ReadFile(source); err == nil {
-			if err := platform.AtomicWriteFile(envPath, data, platform.PrivateFileMode); err != nil {
+		mainRoot, openErr := openRoot(s.MainRepo, "env_file.seed_from")
+		if openErr != nil {
+			return openErr
+		}
+		defer func() { _ = mainRoot.Close() }()
+		sourceName, nameErr := containedRootName(mainRoot, s.ProjectConfig.EnvFileSource(), "env_file.seed_from", true)
+		if nameErr != nil {
+			return nameErr
+		}
+		if _, err := mainRoot.Stat(sourceName); err != nil {
+			if !os.IsNotExist(err) {
+				return fmt.Errorf("checking env_file.seed_from %q within main repository: %w", s.ProjectConfig.EnvFileSource(), err)
+			}
+			sourceName, nameErr = containedRootName(mainRoot, ".env", "env_file fallback", true)
+			if nameErr != nil {
+				return nameErr
+			}
+		}
+		if data, err := mainRoot.ReadFile(sourceName); err == nil {
+			if err := atomicWriteRoot(worktreeRoot, targetName, data, platform.PrivateFileMode); err != nil {
 				return fmt.Errorf("seeding env file: %w", err)
 			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("reading env_file.seed_from %q within main repository: %w", s.ProjectConfig.EnvFileSource(), err)
 		}
 	}
 
-	if err := writeManagedEnv(envPath, vars); err != nil {
+	if err := writeManagedEnvRoot(worktreeRoot, targetName, filepath.Join(s.WorktreePath, targetName), vars); err != nil {
 		return err
 	}
 

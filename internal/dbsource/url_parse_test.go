@@ -2,6 +2,7 @@ package dbsource
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -86,6 +87,22 @@ func TestParsePostgresURL(t *testing.T) {
 				t.Errorf("SSLMode = %q, want %q", ci.SSLMode, tt.wantSSL)
 			}
 		})
+	}
+}
+
+func TestParsePostgresURL_MalformedURLDoesNotRetainCredentials(t *testing.T) {
+	const secret = "credential-do-not-print"
+	_, err := parsePostgresURL("postgres://user:"+secret+"%zz@db.example.com/club", "")
+	if err == nil {
+		t.Fatal("expected malformed URL error")
+	}
+	for current := err; current != nil; current = errors.Unwrap(current) {
+		if strings.Contains(current.Error(), secret) {
+			t.Fatalf("credential leaked through error chain: %v", current)
+		}
+	}
+	if errors.Unwrap(err) != nil {
+		t.Fatalf("parse error retained a credential-bearing cause: %v", errors.Unwrap(err))
 	}
 }
 

@@ -132,12 +132,17 @@ func New(path string) *Registry {
 	return &Registry{Path: path}
 }
 
-func (r *Registry) Allocations() []Allocation {
+// Snapshot reads allocations and edges together from one registry revision.
+func (r *Registry) Snapshot() RegistryData {
 	data, err := r.load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to load registry: %v\n", err)
 	}
-	return data.Allocations
+	return data
+}
+
+func (r *Registry) Allocations() []Allocation {
+	return r.Snapshot().Allocations
 }
 
 func (r *Registry) Find(worktreePath string) Allocation {
@@ -436,11 +441,7 @@ func (r *Registry) GetLinks(worktreePath string) map[string]string {
 
 // AllEdges returns every stored relationship edge.
 func (r *Registry) AllEdges() []Edge {
-	data, err := r.load()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to load registry: %v\n", err)
-	}
-	return data.Edges
+	return r.Snapshot().Edges
 }
 
 // EdgesFor returns every edge that has ref as one of its endpoints.

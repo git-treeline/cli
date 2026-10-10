@@ -118,7 +118,12 @@ func RepoRoot(path string) (string, error) {
 // DetectRepoRoot returns the top-level directory of the current git worktree.
 // Falls back to the given path if detection fails.
 func DetectRepoRoot(path string) string {
-	root := gitOutput(path, "rev-parse", "--show-toplevel")
+	return DetectRepoRootContext(context.Background(), path)
+}
+
+// DetectRepoRootContext is DetectRepoRoot bounded by ctx.
+func DetectRepoRootContext(ctx context.Context, path string) string {
+	root := gitOutputContext(ctx, path, "rev-parse", "--show-toplevel")
 	if root == "" {
 		return path
 	}

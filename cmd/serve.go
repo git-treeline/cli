@@ -233,6 +233,10 @@ var serveStatusCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		uc := config.LoadUserConfig("")
 		port := uc.RouterPort()
+		domain, err := uc.ValidatedRouterDomain()
+		if err != nil {
+			return err
+		}
 		pfStatus := service.CheckPortForward(port)
 		caInstalled := proxy.IsCAInstalled()
 
@@ -251,7 +255,6 @@ var serveStatusCmd = &cobra.Command{
 
 		fmt.Println(formatPortForwardStatus(pfStatus, port))
 
-		domain := uc.RouterDomain()
 		reg := registry.New("")
 		router := proxy.NewRouter(port, reg).
 			WithBaseDomain(domain).
@@ -389,10 +392,13 @@ var serveRunCmd = &cobra.Command{
 }
 
 func runRouter() error {
-	service.WriteRouterVersion(Version)
 	uc := config.LoadUserConfig("")
 	port := uc.RouterPort()
-	domain := uc.RouterDomain()
+	domain, err := uc.ValidatedRouterDomain()
+	if err != nil {
+		return err
+	}
+	service.WriteRouterVersion(Version)
 	reg := registry.New("")
 	router := proxy.NewRouter(port, reg).
 		WithBaseDomain(domain).
@@ -662,7 +668,10 @@ var serveHostsSyncCmd = &cobra.Command{
 	Short: "Add /etc/hosts entries for all active routes",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		uc := config.LoadUserConfig("")
-		domain := uc.RouterDomain()
+		domain, err := uc.ValidatedRouterDomain()
+		if err != nil {
+			return err
+		}
 		if runtime.GOOS != "darwin" && domain == "localhost" {
 			fmt.Println("Hosts sync is macOS-only (*.localhost resolves natively on Linux).")
 			return nil

@@ -10,22 +10,19 @@ import (
 	"time"
 )
 
-// TestResolveIptables_PrefersPath verifies that a PATH-resolvable iptables is
-// used instead of a hardcoded /sbin path.
-func TestResolveIptables_PrefersPath(t *testing.T) {
+func TestResolveIptables_IgnoresCallerPath(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "iptables")
 	if err := os.WriteFile(fake, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
-
-	got, err := resolveIptables()
-	if err != nil {
-		t.Fatalf("resolveIptables: %v", err)
+	got, _ := resolveIptables()
+	if got == fake {
+		t.Fatal("caller-owned executable selected for root execution")
 	}
-	if got != fake {
-		t.Errorf("expected PATH iptables %q, got %q", fake, got)
+	if got != "" && got != "/usr/sbin/iptables" && got != "/sbin/iptables" && got != "/usr/bin/iptables" {
+		t.Fatalf("non-system executable selected: %q", got)
 	}
 }
 

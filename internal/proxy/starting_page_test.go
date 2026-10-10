@@ -21,11 +21,14 @@ func TestRenderBackendStatusPage_Starting(t *testing.T) {
 		`http-equiv="refresh"`,
 		`content="2"`,
 		"git-treeline router",
-		"cdn.tailwindcss.com",
+		"<style>",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body missing %q", want)
 		}
+	}
+	if strings.Contains(body, "cdn.tailwindcss.com") || strings.Contains(body, "https://") {
+		t.Error("status page must not load third-party assets")
 	}
 }
 

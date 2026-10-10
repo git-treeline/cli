@@ -411,7 +411,7 @@ func TestUpdateTemplateDatabase_RejectsUnsafePreparationDestinations(t *testing.
 				t.Setenv("TEMPLATE_TEST_MARKER", marker)
 				pc := templateConfig(mainRepo, `touch "$TEMPLATE_TEST_MARKER"`)
 				path := "../runtime.env"
-				wantError := "temporary checkout"
+				wantError := "relative path within the project"
 				switch kind {
 				case "absolute_path":
 					path = outside

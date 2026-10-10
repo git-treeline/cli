@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/git-treeline/cli/internal/platform"
+	"github.com/git-treeline/cli/internal/routerdomain"
 )
 
 var UserDefaults = map[string]any{
@@ -42,6 +43,15 @@ type UserConfig struct {
 	Path    string
 	Data    map[string]any
 	loadErr error
+}
+
+// ValidateRouterDomain validates and canonicalizes a router.domain value.
+func ValidateRouterDomain(value string) (string, error) {
+	domain, err := routerdomain.Validate(value)
+	if err != nil {
+		return "", fmt.Errorf("invalid router.domain: %w", err)
+	}
+	return domain, nil
 }
 
 func LoadUserConfig(path string) *UserConfig {
@@ -158,6 +168,23 @@ func (uc *UserConfig) RouterDomain() string {
 		return "localhost"
 	}
 	return "prt.dev"
+}
+
+// ValidatedRouterDomain returns the canonical router domain after checking it
+// is safe to use for CA constraints, SNI routing, and hosts-file entries.
+// Callers performing those security-sensitive operations must use this method
+// so invalid values introduced by manually editing config.json fail closed.
+func (uc *UserConfig) ValidatedRouterDomain() (string, error) {
+	if router, ok := uc.Data["router"].(map[string]any); ok {
+		if value, exists := router["domain"]; exists {
+			domain, ok := value.(string)
+			if !ok {
+				return "", fmt.Errorf("invalid router.domain: router domain must be a string")
+			}
+			return ValidateRouterDomain(domain)
+		}
+	}
+	return ValidateRouterDomain(uc.RouterDomain())
 }
 
 // HasExplicitRouterDomain reports whether router.domain is set in config.json.

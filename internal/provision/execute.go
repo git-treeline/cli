@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/git-treeline/cli/internal/config"
@@ -21,6 +22,14 @@ var versionFiles = []string{
 	".nvmrc",
 	".python-version",
 }
+
+var (
+	// Apt accepts package names with optional architecture and version/release
+	// selectors. Deliberately exclude paths, globs, and leading options: the
+	// repository config is selecting archive packages, not arbitrary apt input.
+	aptPackageOperand  = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]*(?::[a-z0-9][a-z0-9-]*)?(?:=[A-Za-z0-9.+:~_-]+|/[A-Za-z0-9.+:~_-]+)?$`)
+	systemdUnitOperand = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9:_.@-]*$`)
+)
 
 // Deps are the injectable effect/probe seams the executor runs actions through.
 // The command layer wires these to real implementations; tests supply fakes.
@@ -159,6 +168,9 @@ func runAction(a Action, repoDir string, d Deps) error {
 }
 
 func runApt(a Action, d Deps) error {
+	if err := validatePackageOperands(a.Packages); err != nil {
+		return err
+	}
 	d.Log("apt: %s", join(a.Packages))
 	if a.PlatformSkip {
 		d.Warn("%s", a.SkipNote)
@@ -177,6 +189,14 @@ func runApt(a Action, d Deps) error {
 }
 
 func runServices(a Action, d Deps) error {
+	if err := validatePackageOperands(a.Packages); err != nil {
+		return err
+	}
+	for _, service := range a.Packages {
+		if !systemdUnitOperand.MatchString(service) {
+			return fmt.Errorf("invalid systemd service name %q", service)
+		}
+	}
 	d.Log("services: %s", join(a.Packages))
 	if a.PlatformSkip {
 		d.Warn("%s", a.SkipNote)
@@ -196,6 +216,17 @@ func runServices(a Action, d Deps) error {
 		d.Log("enabling service: %s", svc)
 		if err := d.ServiceEnable(svc); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func validatePackageOperands(packages []string) error {
+	for _, pkg := range packages {
+		// APT interprets a trailing '-' as removal, even after '--' and
+		// on architecture/version/release-qualified operands.
+		if !aptPackageOperand.MatchString(pkg) || strings.HasSuffix(pkg, "-") {
+			return fmt.Errorf("invalid apt package operand %q", pkg)
 		}
 	}
 	return nil

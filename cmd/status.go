@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -127,7 +128,7 @@ func probeAll[K, T any](ctx context.Context, inputs []K, probe func(context.Cont
 	}
 }
 
-// worktreeProbe is everything status reads from a single worktree.
+// worktreeProbe holds identity and supervisor state from a single worktree.
 type worktreeProbe struct {
 	branch          string
 	repo            string
@@ -152,6 +153,19 @@ func probeWorktree(ctx context.Context, wt string, forJSON bool) worktreeProbe {
 	}
 	p.supervisorState = state
 	return p
+}
+
+// indexEdges groups undirected edges once so status does not scan or reload
+// the registry for each worktree.
+func indexEdges(edges []registry.Edge) map[registry.RepoRef][]registry.Edge {
+	byRef := make(map[registry.RepoRef][]registry.Edge)
+	for _, edge := range edges {
+		byRef[edge.A] = append(byRef[edge.A], edge)
+		if edge.B != edge.A {
+			byRef[edge.B] = append(byRef[edge.B], edge)
+		}
+	}
+	return byRef
 }
 
 // withWorktree filters allocs to those with a non-empty worktree path.
@@ -204,7 +218,8 @@ func renderStatus(ctx context.Context) error {
 	ctx = process.WithTracker(ctx, tracker)
 
 	reg := registry.New("")
-	all := reg.Allocations()
+	snapshot := reg.Snapshot()
+	all := snapshot.Allocations
 	allocs := all
 	if statusProject != "" {
 		allocs = filterByProject(all, statusProject)
@@ -237,6 +252,27 @@ func renderStatus(ctx context.Context) error {
 			}
 		})
 
+	relatedReposByPath := make(map[string][]config.RelatedRepo)
+	if statusJSON {
+		// Resolve config only after identity probes finish, so extra git work
+		// cannot consume their deadline under load. Only displayed worktrees
+		// with a known repo need config; a stalled checkout is not retried.
+		var relatedPaths []string
+		for _, wt := range worktreePaths(withWorktree(allocs)) {
+			if repoByPath[wt] != "" {
+				relatedPaths = append(relatedPaths, wt)
+			}
+		}
+		probeAll(ctx, relatedPaths,
+			func(ctx context.Context, wt string) []config.RelatedRepo {
+				ctx, cancel := context.WithTimeout(ctx, gitProbeTimeout)
+				defer cancel()
+				root := worktree.DetectRepoRootContext(ctx, wt)
+				return config.LoadProjectConfigReadOnly(root).RelatedRepos()
+			},
+			func(i int, repos []config.RelatedRepo) { relatedReposByPath[relatedPaths[i]] = repos })
+	}
+
 	if statusCheck || statusJSON {
 		portSets := make([][]int, len(allocs))
 		for i, a := range allocs {
@@ -265,11 +301,12 @@ func renderStatus(ctx context.Context) error {
 
 	if statusJSON {
 		idx := assembleWorktreeIndex(probed, repoByPath)
+		edgesByRef := indexEdges(snapshot.Edges)
 		for _, a := range withWorktree(allocs) {
 			wt := a["worktree"].(string)
 			if ref, ok := idx.refByPath[wt]; ok {
 				a["repo"] = ref.Repo
-				a["related"] = buildRelated(reg, idx, wt, ref)
+				a["related"] = buildRelated(idx, ref, edgesByRef[ref], relatedReposByPath[wt])
 			} else {
 				a["related"] = []relatedEntry{}
 			}
@@ -370,7 +407,7 @@ func renderRedisCapacity(reg *registry.Registry) {
 	}
 
 	usable := uc.RedisDatabases() - 1
-	fmt.Printf("\nRedis (database strategy): %d/%d slots used on %s\n", len(byDB), usable, uc.RedisURL())
+	fmt.Printf("\nRedis (database strategy): %d/%d slots used on %s\n", len(byDB), usable, redisEndpointDisplay(uc.RedisURL()))
 
 	var shared []int
 	for db, names := range byDB {
@@ -390,4 +427,18 @@ func renderRedisCapacity(reg *registry.Registry) {
 	}
 	fmt.Println("  Fix: raise `databases` in redis.conf + `gtl config set redis.databases <N>`,")
 	fmt.Println("       or `gtl config set redis.strategy prefixed`, then `gtl reallocate --all-registry --apply`.")
+}
+
+// redisEndpointDisplay removes all URL userinfo before a Redis endpoint is
+// written to status output. Invalid URLs are never echoed because parse errors
+// can themselves contain the original credential-bearing input.
+func redisEndpointDisplay(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "<invalid Redis URL>"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
 }

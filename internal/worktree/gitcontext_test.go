@@ -155,3 +155,23 @@ func waitForDeath(t *testing.T, pid int, label string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestDetectRepoRootContext(t *testing.T) {
+	repo := initTestRepo(t)
+	subdir := filepath.Join(repo, "nested")
+	if err := os.Mkdir(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := DetectRepoRootContext(context.Background(), subdir); got != want {
+		t.Fatalf("root = %q, want %q", got, want)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := DetectRepoRootContext(ctx, subdir); got != subdir {
+		t.Fatalf("cancelled root detection = %q, want fallback %q", got, subdir)
+	}
+}

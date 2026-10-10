@@ -1347,6 +1347,48 @@ func TestValidate_DatabaseExtraMapAndDottedReferences(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsProjectPathsThatCanEscapeTheirRoots(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "env target traversal",
+			yaml: "project: app\nenv_file:\n  path: ../outside.env\n",
+			want: "env_file.path",
+		},
+		{
+			name: "env seed traversal",
+			yaml: "project: app\nenv_file:\n  path: .env\n  seed_from: config/../../outside.env\n",
+			want: "env_file.seed_from",
+		},
+		{
+			name: "absolute env target",
+			yaml: "project: app\nenv_file: /tmp/outside.env\n",
+			want: "env_file.path",
+		},
+		{
+			name: "copy traversal",
+			yaml: "project: app\ncopy_files:\n  - ../outside.key\n",
+			want: "copy_files[0]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, ProjectConfigFile), []byte(tt.yaml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			err := LoadProjectConfigReadOnly(dir).Validate()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() error = %v, want field %s", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidate_ExtrasCannotReferenceEachOther(t *testing.T) {
 	// Names render independently — the primary first, then every extra against
 	// that primary — so a chained reference would survive rendering as a

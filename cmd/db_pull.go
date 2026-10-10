@@ -91,7 +91,8 @@ func runDBPull(cmd *cobra.Command, env string) error {
 	dump := filepath.Join(dir, env+".dump")
 	toc := filepath.Join(dir, env+".toc")
 
-	prompt := fmt.Sprintf("This will OVERWRITE worktree db '%s' with data from %s.", info.target, env)
+	remote := databaseEndpoint{Host: conn.Host, Port: conn.Port, User: conn.User, Database: conn.DBName}
+	prompt := fmt.Sprintf("This will OVERWRITE %s with data from source %q (%s).", destructiveDBTarget(info), env, remote.description())
 	if !confirm.Prompt(prompt, dbPullForce, nil) {
 		fmt.Println("Aborted.")
 		return nil
@@ -140,7 +141,10 @@ func runDBRefresh(cmd *cobra.Command, args []string) error {
 	}
 
 	pc := config.LoadProjectConfig(info.worktreeDir)
-	dir := dumpDir(info.worktreeDir)
+	dir, err := existingDumpDir(info.worktreeDir)
+	if err != nil {
+		return cliErr(cmd, err)
+	}
 
 	samples := availableSamples(dir)
 
@@ -175,6 +179,9 @@ func runDBRefresh(cmd *cobra.Command, args []string) error {
 		idx := confirm.Select(msg, samples, sampleIndex(samples, last), nil)
 		env = samples[idx]
 	}
+	if err := validateSourceName(env); err != nil {
+		return cliErr(cmd, err)
+	}
 
 	dump := filepath.Join(dir, env+".dump")
 	if _, err := os.Stat(dump); err != nil {
@@ -193,7 +200,7 @@ func runDBRefresh(cmd *cobra.Command, args []string) error {
 	// substitute: confirm.Select returns its default on EOF/invalid input,
 	// whereas confirm.Prompt safely returns false, so a non-interactive run
 	// can never silently overwrite the worktree db.
-	prompt := fmt.Sprintf("This will OVERWRITE worktree db '%s' from the local %s sample.", info.target, env)
+	prompt := fmt.Sprintf("This will OVERWRITE %s from the local %s sample.", destructiveDBTarget(info), env)
 	if !confirm.Prompt(prompt, dbRefreshForce, nil) {
 		fmt.Println("Aborted.")
 		return nil
@@ -221,6 +228,9 @@ func runDBRefresh(cmd *cobra.Command, args []string) error {
 // --- helpers ---
 
 func buildSourceSpec(pc *config.ProjectConfig, env string) (dbsource.Spec, error) {
+	if err := validateSourceName(env); err != nil {
+		return dbsource.Spec{}, err
+	}
 	cfg, ok := pc.DatabaseSourceSpec(env)
 	if !ok {
 		return dbsource.Spec{}, errUnknownSourceEnv(env, pc.DatabaseSourceEnvs())
@@ -232,6 +242,26 @@ func buildSourceSpec(pc *config.ProjectConfig, env string) (dbsource.Spec, error
 		Var:     cfg.Var,
 		SSLMode: pc.DatabaseSSLMode(),
 	}, nil
+}
+
+// validateSourceName keeps source identifiers as a single filename component.
+// The same identifier is used as a config-map key and in private dump paths.
+func validateSourceName(env string) error {
+	if env == "" || env == "." || env == ".." || filepath.Base(env) != env || strings.ContainsAny(env, `/\`) {
+		return &CliError{
+			Message: fmt.Sprintf("Invalid database source name %q.", env),
+			Hint:    "Use a single name without path separators, such as production or staging.",
+		}
+	}
+	for _, r := range env {
+		if r < 0x20 || r == 0x7f {
+			return &CliError{
+				Message: fmt.Sprintf("Invalid database source name %q.", env),
+				Hint:    "Source names cannot contain control characters.",
+			}
+		}
+	}
+	return nil
 }
 
 func toRemoteConn(c *dbsource.ConnInfo) *database.RemoteConn {
@@ -246,44 +276,80 @@ func toRemoteConn(c *dbsource.ConnInfo) *database.RemoteConn {
 }
 
 func dumpDir(worktreeDir string) string {
+	if resolved, err := filepath.EvalSymlinks(worktreeDir); err == nil {
+		worktreeDir = resolved
+	}
 	return filepath.Join(worktreeDir, "tmp", "gtl-db")
 }
 
 // ensureDumpDir creates the worktree's dump directory and a self-ignoring
 // .gitignore so large dumps can't be accidentally staged.
 func ensureDumpDir(worktreeDir string) (string, error) {
-	dir := dumpDir(worktreeDir)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("creating %s: %w", dir, err)
-	}
-	info, err := os.Lstat(dir)
+	return anchoredDumpDir(worktreeDir, true)
+}
+
+// existingDumpDir resolves the retained-sample directory without creating it.
+// Missing directories are allowed so refresh can produce its normal no-sample
+// error; existing path components must still be real directories under the
+// opened worktree root.
+func existingDumpDir(worktreeDir string) (string, error) {
+	return anchoredDumpDir(worktreeDir, false)
+}
+
+func anchoredDumpDir(worktreeDir string, create bool) (string, error) {
+	rootPath, err := filepath.EvalSymlinks(worktreeDir)
 	if err != nil {
-		return "", fmt.Errorf("checking %s: %w", dir, err)
+		return "", fmt.Errorf("resolving worktree path %s: %w", worktreeDir, err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return "", fmt.Errorf("refusing unsafe dump directory %s", dir)
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return "", fmt.Errorf("opening worktree root %s: %w", rootPath, err)
 	}
-	// Tighten an existing dump directory, but never its parents: a worktree may
-	// be reached through a normal filesystem alias. Chmod the opened directory
-	// so a swapped path cannot redirect it to another target.
-	dirFile, err := os.Open(dir)
+	defer func() { _ = root.Close() }()
+
+	const relativeDir = "tmp/gtl-db"
+	dir := filepath.Join(rootPath, filepath.FromSlash(relativeDir))
+	for _, component := range []string{"tmp", relativeDir} {
+		info, err := root.Lstat(component)
+		if errors.Is(err, os.ErrNotExist) {
+			if !create {
+				return dir, nil
+			}
+			if err := root.Mkdir(component, platform.DirMode); err != nil {
+				return "", fmt.Errorf("creating %s: %w", filepath.Join(rootPath, filepath.FromSlash(component)), err)
+			}
+			info, err = root.Lstat(component)
+		}
+		if err != nil {
+			return "", fmt.Errorf("checking %s: %w", filepath.Join(rootPath, filepath.FromSlash(component)), err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", fmt.Errorf("refusing unsafe dump directory component %s", filepath.Join(rootPath, filepath.FromSlash(component)))
+		}
+	}
+	if !create {
+		return dir, nil
+	}
+
+	// Tighten the opened directory descriptor so a concurrent path swap cannot
+	// redirect chmod to another object.
+	dirFile, err := root.Open(relativeDir)
 	if err != nil {
 		return "", fmt.Errorf("opening %s: %w", dir, err)
 	}
 	defer func() { _ = dirFile.Close() }()
-	openedInfo, err := dirFile.Stat()
-	if err != nil {
-		return "", fmt.Errorf("checking opened %s: %w", dir, err)
-	}
-	if !openedInfo.IsDir() || !os.SameFile(info, openedInfo) {
-		return "", fmt.Errorf("dump directory changed while opening %s", dir)
-	}
 	if err := dirFile.Chmod(platform.DirMode); err != nil {
 		return "", fmt.Errorf("securing %s: %w", dir, err)
 	}
-	gi := filepath.Join(dir, ".gitignore")
-	if _, err := os.Stat(gi); errors.Is(err, os.ErrNotExist) {
-		_ = os.WriteFile(gi, []byte("*\n"), 0o644)
+	const gitignore = relativeDir + "/.gitignore"
+	if info, err := root.Lstat(gitignore); errors.Is(err, os.ErrNotExist) {
+		if err := root.WriteFile(gitignore, []byte("*\n"), 0o644); err != nil {
+			return "", fmt.Errorf("writing %s: %w", filepath.Join(rootPath, filepath.FromSlash(gitignore)), err)
+		}
+	} else if err != nil {
+		return "", fmt.Errorf("checking %s: %w", filepath.Join(rootPath, filepath.FromSlash(gitignore)), err)
+	} else if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("refusing unsafe dump ignore file %s", filepath.Join(rootPath, filepath.FromSlash(gitignore)))
 	}
 	return dir, nil
 }
@@ -439,7 +505,10 @@ func availableSamples(dir string) []string {
 	matches, _ := filepath.Glob(filepath.Join(dir, "*.dump"))
 	out := make([]string, 0, len(matches))
 	for _, m := range matches {
-		out = append(out, strings.TrimSuffix(filepath.Base(m), ".dump"))
+		env := strings.TrimSuffix(filepath.Base(m), ".dump")
+		if validateSourceName(env) == nil {
+			out = append(out, env)
+		}
 	}
 	sort.Strings(out)
 	return out
@@ -476,6 +545,9 @@ func readManifest(dir string) dumpManifest {
 }
 
 func writeManifestEntry(dir, env string, entry manifestEntry) error {
+	if err := validateSourceName(env); err != nil {
+		return err
+	}
 	path := manifestPath(dir)
 	if err := rejectUnsafeManifest(path); err != nil {
 		return err
@@ -504,4 +576,10 @@ func rejectUnsafeManifest(path string) error {
 	return nil
 }
 
-func manifestLast(dir string) string { return readManifest(dir).Last }
+func manifestLast(dir string) string {
+	last := readManifest(dir).Last
+	if validateSourceName(last) != nil {
+		return ""
+	}
+	return last
+}

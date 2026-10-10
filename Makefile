@@ -22,7 +22,7 @@ lint:
 	"$(GOBIN)/golangci-lint" run ./...
 
 vulncheck:
-	@test -x "$(GOBIN)/govulncheck" || GOBIN="$(GOBIN)" go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+	@"$(GOBIN)/govulncheck" -version 2>/dev/null | grep -Fxq 'Scanner: govulncheck@$(GOVULNCHECK_VERSION)' || GOBIN="$(GOBIN)" go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 	"$(GOBIN)/govulncheck" ./...
 
 build:

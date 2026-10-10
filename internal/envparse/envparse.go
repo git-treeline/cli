@@ -2,6 +2,7 @@ package envparse
 
 import (
 	"bufio"
+	"io"
 	"os"
 	"regexp"
 	"strconv"
@@ -24,9 +25,13 @@ func ParseFile(path string) ([]Entry, error) {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
+	return Parse(f)
+}
 
+// Parse reads key=value entries from r, skipping blank lines and comments.
+func Parse(r io.Reader) ([]Entry, error) {
 	var entries []Entry
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {

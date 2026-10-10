@@ -132,7 +132,7 @@ func TestIntegration_SystemTrust_AddRemove(t *testing.T) {
 	installed := filepath.Join(cfg.certDir, "git-treeline.crt")
 	t.Cleanup(func() { _ = UntrustCA() })
 
-	if err := TrustCA(caPath); err != nil {
+	if err := TrustCA(caPath, "localhost"); err != nil {
 		t.Fatalf("TrustCA: %v", err)
 	}
 	if _, err := os.Stat(installed); err != nil {

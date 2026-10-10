@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/git-treeline/cli/internal/envparse"
@@ -76,5 +78,17 @@ func TestParseEnvLines_FileNotFound(t *testing.T) {
 	_, err := envparse.ParseFile("/nonexistent/.env")
 	if err == nil {
 		t.Error("expected error for missing file")
+	}
+}
+
+func TestEnvShowMissingFileRetainsSetupHint(t *testing.T) {
+	t.Chdir(t.TempDir())
+	previous := envTemplate
+	envTemplate = false
+	t.Cleanup(func() { envTemplate = previous })
+	err := envShowCmd.RunE(envShowCmd, nil)
+	var cliError *CliError
+	if !errors.As(err, &cliError) || !strings.Contains(cliError.Hint, "gtl setup") {
+		t.Fatalf("missing env file lost setup hint: %v", err)
 	}
 }

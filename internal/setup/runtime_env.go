@@ -71,7 +71,16 @@ func SyncRuntimeEnv(worktreePath string, uc *config.UserConfig) (map[string]stri
 		return nil, fmt.Errorf("resolving worktree path: %w", err)
 	}
 	pc := config.LoadProjectConfig(absPath)
-	if err := writeManagedEnv(filepath.Join(absPath, pc.EnvFileTarget()), envVars); err != nil {
+	root, err := openRoot(absPath, "env_file.path")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	target, err := containedRootName(root, pc.EnvFileTarget(), "env_file.path", false)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeManagedEnvRoot(root, target, filepath.Join(absPath, target), envVars); err != nil {
 		return nil, err
 	}
 
@@ -94,17 +103,29 @@ func writeManagedEnv(envPath string, vars map[string]string) error {
 	if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
 		return fmt.Errorf("creating env file directory: %w", err)
 	}
-	if info, err := os.Lstat(envPath); err == nil && info.Mode()&os.ModeSymlink != 0 {
+	root, err := openRoot(filepath.Dir(envPath), "managed env")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return writeManagedEnvRoot(root, filepath.Base(envPath), envPath, vars)
+}
+
+func writeManagedEnvRoot(root *os.Root, name, envPath string, vars map[string]string) error {
+	if err := root.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+		return fmt.Errorf("creating env file directory: %w", err)
+	}
+	if info, err := root.Lstat(name); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("refusing to write managed env through symlink: %s", envPath)
 	} else if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("checking env file: %w", err)
 	}
 	return withManagedEnvLock(envPath, func() error {
-		return writeManagedEnvLocked(envPath, vars)
+		return writeManagedEnvLocked(root, name, envPath, vars)
 	})
 }
 
-func writeManagedEnvLocked(envPath string, vars map[string]string) error {
+func writeManagedEnvLocked(root *os.Root, name, envPath string, vars map[string]string) error {
 	state, known, err := loadManagedEnvState(envPath)
 	if err != nil {
 		return err
@@ -113,7 +134,7 @@ func writeManagedEnvLocked(envPath string, vars map[string]string) error {
 		vars = map[string]string{}
 	}
 
-	data, mode, fileExists, err := readManagedEnvFile(envPath)
+	data, mode, fileExists, err := readManagedEnvFile(root, name, envPath)
 	if err != nil {
 		return fmt.Errorf("reading env file: %w", err)
 	}
@@ -135,7 +156,7 @@ func writeManagedEnvLocked(envPath string, vars map[string]string) error {
 	// atomically replaced even when its contents are unchanged, avoiding a
 	// path-based chmod that could follow a swapped symlink.
 	if content != string(data) || (!fileExists && content != "") || (fileExists && mode != platform.PrivateFileMode) {
-		if err := platform.AtomicWriteFile(envPath, []byte(content), platform.PrivateFileMode); err != nil {
+		if err := atomicWriteRoot(root, name, []byte(content), platform.PrivateFileMode); err != nil {
 			return fmt.Errorf("writing env file: %w", err)
 		}
 	}
@@ -148,8 +169,8 @@ func writeManagedEnvLocked(envPath string, vars map[string]string) error {
 // readManagedEnvFile verifies that the opened file is the regular file that
 // was inspected. That avoids following a destination symlink inserted between
 // the initial Lstat and the read, while still allowing symlinked parents.
-func readManagedEnvFile(path string) ([]byte, os.FileMode, bool, error) {
-	info, err := os.Lstat(path)
+func readManagedEnvFile(root *os.Root, name, displayPath string) ([]byte, os.FileMode, bool, error) {
+	info, err := root.Lstat(name)
 	if os.IsNotExist(err) {
 		return nil, 0, false, nil
 	}
@@ -157,13 +178,13 @@ func readManagedEnvFile(path string) ([]byte, os.FileMode, bool, error) {
 		return nil, 0, false, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return nil, 0, false, fmt.Errorf("refusing to read managed env through symlink: %s", path)
+		return nil, 0, false, fmt.Errorf("refusing to read managed env through symlink: %s", displayPath)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, 0, false, fmt.Errorf("managed env is not a regular file: %s", path)
+		return nil, 0, false, fmt.Errorf("managed env is not a regular file: %s", displayPath)
 	}
 
-	file, err := os.Open(path)
+	file, err := root.Open(name)
 	if err != nil {
 		return nil, 0, false, err
 	}
@@ -173,7 +194,7 @@ func readManagedEnvFile(path string) ([]byte, os.FileMode, bool, error) {
 		return nil, 0, false, err
 	}
 	if !os.SameFile(info, openedInfo) {
-		return nil, 0, false, fmt.Errorf("managed env changed while opening: %s", path)
+		return nil, 0, false, fmt.Errorf("managed env changed while opening: %s", displayPath)
 	}
 	data, err := io.ReadAll(file)
 	if err != nil {

@@ -41,6 +41,41 @@ func TestManifestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestValidateSourceNameRejectsPathComponents(t *testing.T) {
+	for _, name := range []string{"", ".", "..", "../production", "nested/staging", `nested\staging`, "prod\nbackup"} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateSourceName(name); err == nil {
+				t.Fatalf("expected %q to be rejected", name)
+			}
+		})
+	}
+	for _, name := range []string{"production", "staging-us", "review_42", "prod.eu"} {
+		t.Run("valid_"+name, func(t *testing.T) {
+			if err := validateSourceName(name); err != nil {
+				t.Fatalf("expected %q to be accepted: %v", name, err)
+			}
+		})
+	}
+}
+
+func TestManifestRejectsUnsafeSourceName(t *testing.T) {
+	dir := t.TempDir()
+	err := writeManifestEntry(dir, "../outside", manifestEntry{Dump: "outside.dump"})
+	if err == nil {
+		t.Fatal("expected unsafe manifest source name to be rejected")
+	}
+	if _, statErr := os.Stat(manifestPath(dir)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("unsafe source wrote a manifest: %v", statErr)
+	}
+
+	if err := os.WriteFile(manifestPath(dir), []byte(`{"last":"../outside","envs":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := manifestLast(dir); got != "" {
+		t.Fatalf("unsafe manifest last value accepted: %q", got)
+	}
+}
+
 func TestManifestWriteTightensExistingModeAndRejectsSymlink(t *testing.T) {
 	dir := t.TempDir()
 	path := manifestPath(dir)
@@ -81,7 +116,11 @@ func TestEnsureDumpDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dir != filepath.Join(wt, "tmp", "gtl-db") {
+	resolvedWT, err := filepath.EvalSymlinks(wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir != filepath.Join(resolvedWT, "tmp", "gtl-db") {
 		t.Errorf("dir = %q", dir)
 	}
 	gi, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
@@ -124,8 +163,40 @@ func TestEnsureDumpDir_TightensExistingAndKeepsWorktreeAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("symlinked worktree path should work: %v", err)
 	}
-	if aliasDir != filepath.Join(alias, "tmp", "gtl-db") {
+	resolvedWT, err := filepath.EvalSymlinks(wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aliasDir != filepath.Join(resolvedWT, "tmp", "gtl-db") {
 		t.Errorf("alias dump dir = %q", aliasDir)
+	}
+}
+
+func TestEnsureDumpDir_RejectsEscapingParentSymlink(t *testing.T) {
+	wt := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(wt, "tmp")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureDumpDir(wt); err == nil {
+		t.Fatal("expected escaping tmp symlink to be rejected")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "gtl-db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dump directory escaped into symlink target: %v", err)
+	}
+}
+
+func TestExistingDumpDir_RejectsEscapingParentSymlink(t *testing.T) {
+	wt := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Mkdir(filepath.Join(outside, "gtl-db"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(wt, "tmp")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := existingDumpDir(wt); err == nil {
+		t.Fatal("expected refresh path through escaping tmp symlink to be rejected")
 	}
 }
 

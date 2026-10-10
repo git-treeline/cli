@@ -82,6 +82,23 @@ func TestRouterDomain_ExplicitValue(t *testing.T) {
 	}
 }
 
+func TestValidatedRouterDomain_RejectsManuallyEditedInvalidValue(t *testing.T) {
+	for _, raw := range []string{
+		"{\"router\":{\"domain\":\"com\"}}",
+		"{\"router\":{\"domain\":123}}",
+		"{\"router\":{\"domain\":\"\"}}",
+	} {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		uc := LoadUserConfig(path)
+		if _, err := uc.ValidatedRouterDomain(); err == nil {
+			t.Fatalf("expected manually edited invalid config to be rejected: %s", raw)
+		}
+	}
+}
+
 func TestRouterDomain_ExistingConfigNoDomain(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")

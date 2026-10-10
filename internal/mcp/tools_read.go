@@ -72,6 +72,9 @@ func handleResolve(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallT
 func handleEnv(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 	absPath := resolvePath(req)
 	pc := config.LoadProjectConfig(absPath)
+	if err := pc.Validate(); err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("Invalid project config: %v", err)), nil
+	}
 
 	args := req.GetArguments()
 	template, _ := args["template"].(bool)
@@ -91,7 +94,12 @@ func handleEnv(_ context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolR
 	}
 
 	envPath := filepath.Join(absPath, pc.EnvFileTarget())
-	entries, err := envparse.ParseFile(envPath)
+	envFile, err := setup.OpenFileForRead(absPath, pc.EnvFileTarget(), "env_file.path")
+	if err != nil {
+		return mcplib.NewToolResultError(fmt.Sprintf("Could not read env file %s: %v", envPath, err)), nil
+	}
+	defer func() { _ = envFile.Close() }()
+	entries, err := envparse.Parse(envFile)
 	if err != nil {
 		return mcplib.NewToolResultError(fmt.Sprintf("Could not read env file %s: %v", envPath, err)), nil
 	}

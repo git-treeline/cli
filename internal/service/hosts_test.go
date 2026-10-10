@@ -174,3 +174,14 @@ func TestMissingHosts(t *testing.T) {
 		}
 	}
 }
+
+func TestHostsNamesRejectRecordInjection(t *testing.T) {
+	for _, name := range []string{"app.localhost\n203.0.113.1 victim.example", "app.localhost\r#", "app.localhost other.example", "app\t.localhost", "app#comment", "-app.localhost", "app..localhost"} {
+		if err := validateHostsNames([]string{name}); err == nil {
+			t.Errorf("accepted invalid hosts record %q", name)
+		}
+	}
+	if err := validateHostsNames([]string{"main.app.localhost", "feature-12.app.prt.dev"}); err != nil {
+		t.Fatal(err)
+	}
+}

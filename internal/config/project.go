@@ -147,10 +147,39 @@ func (pc *ProjectConfig) Validate() error {
 				ProjectConfigFile)
 		}
 	}
+	if err := validateProjectRelativePath("env_file.path", pc.EnvFileTarget()); err != nil {
+		return err
+	}
+	if err := validateProjectRelativePath("env_file.seed_from", pc.EnvFileSource()); err != nil {
+		return err
+	}
+	for i, path := range pc.CopyFiles() {
+		if err := validateProjectRelativePath(fmt.Sprintf("copy_files[%d]", i), path); err != nil {
+			return err
+		}
+	}
 	if err := pc.validateDatabaseExtra(); err != nil {
 		return err
 	}
 	return pc.validateDottedReferences()
+}
+
+func validateProjectRelativePath(field, path string) error {
+	if !filepath.IsLocal(path) || containsParentPathElement(path) {
+		return fmt.Errorf("%s %q in %s must be a relative path within the project", field, path, ProjectConfigFile)
+	}
+	return nil
+}
+
+func containsParentPathElement(path string) bool {
+	for _, part := range strings.FieldsFunc(path, func(r rune) bool {
+		return r == '/' || r == '\\'
+	}) {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // extraKeyRe matches a valid database.extra map key: a lowercase identifier,

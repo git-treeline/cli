@@ -225,7 +225,7 @@ func vite(project string, det *detect.Result) string {
 	b.WriteString("\ncommands:\n")
 	b.WriteString("  setup:\n")
 	fmt.Fprintf(&b, "    - %s\n", installCmd(det))
-	b.WriteString("  start: npx vite --port {port} --host\n")
+	b.WriteString("  start: npx vite --port {port} --host 127.0.0.1\n")
 
 	writeHooksComment(&b)
 	writeEditorComment(&b)
@@ -352,7 +352,7 @@ func startCommandFor(det *detect.Result) string {
 	case "node":
 		return runCmd(det) + " dev"
 	case "django", "python":
-		return "python manage.py runserver 0.0.0.0:{port}"
+		return "python manage.py runserver 127.0.0.1:{port}"
 	default:
 		return ""
 	}
@@ -391,7 +391,7 @@ Use {port} in your start command:
 Use {port} in your start command (gtl init does this automatically):
 
   commands:
-    start: npx vite --port {port} --host`
+    start: npx vite --port {port} --host 127.0.0.1`
 	case "node":
 		return `Ensure your server reads the allocated port from the environment:
 
@@ -408,7 +408,7 @@ The generated start command sets PORT for you (PORT={port} mix phx.server).`
 		return `Use {port} in your start command for the allocated port:
 
   commands:
-    start: python manage.py runserver 0.0.0.0:{port}`
+    start: python manage.py runserver 127.0.0.1:{port}`
 	default:
 		return ""
 	}

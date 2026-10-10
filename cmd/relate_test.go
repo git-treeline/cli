@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/registry"
 )
 
@@ -74,7 +75,7 @@ func TestBuildRelated_EdgeResolution(t *testing.T) {
 		},
 	}
 
-	entries := buildRelated(reg, idx, "/wt/web-main", self)
+	entries := buildRelated(idx, self, reg.EdgesFor(self), nil)
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 related entries, got %d", len(entries))
 	}
@@ -113,5 +114,35 @@ func TestBuildRelated_EdgeResolution(t *testing.T) {
 	}
 	if goneEntry.Type != "consumes-api" {
 		t.Errorf("expected type 'consumes-api', got %q", goneEntry.Type)
+	}
+}
+
+func TestBuildRelated_ConfigAndEdges(t *testing.T) {
+	self := registry.RepoRef{Repo: "acme/web", Branch: "main"}
+	api := registry.RepoRef{Repo: "acme/api", Branch: "main"}
+	feature := registry.RepoRef{Repo: "acme/api", Branch: "feature"}
+	idx := &worktreeIndex{
+		refByPath: map[string]registry.RepoRef{"/web": self, "/api": api, "/feature": feature},
+		pathByRef: map[registry.RepoRef]string{self: "/web", api: "/api", feature: "/feature"},
+	}
+	edge := registry.Edge{A: api, B: self, CreatedAt: "2026-10-10T12:00:00Z"}
+	entries := buildRelated(idx, self, indexEdges([]registry.Edge{edge})[self], []config.RelatedRepo{
+		{Repo: "acme/api", Type: "consumes-api"},
+		{Repo: "acme/mobile", Type: "related"},
+	})
+	if len(entries) != 3 {
+		t.Fatalf("got %d related entries, want 3: %+v", len(entries), entries)
+	}
+	if e := entries[0]; e.Repo != api.Repo || e.Branch != api.Branch || e.Source != "edge" || e.Type != "related" || e.CreatedAt != edge.CreatedAt {
+		t.Fatalf("edge should take priority over config and default its type: %+v", e)
+	}
+	if e := entries[1]; e.Branch != feature.Branch || e.Source != "config" || e.Type != "consumes-api" || e.Path == nil || *e.Path != "/feature" || e.Dangling {
+		t.Fatalf("config should expand to other live branches: %+v", e)
+	}
+	if e := entries[2]; e.Repo != "acme/mobile" || e.Branch != "" || e.Source != "config" || e.Path != nil || !e.Dangling {
+		t.Fatalf("missing config sibling should be dangling: %+v", e)
+	}
+	if empty := buildRelated(idx, self, nil, nil); empty == nil || len(empty) != 0 {
+		t.Fatalf("empty relationships must remain a non-nil empty slice: %+v", empty)
 	}
 }

@@ -1081,21 +1081,16 @@ func clearOrphanedPortProcess(port int, worktreeDir string) error {
 	}
 
 	fmt.Fprintln(os.Stderr, style.Warnf("A previous server is still running on port %d (pid: %d).", port, pid))
-	if !confirm.Prompt(fmt.Sprintf("Kill pid %d and continue?", pid), true, nil) {
+	if !stopPortProcessesAfterConfirmation(
+		fmt.Sprintf("Kill pid %d and continue?", pid),
+		[]int{pid}, port, nil, syscall.Kill, process.WaitPortFree,
+	) {
 		return &CliError{
 			Message: "Aborted.",
 			Hint:    fmt.Sprintf("Kill manually with: kill %d", pid),
 		}
 	}
 
-	// SIGTERM first, escalate to SIGKILL if the port doesn't free in 2s.
-	_ = syscall.Kill(pid, syscall.SIGTERM)
-	if process.WaitPortFree(port, 2*time.Second) {
-		_ = os.Remove(pidFile)
-		return nil
-	}
-	_ = syscall.Kill(pid, syscall.SIGKILL)
-	time.Sleep(200 * time.Millisecond)
 	_ = os.Remove(pidFile)
 	return nil
 }
@@ -1133,24 +1128,42 @@ func clearUnknownPortProcess(port int) error {
 	}
 
 	fmt.Fprintln(os.Stderr, style.Warnf("Port %d is in use by: %s.", port, desc))
-	if !confirm.Prompt(fmt.Sprintf("Kill %s and continue?", joinPIDs(pids)), true, nil) {
+	if !stopPortProcessesAfterConfirmation(
+		fmt.Sprintf("Kill %s and continue?", joinPIDs(pids)),
+		pids, port, nil, syscall.Kill, process.WaitPortFree,
+	) {
 		return &CliError{
 			Message: "Aborted.",
 			Hint:    fmt.Sprintf("Kill manually with: kill -9 %s", joinPIDs(pids)),
 		}
 	}
+	return nil
+}
 
-	for _, pid := range pids {
-		_ = syscall.Kill(pid, syscall.SIGTERM)
+// stopPortProcessesAfterConfirmation performs no process operation until the
+// user explicitly answers yes. Empty input and EOF are refusals.
+func stopPortProcessesAfterConfirmation(
+	prompt string,
+	pids []int,
+	port int,
+	reader io.Reader,
+	kill func(int, syscall.Signal) error,
+	waitPortFree func(int, time.Duration) bool,
+) bool {
+	if !confirm.Prompt(prompt, false, reader) {
+		return false
 	}
-	if process.WaitPortFree(port, 2*time.Second) {
-		return nil
+	for _, pid := range pids {
+		_ = kill(pid, syscall.SIGTERM)
+	}
+	if waitPortFree(port, 2*time.Second) {
+		return true
 	}
 	for _, pid := range pids {
-		_ = syscall.Kill(pid, syscall.SIGKILL)
+		_ = kill(pid, syscall.SIGKILL)
 	}
 	time.Sleep(200 * time.Millisecond)
-	return nil
+	return true
 }
 
 // pidOwnsPort reports whether pid is among the processes listening on port.

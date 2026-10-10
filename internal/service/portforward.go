@@ -335,26 +335,15 @@ func IsLinuxPortForwardPersistenceInstalled() bool {
 	return runCmd("systemctl", "is-enabled", "--quiet", linuxPortForwardUnitName()) == nil
 }
 
-// resolveIptables locates the iptables command instead of hardcoding
-// /sbin/iptables (which does not exist on every distro/layout). PATH is
-// preferred so the distro's chosen iptables — including the iptables-nft
-// compatibility shim on nftables-only systems — is used. On systems with
-// neither iptables nor its nft shim, it returns an actionable error that
-// distinguishes "no netfilter tooling at all" from "nftables present but no
-// iptables compatibility command", so the user knows which package to add.
+// resolveIptables uses only system locations: caller PATH entries must never
+// select an executable for sudo or a persistent root service.
 func resolveIptables() (string, error) {
-	if p, err := exec.LookPath("iptables"); err == nil {
-		return p, nil
-	}
 	for _, candidate := range []string{"/usr/sbin/iptables", "/sbin/iptables", "/usr/bin/iptables"} {
-		if fi, err := os.Stat(candidate); err == nil && !fi.IsDir() {
+		if fi, err := os.Stat(candidate); err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0o111 != 0 {
 			return candidate, nil
 		}
 	}
-	if _, err := exec.LookPath("nft"); err == nil {
-		return "", fmt.Errorf("nftables detected but no iptables compatibility command found — install the iptables-nft package (Debian/Ubuntu: 'sudo apt install iptables'; Fedora: 'sudo dnf install iptables-nft')")
-	}
-	return "", fmt.Errorf("no iptables command found — install iptables (or iptables-nft) to enable 443 port forwarding")
+	return "", fmt.Errorf("no system iptables command found — install iptables (or iptables-nft) to enable 443 port forwarding")
 }
 
 // --- macOS (pf) ---
@@ -395,46 +384,16 @@ func installDarwinPortForward(routerPort int) error {
 
 	modifiedPfConf := insertPfRules(string(pfConf))
 
-	tmpAnchor, err := os.CreateTemp("", "treeline-anchor-*")
+	files := append(pfDaemonFiles(),
+		platform.PrivilegedFile{Name: "anchor", Data: []byte(anchorContent)},
+		platform.PrivilegedFile{Name: "pf.conf", Data: []byte(modifiedPfConf)},
+	)
+	script, err := platform.StagePrivilegedFiles(files,
+		darwinPortForwardScript("anchor", "pf.conf", "daemon.plist", "ensure.sh"))
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.Remove(tmpAnchor.Name()) }()
-	if _, err := fmt.Fprint(tmpAnchor, anchorContent); err != nil {
-		return err
-	}
-	_ = tmpAnchor.Close()
-
-	tmpPfConf, err := os.CreateTemp("", "treeline-pfconf-*")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = os.Remove(tmpPfConf.Name()) }()
-	if _, err := fmt.Fprint(tmpPfConf, modifiedPfConf); err != nil {
-		return err
-	}
-	_ = tmpPfConf.Close()
-
-	tmpPlist, tmpScript, cleanupDaemonTmp, err := writePfDaemonTempFiles()
-	if err != nil {
-		return err
-	}
-	defer cleanupDaemonTmp()
-
-	// One sudo session for everything that requires root: validate the new
-	// pf.conf, swap it in, apply the rules, and install the boot-time
-	// reloader. Bundling these together means a single password prompt and
-	// guarantees the daemon either lands on disk or the install fails
-	// loudly — no silent half-installs.
-	script := darwinPortForwardScript(tmpAnchor.Name(), tmpPfConf.Name(), tmpPlist, tmpScript)
-
-	cmd := exec.Command("sudo", "-p",
-		"\nEnter your password (2 of 2): ",
-		"sh", "-c", script)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := platform.RunPrivilegedScript("\nEnter your password (2 of 2): ", script); err != nil {
 		return fmt.Errorf("port forwarding setup failed: %w", err)
 	}
 
@@ -449,20 +408,12 @@ func installDarwinPortForward(routerPort int) error {
 // from a previous install where the daemon's separate sudo prompt
 // silently failed.
 func reloadPfAndInstallDaemon() error {
-	tmpPlist, tmpScript, cleanup, err := writePfDaemonTempFiles()
+	script, err := platform.StagePrivilegedFiles(pfDaemonFiles(),
+		reloadPfAndInstallDaemonScript("daemon.plist", "ensure.sh"))
 	if err != nil {
 		return err
 	}
-	defer cleanup()
-
-	script := reloadPfAndInstallDaemonScript(tmpPlist, tmpScript)
-	cmd := exec.Command("sudo", "-p",
-		"\nEnter your password to reload port forwarding and install the boot-time reloader: ",
-		"sh", "-c", script)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := platform.RunPrivilegedScript("\nEnter your password to reload port forwarding and install the boot-time reloader: ", script); err != nil {
 		return fmt.Errorf("pf reload + daemon install failed: %w", err)
 	}
 	return nil
@@ -474,22 +425,22 @@ func reloadPfAndInstallDaemon() error {
 //
 //  1. `pfctl -n -f` (parse-validate the new pf.conf) is gated with
 //     `|| exit 1` — invalid pf.conf must NOT overwrite the live file.
-//  2. `pfctl -ef` (load + enable) is masked with `; true` because pfctl
-//     returns non-zero from `-e` when pf is already running; this is
-//     expected and must not abort the install.
+//  2. Loading with `pfctl -f` must succeed. Only `pfctl -e` is masked
+//     because it returns non-zero when pf is already enabled.
 //  3. The daemon install fragment is `&&`-joined at the tail, so a
 //     failed `launchctl bootstrap` propagates as the script's exit code.
 //     This is the whole point of the bundling: pf rules and daemon
 //     land together or the install fails loudly.
 func darwinPortForwardScript(tmpAnchorPath, tmpPfConfPath, tmpPlistPath, tmpScriptPath string) string {
+	q := platform.ShellQuote
 	return fmt.Sprintf(
-		"/bin/mkdir -p /etc/pf.anchors && /bin/cp '%s' '%s' && /sbin/pfctl -n -f '%s' 2>&1 || exit 1; "+
-			"/bin/cp '%s' '%s' && /bin/cp '%s' '%s' && { /sbin/pfctl -ef '%s' 2>/dev/null; true; } && %s",
-		tmpAnchorPath, pfAnchorPath(),
-		tmpPfConfPath,
-		pfConfPath, pfBackupPath,
-		tmpPfConfPath, pfConfPath,
-		pfConfPath,
+		"/bin/mkdir -p /etc/pf.anchors && /bin/cp %s %s && /sbin/pfctl -n -f %s 2>&1 || exit 1; "+
+			"/bin/cp %s %s && /bin/cp %s %s && /sbin/pfctl -f %s 2>/dev/null && { /sbin/pfctl -e 2>/dev/null || true; } && %s",
+		q(tmpAnchorPath), q(pfAnchorPath()),
+		q(tmpPfConfPath),
+		q(pfConfPath), q(pfBackupPath),
+		q(tmpPfConfPath), q(pfConfPath),
+		q(pfConfPath),
 		pfReloadDaemonInstallFragment(tmpPlistPath, tmpScriptPath),
 	)
 }
@@ -500,7 +451,7 @@ func darwinPortForwardScript(tmpAnchorPath, tmpPfConfPath, tmpPlistPath, tmpScri
 // is masked. The daemon fragment is the final exit-code gate.
 func reloadPfAndInstallDaemonScript(tmpPlistPath, tmpScriptPath string) string {
 	return fmt.Sprintf(
-		"/sbin/pfctl -f '%s' 2>/dev/null && { /sbin/pfctl -e 2>/dev/null; true; } && %s",
+		"/sbin/pfctl -f '%s' 2>/dev/null && { /sbin/pfctl -e 2>/dev/null || true; } && %s",
 		pfConfPath,
 		pfReloadDaemonInstallFragment(tmpPlistPath, tmpScriptPath),
 	)
@@ -509,29 +460,11 @@ func reloadPfAndInstallDaemonScript(tmpPlistPath, tmpScriptPath string) string {
 // reloadPf ensures the kernel's pf rules match /etc/pf.conf — including
 // repairing pf.conf itself when a macOS update reverted it to the stock
 // file and stripped our lines. It runs the same repair script the boot
-// daemon uses (rendered to a temp file), so `gtl serve reload-pf` fixes
+// daemon uses (streamed directly to the privileged shell), so `gtl serve reload-pf` fixes
 // every state the daemon can fix: missing lines, unloaded ruleset,
 // disabled pf.
 func reloadPf() error {
-	tmp, err := os.CreateTemp("", "treeline-pf-ensure-*.sh")
-	if err != nil {
-		return fmt.Errorf("creating temp pf-ensure script: %w", err)
-	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-	if _, err := tmp.WriteString(pfEnsureScriptBody()); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-
-	cmd := exec.Command("sudo", "-p",
-		"\nEnter your password to reload port forwarding: ",
-		"sh", tmp.Name())
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := platform.RunPrivilegedScript("\nEnter your password to reload port forwarding: ", pfEnsureScriptBody()); err != nil {
 		return fmt.Errorf("pf reload/repair failed: %w", err)
 	}
 	return nil
@@ -552,30 +485,15 @@ func uninstallDarwinPortForward() error {
 	}
 	cleaned := strings.Join(filtered, "\n")
 
-	tmpPfConf, err := os.CreateTemp("", "treeline-pfconf-*")
+	body := fmt.Sprintf(
+		"/sbin/pfctl -n -f pf.conf && /bin/cp pf.conf '%s' && /bin/rm -f '%s' && { /sbin/pfctl -f '%s' 2>/dev/null || true; }",
+		pfConfPath, pfAnchorPath(), pfConfPath,
+	)
+	script, err := platform.StagePrivilegedFiles([]platform.PrivilegedFile{{Name: "pf.conf", Data: []byte(cleaned)}}, body)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.Remove(tmpPfConf.Name()) }()
-	if _, err := fmt.Fprint(tmpPfConf, cleaned); err != nil {
-		return err
-	}
-	_ = tmpPfConf.Close()
-
-	script := fmt.Sprintf(
-		"/bin/cp '%s' '%s' && /bin/rm -f '%s' && /sbin/pfctl -f '%s' 2>/dev/null; true",
-		tmpPfConf.Name(), pfConfPath,
-		pfAnchorPath(),
-		pfConfPath,
-	)
-
-	cmd := exec.Command("sudo", "-p",
-		"\nEnter your password to remove port forwarding: ",
-		"sh", "-c", script)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return platform.RunPrivilegedScript("\nEnter your password to remove port forwarding: ", script)
 }
 
 // insertPfRules adds the git-treeline rdr-anchor and load anchor lines
@@ -680,24 +598,13 @@ func applyLinuxPortForward(routerPort int, prompt string) error {
 		return err
 	}
 
-	tmpUnit, err := os.CreateTemp("", "treeline-portforward-*.service")
+	script, err := platform.StagePrivilegedFiles([]platform.PrivilegedFile{
+		{Name: "forward.service", Data: []byte(linuxPortForwardUnitBody(ipt, routerPort))},
+	}, linuxInstallScript(ipt, routerPort, "forward.service"))
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.Remove(tmpUnit.Name()) }()
-	if _, err := tmpUnit.WriteString(linuxPortForwardUnitBody(ipt, routerPort)); err != nil {
-		return err
-	}
-	if err := tmpUnit.Close(); err != nil {
-		return err
-	}
-
-	cmd := exec.Command("sudo", "-p", prompt,
-		"sh", "-c", linuxInstallScript(ipt, routerPort, tmpUnit.Name()))
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := platform.RunPrivilegedScript(prompt, script); err != nil {
 		return fmt.Errorf("port forwarding setup failed: %w", err)
 	}
 
@@ -752,13 +659,7 @@ func uninstallLinuxPortForward() error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command("sudo", "-p",
-		"\nEnter your password to remove port forwarding: ",
-		"sh", "-c", linuxUninstallScript(ipt))
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	err = cmd.Run()
+	err = platform.RunPrivilegedScript("\nEnter your password to remove port forwarding: ", linuxUninstallScript(ipt))
 	if err == nil {
 		return nil
 	}
