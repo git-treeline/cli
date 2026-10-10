@@ -76,7 +76,7 @@ func TestDetailScrollPreservesHeaderAndMakesLastOutputReachable(t *testing.T) {
 		t.Fatalf("last output not reachable: %s", after)
 	}
 	for _, content := range []string{before, after} {
-		if !strings.Contains(content, "LAST OPERATION") || !strings.Contains(content, "1 Overview  2 Health  3 Activity") {
+		if !strings.Contains(content, "SELECTED · api / main") || !strings.Contains(content, "1 Overview  2 Health  3 Activity") {
 			t.Fatalf("title and tabs should remain pinned: %s", content)
 		}
 	}
@@ -185,5 +185,73 @@ func TestViewUsesExactPanelDimensionsWithoutRewrapping(t *testing.T) {
 				t.Fatalf("both status lines must remain visible: %q", lines[m.height-2:])
 			}
 		})
+	}
+}
+
+func TestCompactActivityKeepsCurrentSelectionDistinctFromLastOperation(t *testing.T) {
+	m := buildTestModel()
+	m.ready, m.width, m.height, m.focus, m.detailTab = true, 60, 24, paneDetail, tabActivity
+	m.cursor = len(m.flatList) - 1
+	m.operation = &operationState{name: "Restart", branch: "previous-branch", path: "/repos/previous-project", output: strings.Repeat("output\n", 40)}
+	content := ansi.Strip(m.View().Content)
+	for _, want := range []string{"SELECTED · frontend / redesign", "LAST OPERATION", "Target: previous-branch", "/repos/previous-project"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("compact activity missing %q: %s", want, content)
+		}
+	}
+	m.detailScroll = 20
+	content = ansi.Strip(m.View().Content)
+	if !strings.Contains(content, "SELECTED · frontend / redesign") {
+		t.Fatalf("current action target disappeared while scrolling: %s", content)
+	}
+}
+
+func TestHealthNamesCheckedBranchWhenSelectionBranchChanges(t *testing.T) {
+	m := buildTestModel()
+	m.detailTab = tabHealth
+	wt := m.selectedWorktree()
+	wt.Branch = "current-branch"
+	m.health = map[string]healthReport{wt.WorktreePath: {branch: "checked-branch", output: "previous diagnosis", stale: true}}
+	content := ansi.Strip(m.renderDetailPanel(70, 20))
+	for _, want := range []string{"api / current-branch", "Health · checked-branch", "Changed since this check", "previous diagnosis"} {
+		if !strings.Contains(content, want) {
+			t.Errorf("health missing %q: %s", want, content)
+		}
+	}
+	if strings.Contains(content, "Health · current-branch") {
+		t.Fatal("cached diagnosis was relabeled as the current branch")
+	}
+}
+
+func TestReleaseConfirmationRequiresCompleteConsequencesToFit(t *testing.T) {
+	m := buildTestModel()
+	m.confirmTarget = m.selectedWorktree()
+	for _, size := range [][2]int{{40, 12}, {60, 8}, {120, 6}, {6, 24}} {
+		m.width, m.height = size[0], size[1]
+		if m.releaseConfirmationFits() {
+			t.Errorf("confirmation unexpectedly fits in %dx%d", m.width, m.height)
+		}
+		content := ansi.Strip(m.renderConfirmOverlay())
+		assertViewFits(t, content, m.width, m.height)
+		if strings.Contains(content, "y: release") {
+			t.Errorf("clipped confirmation still advertises release: %s", content)
+		}
+		if m.width >= 40 && !strings.Contains(content, "Terminal too small") {
+			t.Errorf("missing resize notice: %s", content)
+		}
+	}
+	m.width, m.height = 120, 24
+	if !m.releaseConfirmationFits() {
+		t.Fatal("confirmation should fit after resizing")
+	}
+	content := ansi.Strip(m.renderConfirmOverlay())
+	for _, want := range []string{"y: release", "Stops its server and frees its allocated resources.", "Keeps the worktree directory and databases.", "Configured release hooks also run."} {
+		if !strings.Contains(content, want) {
+			t.Errorf("enabled confirmation missing %q: %s", want, content)
+		}
+	}
+	m.confirmTarget.Branch = strings.Repeat("long-branch-name-", 100)
+	if m.releaseConfirmationFits() {
+		t.Fatal("confirmation must also account for a long target wrapping past available height")
 	}
 }

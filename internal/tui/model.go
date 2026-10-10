@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
@@ -46,6 +47,7 @@ type operationState struct {
 }
 
 type healthReport struct {
+	branch string
 	output string
 	err    error
 	stale  bool
@@ -79,6 +81,7 @@ type Model struct {
 	detailScroll    int
 	operation       *operationState
 	health          map[string]healthReport
+	lifecycle       *commandLifecycle
 	operationCancel context.CancelFunc
 	deps            actionDeps
 }
@@ -152,7 +155,46 @@ func NewModel() Model {
 		spinner.WithSpinner(spinner.MiniDot),
 		spinner.WithStyle(lipgloss.NewStyle().Foreground(highlight)),
 	)
-	return Model{spinner: s, polling: true, deps: defaultDeps(), health: make(map[string]healthReport)}
+	return Model{spinner: s, polling: true, deps: defaultDeps(), health: make(map[string]healthReport), lifecycle: newCommandLifecycle()}
+}
+
+// Close cancels pending dashboard commands and waits for running commands to finish.
+// The initial model owns the lifecycle shared by all Bubble Tea model copies.
+func (m Model) Close() {
+	if m.lifecycle != nil {
+		m.lifecycle.close()
+	}
+}
+
+type commandLifecycle struct {
+	mutex   sync.Mutex
+	closed  bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	running sync.WaitGroup
+}
+
+func newCommandLifecycle() *commandLifecycle {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &commandLifecycle{ctx: ctx, cancel: cancel}
+}
+
+func (l *commandLifecycle) start() bool {
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+	if l.closed {
+		return false
+	}
+	l.running.Add(1)
+	return true
+}
+
+func (l *commandLifecycle) close() {
+	l.mutex.Lock()
+	l.closed = true
+	l.cancel()
+	l.mutex.Unlock()
+	l.running.Wait()
 }
 
 func (m Model) Init() tea.Cmd {

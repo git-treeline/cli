@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -1272,5 +1273,78 @@ func TestResizeKeepsSelectedWorktreeVisible(t *testing.T) {
 	}
 	if lines := m.renderedLinesBetween(m.scrollOffset, m.cursor); lines > m.listVisibleLines() {
 		t.Fatalf("selected worktree needs %d rows but viewport has %d", lines, m.listVisibleLines())
+	}
+}
+
+func TestHealthRetainsCheckedBranchAfterExternalSwitch(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pending=%v", pending), func(t *testing.T) {
+			var calls []callRecord
+			m := buildTestModelWithDeps(&calls)
+			path := m.selectedPath()
+			m, cmd := press(m, "h")
+			completion := cmd()
+			if !pending {
+				result, _ := m.Update(completion)
+				m = result.(Model)
+			}
+			snap := m.snapshot
+			snap.Worktrees = append([]WorktreeStatus(nil), snap.Worktrees...)
+			snap.Worktrees[0].Branch = "switched-branch"
+			result, _ := m.Update(dataMsg{snapshot: snap})
+			m = result.(Model)
+			if pending {
+				result, _ = m.Update(completion)
+				m = result.(Model)
+			}
+			if report := m.health[path]; report.branch != "main" || !report.stale {
+				t.Fatalf("report was relabeled or stayed fresh: %+v", report)
+			}
+		})
+	}
+}
+
+func TestHealthForRemovedTargetIsStale(t *testing.T) {
+	var calls []callRecord
+	m := buildTestModelWithDeps(&calls)
+	path := m.selectedPath()
+	m, cmd := press(m, "h")
+	snap := m.snapshot
+	snap.Worktrees = snap.Worktrees[1:]
+	result, _ := m.Update(dataMsg{snapshot: snap})
+	m = result.(Model)
+	result, _ = m.Update(cmd())
+	m = result.(Model)
+	if !m.health[path].stale {
+		t.Fatal("removed worktree report must not remain fresh")
+	}
+}
+
+func TestReleaseRequiresVisibleConfirmation(t *testing.T) {
+	var calls []callRecord
+	m := buildTestModelWithDeps(&calls)
+	m, _ = press(m, "d")
+	target := m.confirmTarget
+	m.width, m.height = 30, 8
+	m, cmd := press(m, "y")
+	if cmd != nil || m.confirmKind != "release" || m.confirmTarget != target {
+		t.Fatal("clipped confirmation must remain open without releasing")
+	}
+	result, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	m = result.(Model)
+	m, cmd = press(m, "y")
+	if cmd == nil || m.confirmKind != "" {
+		t.Fatal("resized visible confirmation must allow release")
+	}
+	cmd()
+	if len(calls) != 1 {
+		t.Fatalf("expected one release, got %v", calls)
+	}
+	m = buildTestModelWithDeps(&calls)
+	m, _ = press(m, "d")
+	m.width, m.height = 30, 8
+	m, cmd = press(m, "n")
+	if cmd != nil || m.confirmKind != "" {
+		t.Fatal("small confirmation must allow cancellation")
 	}
 }

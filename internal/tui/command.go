@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -26,6 +27,20 @@ func runCLIExecutable(ctx context.Context, executable, worktreePath string, args
 	}
 	cmd := exec.CommandContext(ctx, executable, args...)
 	cmd.Dir = worktreePath
+	// Release addresses its allocation by absolute path, even after the directory is gone.
+	if len(args) == 3 && args[0] == "release" && args[1] == "--force" && args[2] == worktreePath && filepath.IsAbs(args[2]) {
+		for {
+			_, err := os.Stat(cmd.Dir)
+			if err == nil {
+				break
+			}
+			parent := filepath.Dir(cmd.Dir)
+			if !errors.Is(err, os.ErrNotExist) || parent == cmd.Dir {
+				return "", err
+			}
+			cmd.Dir = parent
+		}
+	}
 	cmd.Env = append(os.Environ(), "NO_COLOR=1", "GTL_NO_UPDATE_NOTIFY=1", "GTL_NO_STALE_WARN=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Give start --await time to clean up its detached supervisor on cancellation.

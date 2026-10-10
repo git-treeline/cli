@@ -36,6 +36,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pollErr = nil
 		selected := m.selectedPath()
 		m.snapshot = msg.snapshot
+		for path, report := range m.health {
+			report.stale = report.stale || !m.hasWorktree(path, report.branch)
+			m.health[path] = report
+		}
 		m.rebuildList(selected)
 		m.clampDetailScroll()
 		return m, nil
@@ -59,7 +63,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.health == nil {
 				m.health = make(map[string]healthReport)
 			}
-			m.health[op.path] = healthReport{output: op.output, err: op.err}
+			m.health[op.path] = healthReport{branch: op.branch, output: op.output, err: op.err, stale: !m.hasWorktree(op.path, op.branch)}
 		}
 		m.statusMsg = op.name + " completed: " + op.branch
 		if op.err != nil {
@@ -244,6 +248,9 @@ func (m Model) updateConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y":
 		if m.confirmKind == "release" {
+			if !m.releaseConfirmationFits() {
+				return m, nil
+			}
 			cmd := m.releaseWorktree(m.confirmTarget)
 			m.confirmKind = ""
 			m.confirmTarget = nil
@@ -433,7 +440,11 @@ func (m *Model) beginOperation(name string, wt *WorktreeStatus, args ...string) 
 	if m.busy() || wt == nil || wt.WorktreePath == "" {
 		return nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	if m.lifecycle == nil {
+		m.lifecycle = newCommandLifecycle()
+	}
+	lifecycle := m.lifecycle
+	ctx, cancel := context.WithCancel(lifecycle.ctx)
 	m.operationCancel = cancel
 	op := operationState{name: name, path: wt.WorktreePath, branch: wt.Branch, running: true}
 	m.operation = &op
@@ -450,6 +461,13 @@ func (m *Model) beginOperation(name string, wt *WorktreeStatus, args ...string) 
 	run := m.deps.runCommand
 	return func() tea.Msg {
 		result := op
+		defer cancel()
+		if !lifecycle.start() {
+			result.err = context.Canceled
+			result.running = false
+			return operationResultMsg{operation: result}
+		}
+		defer lifecycle.running.Done()
 		result.output, result.err = run(ctx, result.path, args...)
 		result.running = false
 		return operationResultMsg{operation: result}
@@ -477,6 +495,15 @@ func (m *Model) selectedPath() string {
 		return wt.WorktreePath
 	}
 	return ""
+}
+
+func (m Model) hasWorktree(path, branch string) bool {
+	for _, wt := range m.snapshot.Worktrees {
+		if wt.WorktreePath == path && wt.Branch == branch {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Model) rebuildList(selected string) {

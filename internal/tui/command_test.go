@@ -21,6 +21,9 @@ func commandFixture(t *testing.T) string {
 mode=$1
 shift
 case "$mode" in
+release)
+  printf '%s\n' "$PWD" "$mode" "$@"
+  ;;
 inspect)
   printf '%s\n' "$PWD" "$@" "$NO_COLOR" "$GTL_NO_UPDATE_NOTIFY" "$GTL_NO_STALE_WARN"
   cat
@@ -162,5 +165,65 @@ waitReady:
 func TestRunCLIRejectsEmptyDirectory(t *testing.T) {
 	if _, err := runCLI(context.Background(), "", "doctor"); err == nil {
 		t.Fatal("expected missing worktree path error")
+	}
+}
+
+func TestRunCLIReleaseMissingWorktreeUsesExistingAncestor(t *testing.T) {
+	executable := commandFixture(t)
+	ancestor := t.TempDir()
+	wantDir, err := filepath.EvalSymlinks(ancestor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(ancestor, "missing", "nested", "worktree")
+	output, err := runCLIExecutable(context.Background(), executable, target, "release", "--force", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := strings.Join([]string{wantDir, "release", "--force", target, ""}, "\n"); output != want {
+		t.Fatalf("release invocation = %q, want %q", output, want)
+	}
+	if err := os.MkdirAll(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	output, err = runCLIExecutable(context.Background(), executable, target, "release", "--force", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDir, err = filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(output, wantDir+"\n") {
+		t.Fatalf("existing release target must remain the working directory: %q", output)
+	}
+}
+
+func TestRunCLIMissingWorktreeDoesNotFallbackForOtherCommands(t *testing.T) {
+	executable := commandFixture(t)
+	target := filepath.Join(t.TempDir(), "missing", "nested")
+	for _, args := range [][]string{
+		{"new", "--force", "--", "feature"},
+		{"env", "sync"},
+		{"start", "--await"},
+		{"release", "--force", "."},
+		{"release", "--force", filepath.Dir(target)},
+	} {
+		output, err := runCLIExecutable(context.Background(), executable, target, args...)
+		if !errors.Is(err, os.ErrNotExist) || output != "" {
+			t.Fatalf("command %q unexpectedly fell back: output=%q error=%v", args, output, err)
+		}
+	}
+}
+
+func TestRunCLIReleasePreservesNonMissingDirectoryErrors(t *testing.T) {
+	executable := commandFixture(t)
+	target := filepath.Join(t.TempDir(), "loop")
+	if err := os.Symlink(target, target); err != nil {
+		t.Fatal(err)
+	}
+	output, err := runCLIExecutable(context.Background(), executable, target, "release", "--force", target)
+	if !errors.Is(err, syscall.ELOOP) || output != "" {
+		t.Fatalf("expected original symlink-loop error without fallback, output=%q error=%v", output, err)
 	}
 }

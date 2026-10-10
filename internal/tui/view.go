@@ -139,7 +139,7 @@ func (m *Model) renderDetailPanel(width, height int) string {
 		title = wt.Project + " / " + wt.Branch
 	}
 	if m.detailTab == tabActivity {
-		title = "LAST OPERATION"
+		title = "SELECTED · " + title
 	}
 	tabs := []string{"1 Overview", "2 Health", "3 Activity"}
 	if width < 34 {
@@ -180,7 +180,7 @@ func (m Model) detailLines(width int) []string {
 		if wt == nil {
 			body = "Select a worktree to check its health."
 		} else if report, ok := m.health[wt.WorktreePath]; ok {
-			body = "Health · " + wt.Branch + "\n"
+			body = "Health · " + valueOrDash(report.branch) + "\n"
 			if report.stale {
 				body += "Changed since this check. Press h to recheck.\n"
 			}
@@ -206,7 +206,7 @@ func (m Model) detailLines(width int) []string {
 			} else if op.err != nil {
 				state = "Failed"
 			}
-			body = state + " · " + op.name + "\nTarget: " + op.branch + "\n" + op.path + "\n"
+			body = "LAST OPERATION\n" + state + " · " + op.name + "\nTarget: " + op.branch + "\n" + op.path + "\n"
 			if op.err != nil {
 				body += "\n" + statusErrorStyle.Render(plainOutput(op.err.Error())) + "\n"
 			}
@@ -356,8 +356,26 @@ func (m *Model) renderConfirmOverlay() string {
 	if m.confirmTarget == nil {
 		return ""
 	}
-	prompt := fmt.Sprintf("Release allocations for %q?\n\ny: release   any other key: cancel\n\nStops its server and frees its allocated resources.\nKeeps the worktree directory and databases.\nConfigured release hooks also run.", m.confirmTarget.Branch)
-	return m.renderOverlay(prompt, true)
+	if !m.releaseConfirmationFits() {
+		return m.renderOverlay("Terminal too small.\nResize to review release.\nConfirmation disabled.\nEsc: cancel", true)
+	}
+	return m.renderOverlay(m.releaseConfirmationPrompt(), true)
+}
+
+func (m Model) releaseConfirmationPrompt() string {
+	if m.confirmTarget == nil {
+		return ""
+	}
+	return fmt.Sprintf("Release allocations for %q?\n\ny: release   any other key: cancel\n\nStops its server and frees its allocated resources.\nKeeps the worktree directory and databases.\nConfigured release hooks also run.", m.confirmTarget.Branch)
+}
+
+func (m Model) releaseConfirmationFits() bool {
+	if m.confirmTarget == nil || m.width <= 6 || m.height <= 4 {
+		return false
+	}
+	width := min(62, m.width-6)
+	body := ansi.Hardwrap(m.releaseConfirmationPrompt(), width, false)
+	return lipgloss.Width(body) <= width && lipgloss.Height(body) <= m.height-4
 }
 
 func (m *Model) renderInputOverlay() string {
