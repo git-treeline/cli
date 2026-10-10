@@ -41,7 +41,8 @@ func readProcFile(path string) ([]byte, uint32, error) {
 	if err != nil {
 		return nil, 0, errOwnerEvidence
 	}
-	defer file.Close()
+	// This descriptor is read-only; the validated observation determines success.
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, 0, errOwnerEvidence
