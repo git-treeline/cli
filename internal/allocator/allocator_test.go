@@ -1892,18 +1892,70 @@ func TestFreshAllocationPersistsResourcesAndNeverStartedAtomically(t *testing.T)
 	}
 }
 
-func TestFreshAllocationRefusesExistingLegacyAndConflictingResources(t *testing.T) {
-	for _, fixture := range []string{"existing", "legacy_store", "reserved_port", "missing_lock", "main", "dry_run", "mismatched_target"} {
+func TestFreshAllocationUpgradesLegacyAndPreservesSiblingResources(t *testing.T) {
+	for _, version := range []int{2, 3} {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
+			al, reg, root := freshAllocatorFixture(t)
+			sibling := filepath.Join(root, "other")
+			legacy := registry.Allocation{"worktree": sibling, "port": 4200, "redis_db": 1, "database": "retained_database"}
+			if version == 3 {
+				legacy["allocation_generation"] = uuid.NewString()
+			}
+			before, err := json.Marshal(legacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(registry.RegistryData{Version: version, Allocations: []registry.Allocation{legacy}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(reg.Path, raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			allocation, err := al.Allocate(root, "fresh", false, "fresh")
+			if err != nil || allocation.Port != 4100 || allocation.RedisDB != 2 || allocation.Reused {
+				t.Fatalf("fresh allocation failed or reused legacy resources: %+v: %v", allocation, err)
+			}
+			snapshot, err := reg.SnapshotStrict()
+			if err != nil || snapshot.Version != 4 || len(snapshot.Allocations) != 2 {
+				t.Fatalf("legacy store not upgraded: %+v: %v", snapshot, err)
+			}
+			fresh, err := reg.FindForRelease(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			binding, err := registry.AllocationRuntimeBinding(fresh)
+			if err != nil || binding.Kind != "never_started" {
+				t.Fatalf("fresh ownership missing: %+v: %v", binding, err)
+			}
+			retained, err := reg.FindForRelease(sibling)
+			if err != nil {
+				t.Fatal(err)
+			}
+			binding, err = registry.AllocationRuntimeBinding(retained)
+			if err != nil || binding.Kind != "unknown" || registry.GetString(retained, "allocation_generation") == "" {
+				t.Fatalf("legacy runtime adopted: %+v: %v", retained, err)
+			}
+			delete(retained, "runtime_binding")
+			if version == 2 {
+				delete(retained, "allocation_generation")
+			}
+			after, err := json.Marshal(retained)
+			if err != nil || string(before) != string(after) {
+				t.Fatalf("legacy allocation changed: before=%s after=%s: %v", before, after, err)
+			}
+		})
+	}
+}
+
+func TestFreshAllocationRefusesExistingAndConflictingResources(t *testing.T) {
+	for _, fixture := range []string{"existing", "reserved_port", "missing_lock", "main", "dry_run", "mismatched_target"} {
 		t.Run(fixture, func(t *testing.T) {
 			al, reg, root := freshAllocatorFixture(t)
 			main := false
 			switch fixture {
 			case "existing":
 				if err := reg.Allocate(registry.Allocation{"worktree": root, "port": 4100}); err != nil {
-					t.Fatal(err)
-				}
-			case "legacy_store":
-				if err := os.WriteFile(reg.Path, []byte(`{"version":3,"allocations":[]}`), 0600); err != nil {
 					t.Fatal(err)
 				}
 			case "reserved_port":
