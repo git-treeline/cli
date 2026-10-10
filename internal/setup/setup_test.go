@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -3211,5 +3212,80 @@ func TestManagedDevSQLiteSetupRunUsesAllocatedIdentity(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(s.WorktreePath, s.ProjectConfig.EnvFileTarget())); err != nil {
 		t.Fatalf("env was not written: %v", err)
+	}
+}
+
+func TestManagedDevPostgreSQLSetup(t *testing.T) {
+	for _, mode := range []string{"clone", "reuse", "main", "missing template", "missing main", "clone failure", "probe failure", "late config"} {
+		t.Run(mode, func(t *testing.T) {
+			s, alloc := managedDevSQLiteSetup(t)
+			body := "project: host_migration_qa\ndatabase: {adapter: postgresql, template: treeline_dev_host_migration_qa_template, name: '{template}_{worktree}', host: 127.0.0.1, port: 5432, user: qa}\nenv: {DATABASE_NAME: '{database}'}\n"
+			for _, root := range []string{s.MainRepo, s.WorktreePath} {
+				if err := os.WriteFile(filepath.Join(root, config.ProjectConfigFile), []byte(body), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			private := filepath.Join(os.Getenv("GTL_HOME"), "config.json")
+			data, err := os.ReadFile(private)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(private, []byte(strings.ReplaceAll(string(data), "fixture/", "host_migration_qa/")), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "main" || mode == "missing main" {
+				s.WorktreePath = s.MainRepo
+				alloc.Worktree = s.MainRepo
+				alloc.WorktreeName = "main"
+				alloc.Branch = "main"
+				alloc.MainWorktree = true
+				alloc.Port = 42010
+				alloc.Ports = []int{42010}
+			}
+			s.ProjectConfig = config.LoadProjectConfigReadOnlyQuiet(s.WorktreePath)
+			alloc.Project = "host_migration_qa"
+			alloc.DatabaseAdapter = "postgresql"
+			alloc.Databases = allocator.ExpectedDatabases(s.ProjectConfig, alloc.WorktreeName, alloc.MainWorktree)
+			source, target := s.ProjectConfig.DatabaseTemplate(), alloc.PrimaryDatabase()
+			fake := newFakeAdapter(source, "production", "treeline_dev_host_migration_qa_template_qa_two")
+			switch mode {
+			case "reuse":
+				fake.existing[target] = true
+			case "missing template", "missing main":
+				delete(fake.existing, source)
+			case "clone failure":
+				fake.cloneErr = fmt.Errorf("clone failed")
+			case "probe failure":
+				fake.existsErr = fmt.Errorf("probe failed")
+			}
+			changing := &changingSQLiteAdapter{fakeAdapter: fake}
+			if mode == "late config" {
+				changing.afterProbe = func() {
+					if err := os.WriteFile(filepath.Join(s.WorktreePath, config.ProjectConfigFile), []byte(strings.Replace(body, "5432", "5433", 1)), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			err = s.cloneDatabaseWith(changing, "postgresql", alloc)
+			wantOK := mode == "clone" || mode == "reuse" || mode == "main"
+			if (err == nil) != wantOK {
+				t.Fatalf("setup: %v", err)
+			}
+			if mode == "clone" || mode == "clone failure" {
+				if !slices.Equal(fake.calls, []string{"clone:" + source + "->" + target}) {
+					t.Fatal(fake.calls)
+				}
+			} else if len(fake.calls) != 0 {
+				t.Fatal("unexpected mutation", fake.calls)
+			}
+			if !fake.existing["production"] || !fake.existing["treeline_dev_host_migration_qa_template_qa_two"] {
+				t.Fatal("unrelated database changed")
+			}
+			if wantOK {
+				if env := BuildEnvVars(s.ProjectConfig, alloc.ToInterpolationMap(), ""); env["DATABASE_NAME"] != target {
+					t.Fatal("env lost binding", env)
+				}
+			}
+		})
 	}
 }

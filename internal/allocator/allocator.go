@@ -458,7 +458,7 @@ func (al *Allocator) allocateMain(worktreePath, worktreeName, branch string) (*A
 		}
 		if policy != nil {
 			allocation.Branch = branch
-			if allocation.DatabaseAdapter != "sqlite" {
+			if allocation.DatabaseAdapter != "sqlite" && len(allocation.Databases) == 0 {
 				allocation.Databases = nil
 				allocation.ExtraKeys = nil
 				allocation.DatabaseAdapter = ""
@@ -566,7 +566,7 @@ func (al *Allocator) allocateNew(worktreePath, worktreeName, branch string) (*Al
 			RedisPrefix:     redisPrefix,
 		}
 		if policy != nil {
-			if allocation.DatabaseAdapter != "sqlite" {
+			if allocation.DatabaseAdapter != "sqlite" && len(allocation.Databases) == 0 {
 				allocation.Databases = nil
 				allocation.ExtraKeys = nil
 				allocation.DatabaseAdapter = ""
@@ -877,8 +877,8 @@ func ValidateManagedDevDatabaseBinding(pc *config.ProjectConfig, entry registry.
 	}
 	var expected []string
 	adapter := ""
-	if pc.DatabaseAdapter() == "sqlite" {
-		adapter = "sqlite"
+	if pc.DatabaseAdapter() == "sqlite" || pc.DatabaseTemplate() != "" {
+		adapter = pc.DatabaseAdapter()
 		expected = ExpectedDatabases(pc, filepath.Base(registry.GetString(entry, "worktree")), entry["main_worktree"] == true)
 	}
 	if registry.GetString(entry, "project") != pc.Project() || registry.GetString(entry, "database_adapter") != adapter || !slices.Equal(registry.ExtractDatabases(entry), expected) {

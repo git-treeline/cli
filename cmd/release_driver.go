@@ -112,12 +112,14 @@ func validateManagedDevRelease(op registry.ReleaseOperation) error {
 		if err := allocator.ValidateManagedDevDatabaseBinding(pc, allocation); err != nil {
 			return err
 		}
-		for _, name := range snapshot.Databases {
-			if err := devresources.ValidateSQLiteFile(op.Target.Path, name); err != nil {
-				return err
-			}
-			if _, err := os.Lstat(filepath.Join(op.Target.Path, name) + "-journal"); !os.IsNotExist(err) {
-				return errors.New("managed dev release SQLite journal unavailable for cleanup")
+		if pc.DatabaseAdapter() == "sqlite" {
+			for _, name := range snapshot.Databases {
+				if err := devresources.ValidateSQLiteFile(op.Target.Path, name); err != nil {
+					return err
+				}
+				if _, err := os.Lstat(filepath.Join(op.Target.Path, name) + "-journal"); !os.IsNotExist(err) {
+					return errors.New("managed dev release SQLite journal unavailable for cleanup")
+				}
 			}
 		}
 	} else if !os.IsNotExist(err) || remainingReleasePhase(op, registry.PhaseWorktree) {

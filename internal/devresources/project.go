@@ -8,7 +8,7 @@ import (
 	"github.com/git-treeline/cli/internal/config"
 )
 
-// ValidateProject admits HTTP, SQLite and contained file-copy configuration without running hooks
+// ValidateProject admits HTTP, SQLite, dedicated QA PostgreSQL and contained file-copy configuration without running hooks
 // or interpreting application commands. Callers validate filesystem containment.
 func ValidateProject(pc *config.ProjectConfig) error {
 	if pc == nil || pc.Validate() != nil || !identifier.MatchString(pc.Project()) {
@@ -26,6 +26,10 @@ func ValidateProject(pc *config.ProjectConfig) error {
 				return refusal
 			}
 			sqlite := database["adapter"] == "sqlite"
+			postgres := pc.DatabaseAdapter() == "postgresql" && pc.DatabaseTemplate() != ""
+			if postgres && validatePostgreSQLProject(pc) != nil {
+				return refusal
+			}
 			if sqlite && !validSQLiteName(pc.DatabaseTemplate()) {
 				return refusal
 			}
@@ -45,7 +49,11 @@ func ValidateProject(pc *config.ProjectConfig) error {
 						return refusal
 					}
 				case "template":
-					if !sqlite && entry != nil && entry != "" {
+					if !sqlite && !postgres && entry != nil && entry != "" {
+						return refusal
+					}
+				case "host", "port", "user":
+					if !postgres {
 						return refusal
 					}
 				default:

@@ -49,9 +49,11 @@ func validateManagedDevRuntime(dir string, allocation registry.Allocation, requi
 	if err := allocator.ValidateManagedDevDatabaseBinding(pc, allocation); err != nil {
 		return err
 	}
-	for _, name := range registry.ExtractDatabases(allocation) {
-		if err := devresources.ValidateSQLiteFile(dir, name); err != nil {
-			return err
+	if pc.DatabaseAdapter() == "sqlite" {
+		for _, name := range registry.ExtractDatabases(allocation) {
+			if err := devresources.ValidateSQLiteFile(dir, name); err != nil {
+				return err
+			}
 		}
 	}
 	branch := worktree.CurrentBranch(dir)

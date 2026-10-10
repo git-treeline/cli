@@ -48,3 +48,43 @@ func TestCheckedCleanupCapturesOnlyExplicitCoordinatesAndPrivateEnvironment(t *t
 		t.Fatal("unrelated sqlite connection rejected", err)
 	}
 }
+
+func TestCheckedPostgreSQLCloneAndDropStayOnExplicitConnection(t *testing.T) {
+	t.Setenv("GTL_HOME", t.TempDir())
+	args := []string{"-h", "127.0.0.1", "-p", "5432", "-U", "qa"}
+	adapter, err := checkedCleanupAdapter("postgresql", args, []string{"PATH=/usr/bin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pg := adapter.(*PostgreSQL)
+	var calls []cmdCall
+	pg.execRun = func(name string, args ...string) error {
+		calls = append(calls, cmdCall{name: name, args: append([]string(nil), args...)})
+		return nil
+	}
+	const template = "treeline_dev_host_migration_qa_template"
+	const target = template + "_qa_one"
+	if err := pg.Clone(template, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := pg.Drop(target); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 3 {
+		t.Fatal(calls)
+	}
+	for _, call := range calls {
+		if len(call.args) < 6 || !reflect.DeepEqual(call.args[:6], args) {
+			t.Fatal("connection changed", call)
+		}
+	}
+	if calls[0].name != "psql" || !strings.Contains(calls[0].args[len(calls[0].args)-1], "datname = '"+template+"'") {
+		t.Fatal("template session scope changed", calls[0])
+	}
+	if calls[1].name != "createdb" || !reflect.DeepEqual(calls[1].args[6:], []string{target, "--template", template}) {
+		t.Fatal("clone changed", calls[1])
+	}
+	if calls[2].name != "dropdb" || !reflect.DeepEqual(calls[2].args[6:], []string{"--if-exists", target}) {
+		t.Fatal("cleanup changed", calls[2])
+	}
+}

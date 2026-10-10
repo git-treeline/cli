@@ -2015,3 +2015,49 @@ func TestReuseOnlyAllocationRefusesReplacement(t *testing.T) {
 		})
 	}
 }
+
+func TestManagedDevPostgreSQLAllocationRetainsBinding(t *testing.T) {
+	for _, main := range []bool{false, true} {
+		t.Run(fmt.Sprint(main), func(t *testing.T) {
+			key := "host_migration_qa/feature"
+			if main {
+				key = "host_migration_qa"
+			}
+			al, reg := managedDevAllocator(t, key)
+			root := al.ProjectConfig.ProjectRoot
+			body := "project: host_migration_qa\ndatabase: {adapter: postgresql, template: treeline_dev_host_migration_qa_template, name: '{template}_{worktree}', host: 127.0.0.1, port: 5432, user: qa}\n"
+			if err := os.WriteFile(filepath.Join(root, config.ProjectConfigFile), []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			first, err := al.Allocate(root, filepath.Base(root), main, "feature")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "treeline_dev_host_migration_qa_template_fixture"
+			if main {
+				want = "treeline_dev_host_migration_qa_template"
+			}
+			if first.DatabaseAdapter != "postgresql" || !slices.Equal(first.Databases, []string{want}) {
+				t.Fatalf("allocation: %#v", first)
+			}
+			second, err := al.Allocate(root, filepath.Base(root), main, "feature")
+			if err != nil || !second.Reused || !slices.Equal(second.Databases, first.Databases) {
+				t.Fatalf("reuse: %#v %v", second, err)
+			}
+			before, err := os.ReadFile(reg.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, config.ProjectConfigFile), []byte(strings.Replace(body, "127.0.0.1", "remote.invalid", 1)), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := al.Allocate(root, filepath.Base(root), main, "feature"); err == nil {
+				t.Fatal("remote config admitted")
+			}
+			after, err := os.ReadFile(reg.Path)
+			if err != nil || !slices.Equal(before, after) {
+				t.Fatal("refusal mutated registry", err)
+			}
+		})
+	}
+}

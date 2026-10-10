@@ -552,6 +552,7 @@ func (s *Setup) revalidateManagedDevAllocation(alloc *allocator.Allocation) erro
 		alloc.MainWorktree != isMain || alloc.Worktree != s.WorktreePath ||
 		allocator.ValidateManagedDevDatabaseBinding(fresh, alloc.ToRegistryEntry()) != nil ||
 		fresh.DatabaseTemplate() != s.ProjectConfig.DatabaseTemplate() ||
+		!slices.Equal(fresh.DatabaseConnArgs(), s.ProjectConfig.DatabaseConnArgs()) ||
 		policy.ValidateAllocation(map[string]any(alloc.ToRegistryEntry())) != nil {
 		return fmt.Errorf("app-managed dev allocation or project changed before setup effects")
 	}
@@ -970,7 +971,11 @@ func (s *Setup) dropStaleExtraDatabases(entry registry.Allocation) {
 
 func (s *Setup) cloneDatabase(alloc *allocator.Allocation) error {
 	adapterName := s.ProjectConfig.DatabaseAdapter()
-	adapter, err := database.ForAdapter(adapterName, s.ProjectConfig.DatabaseConnArgs())
+	factory := database.ForAdapter
+	if devresources.Active() {
+		factory = database.ForCheckedCleanup
+	}
+	adapter, err := factory(adapterName, s.ProjectConfig.DatabaseConnArgs())
 	if err != nil {
 		return err
 	}
@@ -1030,7 +1035,7 @@ func (s *Setup) cloneDatabaseWith(adapter database.Adapter, adapterName string, 
 	if boundaryErr := validate(); boundaryErr != nil {
 		return boundaryErr
 	}
-	if managed && errors.Is(err, os.ErrPermission) {
+	if managed && err != nil && (adapterName == "postgresql" || errors.Is(err, os.ErrPermission)) {
 		return err
 	}
 	if err != nil {
@@ -1050,13 +1055,16 @@ func (s *Setup) cloneDatabaseWith(adapter database.Adapter, adapterName string, 
 	if boundaryErr := validate(); boundaryErr != nil {
 		return boundaryErr
 	}
-	if managed && errors.Is(err, os.ErrPermission) {
+	if managed && err != nil && (adapterName == "postgresql" || errors.Is(err, os.ErrPermission)) {
 		return err
 	}
 	if err != nil {
 		return s.degradeDatabase(primary, "absent", fmt.Sprintf("cannot check for template database %s: %v", s.ProjectConfig.DatabaseTemplate(), err))
 	}
 	if !templateExists {
+		if managed && adapterName == "postgresql" {
+			return fmt.Errorf("app-managed dev PostgreSQL template must already exist")
+		}
 		if managed && alloc.MainWorktree {
 			return fmt.Errorf("app-managed dev SQLite main template is missing; setup cannot create the clone source")
 		}
@@ -1082,7 +1090,7 @@ func (s *Setup) cloneDatabaseWith(adapter database.Adapter, adapterName string, 
 	if boundaryErr := validate(); boundaryErr != nil {
 		return boundaryErr
 	}
-	if managed && errors.Is(err, os.ErrPermission) {
+	if managed && err != nil && (adapterName == "postgresql" || errors.Is(err, os.ErrPermission)) {
 		return err
 	}
 	if err != nil {

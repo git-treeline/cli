@@ -147,6 +147,9 @@ func Check() (*Policy, error) {
 		if !ok {
 			return nil, refusal
 		}
+		if normalAllocationUsesPostgreSQLNamespace(allocation) {
+			return nil, refusal
+		}
 		ports, err := allocationPorts(allocation)
 		if err != nil {
 			return nil, refusal
@@ -212,7 +215,7 @@ func (p *Policy) ValidateAllocation(a map[string]any) error {
 	if value, present := a["database_adapter"]; present && value != nil {
 		var ok bool
 		adapter, ok = value.(string)
-		if !ok || adapter != "" && adapter != "sqlite" {
+		if !ok || adapter != "" && adapter != "sqlite" && adapter != "postgresql" {
 			return refusal
 		}
 	}
@@ -243,6 +246,11 @@ func (p *Policy) ValidateAllocation(a map[string]any) error {
 	}
 	if adapter == "sqlite" {
 		if len(databases) != 1 || databases[0] != primary || !validSQLiteName(primary) {
+			return refusal
+		}
+	} else if adapter == "postgresql" {
+		worktree, _ := a["worktree"].(string)
+		if len(databases) != 1 || databases[0] != primary || !validPostgreSQLAllocation(project, worktree, primary, main) {
 			return refusal
 		}
 	} else if primary != "" || len(databases) != 0 {
