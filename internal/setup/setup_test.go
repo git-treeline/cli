@@ -402,6 +402,14 @@ copy_files:
 	}
 }
 
+func TestCopyFilesWithNoEntriesDoesNotRequireMainRepo(t *testing.T) {
+	s, _, _ := testSetup(t, "project: test\n")
+	s.MainRepo = filepath.Join(t.TempDir(), "missing")
+	if err := s.copyFiles(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCopyFiles_CreatesSubdirs(t *testing.T) {
 	s, mainRepo, worktree := testSetup(t, `
 project: test
@@ -517,6 +525,205 @@ copy_files:
 
 	if err := s.copyFiles(); err == nil {
 		t.Fatal("expected non-file copy source error")
+	}
+}
+
+func TestRunRefreshOnlyRejectsTraversalBeforeFileEffects(t *testing.T) {
+	s, _, worktree := testSetup(t, `
+project: test
+env_file: ../outside.env
+env:
+  ATTACKER_VALUE: injected
+`)
+	s.Options.RefreshOnly = true
+	outside := filepath.Join(filepath.Dir(worktree), "outside.env")
+	if err := os.WriteFile(outside, []byte("ORIGINAL=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Run(); err == nil || !strings.Contains(err.Error(), "env_file.path") {
+		t.Fatalf("Run() error = %v, want unsafe env_file.path", err)
+	}
+	data, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "ORIGINAL=1\n" {
+		t.Fatalf("outside file changed during refresh: %q", got)
+	}
+}
+
+func TestRefreshOnlyRejectsEnvTargetThroughOutsideSymlink(t *testing.T) {
+	s, _, worktree := testSetup(t, `
+project: test
+env_file: linked/.env
+env:
+  ATTACKER_VALUE: injected
+`)
+	s.Options.RefreshOnly = true
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(worktree, "linked")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := s.runPostAllocation(&allocator.Allocation{Port: 3010}, "redis://localhost:6379")
+	if err == nil || !strings.Contains(err.Error(), "env_file.path") {
+		t.Fatalf("runPostAllocation() error = %v, want outside symlink error", err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, ".env")); !os.IsNotExist(err) {
+		t.Fatalf("outside env file was created: %v", err)
+	}
+}
+
+func TestRefreshOnlyRejectsCopyDestinationThroughOutsideSymlink(t *testing.T) {
+	s, mainRepo, worktree := testSetup(t, `
+project: test
+copy_files:
+  - config/master.key
+`)
+	s.Options.RefreshOnly = true
+	if err := os.MkdirAll(filepath.Join(mainRepo, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mainRepo, "config", "master.key"), []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(worktree, "config")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := s.runPostAllocation(&allocator.Allocation{Port: 3010}, "redis://localhost:6379")
+	if err == nil || !strings.Contains(err.Error(), "copy_files destination") {
+		t.Fatalf("runPostAllocation() error = %v, want outside symlink error", err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "master.key")); !os.IsNotExist(err) {
+		t.Fatalf("outside copy destination was created: %v", err)
+	}
+}
+
+func TestRefreshOnlyRejectsCopySourceThroughOutsideSymlink(t *testing.T) {
+	s, mainRepo, worktree := testSetup(t, `
+project: test
+copy_files:
+  - config/master.key
+`)
+	s.Options.RefreshOnly = true
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "master.key"), []byte("outside-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(mainRepo, "config")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := s.runPostAllocation(&allocator.Allocation{Port: 3010}, "redis://localhost:6379")
+	if err == nil || !strings.Contains(err.Error(), "copy_files source") {
+		t.Fatalf("runPostAllocation() error = %v, want outside symlink error", err)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, "config", "master.key")); !os.IsNotExist(err) {
+		t.Fatalf("outside copy source was read into worktree: %v", err)
+	}
+}
+
+func TestRefreshOnlyRejectsEnvSeedThroughOutsideSymlink(t *testing.T) {
+	s, mainRepo, worktree := testSetup(t, `
+project: test
+env_file:
+  path: .env.local
+  seed_from: linked.env
+`)
+	s.Options.RefreshOnly = true
+	secret := filepath.Join(t.TempDir(), "secret.env")
+	if err := os.WriteFile(secret, []byte("SECRET=outside\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(mainRepo, "linked.env")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := s.runPostAllocation(&allocator.Allocation{Port: 3010}, "redis://localhost:6379")
+	if err == nil || !strings.Contains(err.Error(), "env_file.seed_from") {
+		t.Fatalf("runPostAllocation() error = %v, want outside symlink error", err)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, ".env.local")); !os.IsNotExist(err) {
+		t.Fatalf("env file was seeded from outside root: %v", err)
+	}
+}
+
+func TestRefreshOnlyRejectsFallbackEnvThroughOutsideSymlink(t *testing.T) {
+	s, mainRepo, worktree := testSetup(t, `
+project: test
+env_file:
+  path: .env.local
+  seed_from: missing.env
+`)
+	s.Options.RefreshOnly = true
+	secret := filepath.Join(t.TempDir(), "secret.env")
+	if err := os.WriteFile(secret, []byte("SECRET=outside\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(mainRepo, ".env")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := s.runPostAllocation(&allocator.Allocation{Port: 3010}, "redis://localhost:6379")
+	if err == nil || !strings.Contains(err.Error(), "env_file fallback") {
+		t.Fatalf("runPostAllocation() error = %v, want unsafe fallback error", err)
+	}
+	if _, err := os.Stat(filepath.Join(worktree, ".env.local")); !os.IsNotExist(err) {
+		t.Fatalf("env file was seeded from outside fallback: %v", err)
+	}
+}
+
+func TestOpenFileForReadRejectsOutsideSymlink(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.env"), []byte("SECRET=outside\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "linked")); err != nil {
+		t.Fatal(err)
+	}
+
+	file, err := OpenFileForRead(root, "linked/secret.env", "env_file.path")
+	if err == nil {
+		_ = file.Close()
+		t.Fatal("OpenFileForRead() opened a file outside its root")
+	}
+	if !strings.Contains(err.Error(), "env_file.path") {
+		t.Fatalf("OpenFileForRead() error = %v, want field name", err)
+	}
+}
+
+func TestAtomicWriteRootAllowsSymlinkThatStaysInsideRoot(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realDir, filepath.Join(root, "linked")); err != nil {
+		t.Fatal(err)
+	}
+
+	rootHandle, err := openRoot(root, "test root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rootHandle.Close() }()
+	name, err := containedRootName(rootHandle, "linked/.env", "env_file.path", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteRoot(rootHandle, name, []byte("INSIDE=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(realDir, ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); got != "INSIDE=1\n" {
+		t.Fatalf("in-root symlink content = %q", got)
 	}
 }
 
