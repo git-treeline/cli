@@ -144,11 +144,15 @@ func ensureWorktreeAllocation(wtPath, mainRepo string, uc *config.UserConfig, pr
 // invisible to prune). Shared by 'gtl new' (both the new-branch and
 // existing-branch paths) and 'gtl claim' (its adopt path).
 func runSetupWithRollback(cmd *cobra.Command, wtPath, mainRepo string, uc *config.UserConfig, progress io.Writer, strictDB bool, locks *registry.LifecycleLocks) (*allocator.Allocation, error) {
-	allocation, _, err := runSetupWithRollbackOutcome(cmd, wtPath, mainRepo, uc, progress, strictDB, locks)
+	allocation, _, err := runSetupWithRollbackPolicy(cmd, wtPath, mainRepo, uc, progress, strictDB, locks, true)
 	return allocation, err
 }
 
 func runSetupWithRollbackOutcome(cmd *cobra.Command, wtPath, mainRepo string, uc *config.UserConfig, progress io.Writer, strictDB bool, locks *registry.LifecycleLocks) (*allocator.Allocation, string, error) {
+	return runSetupWithRollbackPolicy(cmd, wtPath, mainRepo, uc, progress, strictDB, locks, false)
+}
+
+func runSetupWithRollbackPolicy(cmd *cobra.Command, wtPath, mainRepo string, uc *config.UserConfig, progress io.Writer, strictDB bool, locks *registry.LifecycleLocks, allowLegacy bool) (*allocator.Allocation, string, error) {
 	_, _ = fmt.Fprintln(progress, style.Actionf("Worktree created at %s", wtPath))
 	_, _ = fmt.Fprintln(progress, style.Actionf("Running setup..."))
 
@@ -170,7 +174,17 @@ func runSetupWithRollbackOutcome(cmd *cobra.Command, wtPath, mainRepo string, uc
 	if existing != nil {
 		return nil, "unknown", cliErr(cmd, errSetupFailed(fmt.Errorf("fresh creation target is already allocated")))
 	}
-	s.Allocator.FreshTarget, s.Allocator.FreshLocks = &target, locks
+	tracked := true
+	if allowLegacy && !devresources.Active() {
+		snapshot, err := s.Registry.SnapshotStrict()
+		if err != nil {
+			return nil, "unknown", cliErr(cmd, errSetupFailed(err))
+		}
+		tracked = snapshot.Version >= 4
+	}
+	if tracked {
+		s.Allocator.FreshTarget, s.Allocator.FreshLocks = &target, locks
+	}
 	alloc, err := s.Run()
 	if err != nil {
 		var sce *setup.SetupCommandError

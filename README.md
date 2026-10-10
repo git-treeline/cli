@@ -319,10 +319,14 @@ Tracked execution requires registry schema 4 and a fresh supported worktree
 creation/start sequence. Legacy ownership is not inferred from a missing process
 or socket; structured release refuses unknown runtime ownership. Mixed old/new
 lifecycle writers and automatic live migration are not supported. Host rollout
-must require a compatible CLI before enabling this contract.
+must require a compatible CLI before enabling this contract. Ordinary `new`,
+`review`, and `claim` continue to work with existing legacy registries without
+opting those allocations into tracked runtime ownership. Do not run an older CLI
+against a registry enrolled in tracked execution: older release commands can run
+hooks or database cleanup before detecting an unsupported registry version.
 
 App-managed development hosts (`TREELINE_MANAGED=app` and
-`TREELINE_CHANNEL=dev`) currently allow inspection only, using the canonical
+`TREELINE_CHANNEL=dev`) support a bounded fixture lifecycle using the canonical
 `GTL_HOME=$HOME/.treeline-dev/gtl`. Existing state directories must be owned by
 the current user: `.treeline-dev` must not be group/world writable, and `gtl`
 must be private. Neither directory nor its registry/config files may redirect
@@ -330,13 +334,23 @@ through symlinks. Missing state is not created by inspection.
 
 Supported reads are `status --json`, `related --json`, `env`/`env show`, `routes`
 and `doctor` with `--json --read-only`, `claim --inspect-json --operation-id UUID`,
-and `release status UUID`, plus help/version. Status does not reap processes,
-create process trackers, or update stored branches. Other commands, including
-release inspection (which acquires filesystem locks), fail before effects with
-an explicit unavailable-resources error. This is interim containment, not working
-dev provisioning: separate files do not isolate database, Redis, port, router,
-hosts-file, or tunnel resources. Normal CLI use, including a standalone
-`GTL_HOME` override, retains its existing behavior.
+`release status UUID`, and `provision --dry-run`, plus help/version. Status does
+not reap processes, create process trackers, or update stored branches.
+
+With the resource contract configured, `setup`, `new`, `claim`, `start`, `stop`,
+`restart`, and `release inspect`/`start`/`resume` are admitted after resource and
+ownership checks. Repositories, worktrees, Git metadata, and copied fixtures
+must stay within `$HOME/.treeline-dev/workspaces`. Ports come only from four
+explicitly reserved ten-port blocks, 42000–42039, with project/branch mappings
+and no overlap with normal allocations. Supported resources are HTTP services,
+contained SQLite files, the loopback PostgreSQL QA template
+`treeline_dev_host_migration_qa_template` and its worktree-suffixed databases,
+and Redis prefixes `host_migration_qa:<worktree-name>` on
+`redis://localhost:6379`. PostgreSQL and Redis require the `host_migration_qa`
+project. Hooks, arbitrary setup commands, Redis database allocation, shared
+router/hosts-file/tunnel changes, and resources outside this contract remain
+unavailable. Normal CLI use, including a standalone `GTL_HOME` override, retains
+its existing behavior.
 
 ### 14. Refresh after config changes
 

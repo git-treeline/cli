@@ -3,9 +3,12 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -13,6 +16,7 @@ import (
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/github"
 	"github.com/git-treeline/cli/internal/registry"
+	"github.com/google/uuid"
 )
 
 func creationFixture(t *testing.T) (string, string) {
@@ -363,6 +367,127 @@ func TestCreationLifecycleLocalCreationSuppressesOnlyAutomaticSetup(t *testing.T
 				}
 			})
 		}
+	}
+}
+
+func TestCreationLifecycleExistingRegistryCompatibility(t *testing.T) {
+	for _, version := range []int{2, 3, 4} {
+		for _, command := range []string{"new", "claim", "review"} {
+			t.Run(fmt.Sprintf("schema-%d/%s", version, command), func(t *testing.T) {
+				main, destination := creationFixture(t)
+				t.Setenv("TREELINE_MANAGED", "")
+				t.Setenv("TREELINE_CHANNEL", "")
+				acquireCommandLifecycleLocks = func(ctx context.Context, paths []string) (*registry.LifecycleLocks, error) {
+					if ctx == nil {
+						ctx = context.Background()
+					}
+					return registry.AcquireLifecycleLocks(ctx, paths)
+				}
+				newNoSetup, claimNoSetup, reviewNoSetup = false, false, false
+				if command != "new" {
+					runGit(t, main, "branch", "feature")
+					runGit(t, main, "remote", "add", "origin", main)
+				}
+				reg := registry.New("")
+				existing := registry.Allocation{
+					"worktree": main, "project": "lifecycle_fixture", "branch": "main", "main_worktree": true,
+					"port": 42100, "ports": []int{42100}, "database": "retained_database", "redis_db": 7,
+				}
+				if version >= 3 {
+					existing["allocation_generation"] = uuid.NewString()
+				}
+				if version == 4 {
+					existing["runtime_binding"] = registry.RuntimeBinding{Kind: "unknown"}
+				}
+				raw, err := json.Marshal(registry.RegistryData{Version: version, Allocations: []registry.Allocation{existing}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeIntrospectionFile(t, reg.Path, string(raw))
+				before, err := reg.FindForRelease(main)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := runCreationCommand(command); err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range []string{"setup-hook-ran", "setup-command-ran", config.LoadProjectConfigReadOnly(destination).EnvFileTarget()} {
+					if _, err := os.Stat(filepath.Join(destination, name)); err != nil {
+						t.Fatalf("creation did not complete %s: %v", name, err)
+					}
+				}
+				allocation, err := reg.FindForRelease(destination)
+				if err != nil || allocation == nil || slices.Contains(registry.ExtractPorts(allocation), 42100) {
+					t.Fatalf("new allocation missing or reuses existing port: %v: %v", allocation, err)
+				}
+				binding, err := registry.AllocationRuntimeBinding(allocation)
+				wantBinding := "unknown"
+				if version == 4 {
+					wantBinding = "never_started"
+				}
+				if err != nil || binding.Kind != wantBinding {
+					t.Fatalf("runtime binding = %+v, want %s: %v", binding, wantBinding, err)
+				}
+				if err := runReleaseSingle([]string{destination}); err != nil {
+					t.Fatal(err)
+				}
+				if allocation, err := reg.FindForRelease(destination); err != nil || allocation != nil {
+					t.Fatalf("release retained allocation: %v: %v", allocation, err)
+				}
+				if _, err := os.Stat(filepath.Join(destination, "release-hook-ran")); err != nil {
+					t.Fatalf("release hook did not run: %v", err)
+				}
+				after, err := reg.FindForRelease(main)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if version == 2 {
+					delete(after, "allocation_generation")
+				}
+				if !reflect.DeepEqual(before, after) {
+					t.Fatalf("existing resources changed: before=%v after=%v", before, after)
+				}
+				snapshot, err := reg.SnapshotStrict()
+				wantVersion := max(version, 3)
+				if err != nil || snapshot.Version != wantVersion {
+					t.Fatalf("registry version = %d, want %d: %v", snapshot.Version, wantVersion, err)
+				}
+			})
+		}
+	}
+}
+
+func TestCreationLifecycleHostClaimKeepsLegacyEnrollmentStrict(t *testing.T) {
+	for _, version := range []int{2, 3} {
+		t.Run(fmt.Sprintf("schema-%d", version), func(t *testing.T) {
+			main, destination := creationFixture(t)
+			t.Setenv("TREELINE_MANAGED", "")
+			t.Setenv("TREELINE_CHANNEL", "")
+			reg := registry.New("")
+			writeIntrospectionFile(t, reg.Path, fmt.Sprintf(`{"version":%d,"allocations":[]}`, version))
+			runGit(t, main, "worktree", "add", "-b", "feature", destination)
+			locks, err := registry.AcquireLifecycleLocks(context.Background(), []string{main, destination})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := locks.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			request := hostClaimRequest{Source: registry.TargetIdentity{Path: main}, Target: hostClaimTarget{Path: destination}}
+			outcome, err := hostClaimSetup(claimCmd, request, config.LoadUserConfig(""), locks)
+			if err == nil || !strings.Contains(err.Error(), "fresh runtime enrollment requires schema 4") || outcome != "rolled_back" {
+				t.Fatalf("host claim adopted legacy registry: outcome=%s err=%v", outcome, err)
+			}
+			if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("refused host claim retained worktree: %v", err)
+			}
+			snapshot, err := reg.SnapshotStrict()
+			if err != nil || snapshot.Version != 3 || len(snapshot.Allocations) != 0 {
+				t.Fatalf("host claim enrolled legacy state: %+v: %v", snapshot, err)
+			}
+		})
 	}
 }
 
