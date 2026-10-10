@@ -177,6 +177,8 @@ func pfReloadDaemonInstallFragment(tmpPlistPath, tmpScriptPath string) string {
 	scriptDir := "/Library/Application Support/dev.git-treeline"
 	return fmt.Sprintf(
 		"/bin/mkdir -p %s && "+
+			"/usr/sbin/chown root:wheel %s && "+
+			"/bin/chmod 755 %s && "+
 			"/bin/cp %s %s && "+
 			"/usr/sbin/chown root:wheel %s && "+
 			"/bin/chmod 755 %s && "+
@@ -185,6 +187,8 @@ func pfReloadDaemonInstallFragment(tmpPlistPath, tmpScriptPath string) string {
 			"/bin/chmod 644 %s && "+
 			"(/bin/launchctl bootout system/%s 2>/dev/null || true) && "+
 			"/bin/launchctl bootstrap system %s",
+		q(scriptDir),
+		q(scriptDir),
 		q(scriptDir),
 		q(tmpScriptPath), q(pfEnsureScriptPath),
 		q(pfEnsureScriptPath),

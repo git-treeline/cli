@@ -1,9 +1,14 @@
 package service
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/git-treeline/cli/internal/platform"
 )
 
 func TestPfReloadDaemonInstallFragment(t *testing.T) {
@@ -21,6 +26,8 @@ func TestPfReloadDaemonInstallFragment(t *testing.T) {
 	// best-effort bootout, and then bootstrap.
 	for _, want := range []string{
 		"/bin/mkdir -p '/Library/Application Support/dev.git-treeline'",
+		"/usr/sbin/chown root:wheel '/Library/Application Support/dev.git-treeline'",
+		"/bin/chmod 755 '/Library/Application Support/dev.git-treeline'",
 		"/bin/cp '/tmp/treeline-pf-ensure-abc.sh' '" + pfEnsureScriptPath + "'",
 		"/usr/sbin/chown root:wheel '" + pfEnsureScriptPath + "'",
 		"/bin/chmod 755 '" + pfEnsureScriptPath + "'",
@@ -105,5 +112,67 @@ func TestPfEnsureScript(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q\nscript: %s", want, script)
 		}
+	}
+}
+
+func TestPfReloadDaemonInstallPermissions(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("pf reload daemon paths only resolve on darwin")
+	}
+	for _, existing := range []bool{false, true} {
+		name := "fresh"
+		if existing {
+			name = "repair-private-directory"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			installedDir := filepath.Join(dir, "daemon")
+			plistPath := filepath.Join(dir, "daemon.plist")
+			if existing {
+				if err := os.Mkdir(installedDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Execute the real staging and install fragment in scratch paths.
+			// Ownership and launchd operations are harmless stubs, without sudo.
+			body := strings.NewReplacer(
+				"/Library/Application Support/dev.git-treeline", installedDir,
+				PfReloadDaemonPath(), plistPath,
+				"/usr/sbin/chown", "/usr/bin/true",
+				"/bin/launchctl", "/usr/bin/true",
+			).Replace(pfReloadDaemonInstallFragment("daemon.plist", "ensure.sh"))
+			stageMode := filepath.Join(dir, "stage-mode")
+			body += "\n/usr/bin/stat -f '%Lp' \"$stage\" > " + platform.ShellQuote(stageMode)
+			script, err := platform.StagePrivilegedFiles(pfDaemonFiles(), body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("/bin/sh", "-s")
+			cmd.Stdin = strings.NewReader(script)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("install fragment: %v: %s", err, output)
+			}
+			for path, want := range map[string]os.FileMode{
+				installedDir: 0o755,
+				filepath.Join(installedDir, "pf-ensure.sh"): 0o755,
+				plistPath: 0o644,
+			} {
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := info.Mode().Perm(); got != want {
+					t.Errorf("mode of %s = %04o, want %04o", path, got, want)
+				}
+			}
+			data, err := os.ReadFile(filepath.Join(installedDir, "pf-ensure.sh"))
+			if err != nil || string(data) != pfEnsureScript {
+				t.Fatalf("installed script cannot be checked: %v", err)
+			}
+			data, err = os.ReadFile(stageMode)
+			if err != nil || strings.TrimSpace(string(data)) != "700" {
+				t.Fatalf("staging must remain private: mode=%q, error=%v", data, err)
+			}
+		})
 	}
 }
