@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 const (
@@ -14,53 +16,40 @@ const (
 	borderChrome     = 2 // left + right border
 	statusBarHeight  = 2
 	minContentHeight = 4
+	compactWidth     = 80
 )
 
 func (m Model) View() tea.View {
 	if m.quitting {
 		return tea.NewView("")
 	}
+	var content string
 	if !m.ready {
-		v := tea.NewView(panelTitle.Render("  loading dashboard..."))
-		v.AltScreen = true
-		return v
-	}
-
-	contentHeight := m.height - statusBarHeight - borderChrome
-	if contentHeight < minContentHeight {
-		contentHeight = minContentHeight
-	}
-
-	leftWidth := int(float64(m.width) * listPanelRatio)
-	rightWidth := m.width - leftWidth
-	innerLeft := leftWidth - borderChrome
-	innerRight := rightWidth - borderChrome
-	if innerLeft < 10 {
-		innerLeft = 10
-	}
-	if innerRight < 10 {
-		innerRight = 10
-	}
-
-	left := m.renderListPanel(innerLeft, contentHeight)
-	right := m.renderDetailPanel(innerRight, contentHeight)
-
-	leftBorder := panelBorder
-	rightBorder := panelBorder
-	if m.focus == paneList {
-		leftBorder = panelBorderActive
+		content = panelTitle.Render("loading dashboard...")
 	} else {
-		rightBorder = panelBorderActive
+		height := max(0, m.height-statusBarHeight-borderChrome)
+		if m.width < compactWidth {
+			width := max(0, m.width-borderChrome)
+			panel := m.renderListPanel(width, height)
+			if m.focus == paneDetail {
+				panel = m.renderDetailPanel(width, height)
+			}
+			content = panelBorderActive.Width(width + borderChrome).Height(height + borderChrome).Render(panel)
+		} else {
+			leftWidth := int(float64(m.width)*listPanelRatio) - borderChrome
+			rightWidth := m.detailPanelWidth()
+			leftBorder, rightBorder := panelBorder, panelBorder
+			if m.focus == paneList {
+				leftBorder = panelBorderActive
+			} else {
+				rightBorder = panelBorderActive
+			}
+			left := leftBorder.Width(leftWidth + borderChrome).Height(height + borderChrome).Render(m.renderListPanel(leftWidth, height))
+			right := rightBorder.Width(rightWidth + borderChrome).Height(height + borderChrome).Render(m.renderDetailPanel(rightWidth, height))
+			content = lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+		}
+		content = lipgloss.JoinVertical(lipgloss.Left, content, m.renderStatusBar(m.width))
 	}
-
-	leftBox := leftBorder.Width(innerLeft).Height(contentHeight).Render(left)
-	rightBox := rightBorder.Width(innerRight).Height(contentHeight).Render(right)
-
-	panels := lipgloss.JoinHorizontal(lipgloss.Top, leftBox, rightBox)
-	bar := m.renderStatusBar(m.width)
-
-	content := lipgloss.JoinVertical(lipgloss.Left, panels, bar)
-
 	if m.showHelp {
 		content = m.renderHelpOverlay()
 	}
@@ -70,8 +59,7 @@ func (m Model) View() tea.View {
 	if m.inputMode != "" {
 		content = m.renderInputOverlay()
 	}
-
-	v := tea.NewView(content)
+	v := tea.NewView(clipBlock(content, m.width, m.height))
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
 	return v
@@ -80,48 +68,35 @@ func (m Model) View() tea.View {
 // --- Left panel: worktree list ---
 
 func (m *Model) renderListPanel(width, height int) string {
-	var b strings.Builder
-	title := panelTitle.Render("WORKTREES")
+	title := "WORKTREES"
 	if m.filterMode {
-		title = panelTitle.Render(fmt.Sprintf("WORKTREES (/%s▌)", m.filterText))
+		title += fmt.Sprintf(" (/%s▌)", m.filterText)
 	} else if m.filterText != "" {
-		title = panelTitle.Render(fmt.Sprintf("WORKTREES [%s]", m.filterText))
+		title += fmt.Sprintf(" [%s]", m.filterText)
 	}
-	b.WriteString(title)
-	b.WriteString("\n")
-
-	visibleRows := height - 1 // subtract title line
-	rendered := 0
-
-	for i := m.scrollOffset; i < len(m.flatList) && rendered < visibleRows; i++ {
+	lines := []string{panelTitle.Render(truncate(title, width-1))}
+	if len(m.flatList) == 0 {
+		lines = append(lines, "", " No worktrees found.")
+	}
+	for i := m.scrollOffset; i < len(m.flatList) && len(lines) < height; i++ {
 		entry := m.flatList[i]
 		if entry.projectHeader {
-			b.WriteString("\n")
-			b.WriteString(projectHeader.Render(truncate(entry.project, width)))
-			b.WriteString("\n")
-			rendered += 2
+			lines = append(lines, "", projectHeader.Render(truncate(entry.project, width)))
 			continue
 		}
 		wt := entry.wt
-		dot := statusDot(wt)
-		port := portStyle.Render(fmt.Sprintf(":%d", primaryPort(wt)))
-		linkBadge := ""
+		prefix := fmt.Sprintf("  %s %s ", statusDot(wt), portStyle.Render(fmt.Sprintf(":%d", primaryPort(wt))))
+		badge := ""
 		if len(wt.Links) > 0 {
-			linkBadge = " " + linkIndicatorStyle.Render("⇄")
+			badge = " " + linkIndicatorStyle.Render("⇄")
 		}
-		label := truncate(wt.Branch, width-10)
-		line := fmt.Sprintf("  %s %s %s%s", dot, port, label, linkBadge)
-
+		line := prefix + truncate(wt.Branch, width-lipgloss.Width(prefix)-lipgloss.Width(badge)) + badge
 		if i == m.cursor {
-			b.WriteString(selectedRow.Render(line))
-		} else {
-			b.WriteString(normalRow.Render(line))
+			line = selectedRow.Render(line)
 		}
-		b.WriteString("\n")
-		rendered++
+		lines = append(lines, line)
 	}
-
-	return b.String()
+	return clipBlock(strings.Join(lines, "\n"), width, height)
 }
 
 func statusDot(wt *WorktreeStatus) string {
@@ -143,64 +118,151 @@ func primaryPort(wt *WorktreeStatus) int {
 
 // --- Right panel: detail view ---
 
+func (m Model) detailPanelWidth() int {
+	if m.width < compactWidth {
+		return max(0, m.width-borderChrome)
+	}
+	return max(0, m.width-int(float64(m.width)*listPanelRatio)-borderChrome)
+}
+
+func (m Model) detailViewportHeight() int {
+	return max(0, m.height-statusBarHeight-borderChrome-4)
+}
+
+func (m Model) detailLineCount(width int) int {
+	return len(m.detailLines(width))
+}
+
 func (m *Model) renderDetailPanel(width, height int) string {
+	title := "DETAIL"
+	if wt := m.selectedWorktree(); wt != nil {
+		title = wt.Project + " / " + wt.Branch
+	}
+	if m.detailTab == tabActivity {
+		title = "LAST OPERATION"
+	}
+	tabs := []string{"1 Overview", "2 Health", "3 Activity"}
+	if width < 34 {
+		tabs = []string{"1 Info", "2 Health", "3 Act"}
+	}
+	for i := range tabs {
+		if detailTab(i) == m.detailTab {
+			tabs[i] = selectedRow.Render(tabs[i])
+		} else {
+			tabs[i] = helpDescStyle.Render(tabs[i])
+		}
+	}
+	lines := []string{panelTitle.Render(truncate(title, width-1)), strings.Join(tabs, "  "), ""}
+	body := m.detailLines(width)
+	visible := max(0, height-4)
+	start := min(max(0, m.detailScroll), max(0, len(body)-visible))
+	end := min(len(body), start+visible)
+	lines = append(lines, body[start:end]...)
+	for len(lines) < height-1 {
+		lines = append(lines, "")
+	}
+	footer := "Tab: list · h: check health"
+	if len(body) > visible && visible > 0 {
+		footer = fmt.Sprintf("%d–%d/%d · j/k: scroll · Tab: list", start+1, end, len(body))
+	}
+	lines = append(lines, helpDescStyle.Render(footer))
+	return clipBlock(strings.Join(lines, "\n"), width, height)
+}
+
+func (m Model) detailLines(width int) []string {
+	if width <= 0 {
+		return nil
+	}
+	var body string
+	switch m.detailTab {
+	case tabHealth:
+		wt := m.selectedWorktree()
+		if wt == nil {
+			body = "Select a worktree to check its health."
+		} else if report, ok := m.health[wt.WorktreePath]; ok {
+			body = "Health · " + wt.Branch + "\n"
+			if report.stale {
+				body += "Changed since this check. Press h to recheck.\n"
+			}
+			if report.err != nil {
+				body += statusErrorStyle.Render("Needs attention: "+plainOutput(report.err.Error())) + "\n"
+			}
+			body += "\n" + plainOutput(report.output)
+			if strings.TrimSpace(report.output) == "" && report.err == nil {
+				body += "Health check completed without output."
+			}
+			body += "\n\nPress h to run doctor again."
+		} else {
+			body = "No health check yet.\n\nPress h to run doctor for this worktree.\nThe report includes checks and recovery steps."
+		}
+		if m.operation != nil && m.operation.running && wt != nil && m.operation.path == wt.WorktreePath {
+			body = "Running: " + m.operation.name + "\n\n" + body
+		}
+	case tabActivity:
+		if op := m.operation; op != nil {
+			state := "Completed"
+			if op.running {
+				state = "Running"
+			} else if op.err != nil {
+				state = "Failed"
+			}
+			body = state + " · " + op.name + "\nTarget: " + op.branch + "\n" + op.path + "\n"
+			if op.err != nil {
+				body += "\n" + statusErrorStyle.Render(plainOutput(op.err.Error())) + "\n"
+			}
+			if strings.TrimSpace(op.output) != "" {
+				body += "\n" + plainOutput(op.output)
+			} else if op.running {
+				body += "\nWaiting for command output…"
+			} else if op.err == nil {
+				body += "\nCommand completed successfully."
+			}
+		} else {
+			body = "No operations yet.\n\nStart, restart, sync env, or check health.\nThe latest operation and its output stay here until the next operation."
+		}
+	default:
+		body = m.overviewContent()
+	}
+	return strings.Split(ansi.Hardwrap(body, width, true), "\n")
+}
+
+func (m Model) overviewContent() string {
 	wt := m.selectedWorktree()
 	if wt == nil {
-		return panelTitle.Render("DETAIL") + "\n\n" +
-			detailValue.Foreground(dimmed).Render("  Select a worktree")
+		return "Select a worktree."
 	}
-
-	var b strings.Builder
-	header := fmt.Sprintf("%s / %s", wt.Project, wt.Branch)
-	b.WriteString(panelTitle.Render(truncate(header, width)))
-	b.WriteString("\n\n")
-
-	rows := []struct{ label, value string }{
-		{"Port", portsString(wt.Ports)},
-	}
-
+	rows := []struct{ label, value string }{{"Port", portsString(wt.Ports)}}
 	if wt.RouterURL != "" {
-		rows = append(rows, struct{ label, value string }{"URL", truncate(wt.RouterURL, width-16)})
+		rows = append(rows, struct{ label, value string }{"URL", wt.RouterURL})
 	}
 	if wt.TunnelURL != "" {
-		rows = append(rows, struct{ label, value string }{"Tunnel", truncate(wt.TunnelURL, width-16)})
+		rows = append(rows, struct{ label, value string }{"Tunnel", wt.TunnelURL})
 	}
-
 	rows = append(rows,
 		struct{ label, value string }{"Database", valueOrDash(wt.Database)},
 		struct{ label, value string }{"Redis", redisDisplay(wt)},
 		struct{ label, value string }{"Supervisor", supervisorDisplay(wt)},
 		struct{ label, value string }{"Listening", boolDisplay(wt.Listening)},
 		struct{ label, value string }{"Env file", valueOrDash(wt.EnvFile)},
-		struct{ label, value string }{"Worktree", truncate(wt.WorktreePath, width-16)},
+		struct{ label, value string }{"Worktree", wt.WorktreePath},
 	)
-
+	var lines []string
 	for _, r := range rows {
-		b.WriteString("  ")
-		b.WriteString(detailLabel.Render(r.label))
-		b.WriteString(detailValue.Render(r.value))
-		b.WriteString("\n")
+		lines = append(lines, detailLabel.Render(r.label)+detailValue.Render(r.value))
 	}
-
 	if len(wt.Links) > 0 {
-		b.WriteString("\n")
-		b.WriteString("  ")
-		b.WriteString(detailLabel.Render("Overrides"))
-		b.WriteString("\n")
-		linkKeys := make([]string, 0, len(wt.Links))
+		lines = append(lines, "", detailLabel.Render("Overrides"))
+		keys := make([]string, 0, len(wt.Links))
 		for k := range wt.Links {
-			linkKeys = append(linkKeys, k)
+			keys = append(keys, k)
 		}
-		sort.Strings(linkKeys)
-		for _, k := range linkKeys {
-			b.WriteString("    ")
-			b.WriteString(linkIndicatorStyle.Render("⇄ " + k))
-			b.WriteString(detailValue.Render(" → " + wt.Links[k]))
-			b.WriteString("\n")
+		sort.Strings(keys)
+		for _, k := range keys {
+			lines = append(lines, linkIndicatorStyle.Render("⇄ "+k)+" → "+wt.Links[k])
 		}
 	}
-
-	return b.String()
+	lines = append(lines, "", helpDescStyle.Render("h: diagnose · 2: health · 3: activity"))
+	return strings.Join(lines, "\n")
 }
 
 func portsString(ports []int) string {
@@ -258,147 +320,105 @@ func (m *Model) renderStatusBar(width int) string {
 			running++
 		}
 	}
-
-	serveStr := "inactive"
+	serve := "inactive"
 	if m.snapshot.ServeRunning {
-		serveStr = "active"
+		serve = "active"
 	}
-
-	pollIndicator := " "
-	if m.polling {
-		pollIndicator = " " + m.spinner.View() + " "
-	}
-
-	stats := fmt.Sprintf("%s%d projects · %d worktrees · %d running · serve: %s",
-		pollIndicator, len(m.snapshot.Projects), len(m.snapshot.Worktrees), running, serveStr)
-
-	if m.snapshot.TunnelDomain != "" {
-		stats += " · tunnel: " + m.snapshot.TunnelDomain
-	}
-
-	if m.pollErr != nil {
-		stats += " · " + statusErrorStyle.Render("⚠ poll failed (stale): "+m.pollErr.Error())
-	}
-
-	if m.statusMsg != "" {
-		stats += " · " + m.statusMsg
-	}
-
-	keys := []struct{ key, desc string }{
-		{"s", "start/stop"},
-		{"o", "open"},
-		{"r", "restart"},
-		{"e", "env sync"},
-		{"n", "new"},
-		{"d", "release"},
-		{"/", "filter"},
-		{"?", "help"},
-		{"q", "quit"},
-	}
-
-	var kb strings.Builder
-	for i, k := range keys {
-		if i > 0 {
-			kb.WriteString("  ")
+	stats := fmt.Sprintf("%d projects · %d worktrees · %d running · serve: %s", len(m.snapshot.Projects), len(m.snapshot.Worktrees), running, serve)
+	if m.pendingQuit {
+		stats = m.spinner.View() + " " + plainOutput(m.statusMsg)
+	} else if m.operation != nil && m.operation.running {
+		stats = m.spinner.View() + " Running " + m.operation.name + " · " + m.operation.branch + " · 3: activity"
+		if m.pollErr != nil {
+			stats += " · poll failed (stale)"
 		}
-		kb.WriteString(helpKeyStyle.Render(k.key))
-		kb.WriteString(helpDescStyle.Render(":" + k.desc))
+	} else if m.pollErr != nil {
+		stats = statusErrorStyle.Render("⚠ poll failed (stale): "+plainOutput(m.pollErr.Error())) + " · " + stats
+	} else if m.statusMsg != "" {
+		stats = plainOutput(m.statusMsg) + " · " + stats
 	}
-
-	statsLine := statusBarStyle.Width(width).Render(stats)
-	keysLine := statusBarStyle.Width(width).Render(" " + kb.String())
-	return lipgloss.JoinVertical(lipgloss.Left, statsLine, keysLine)
+	keys := "Tab: focus  1/2/3: details  h: health  s: start/stop  r: restart  ?: help  q: quit"
+	if width < compactWidth {
+		keys = "Tab: list/detail  1/2/3: tabs  h: health  ?: help"
+	}
+	inner := max(0, width-2)
+	style := statusBarStyle.Width(width)
+	return clipBlock(style.Render(truncate(strings.ReplaceAll(stats, "\n", " "), inner))+"\n"+style.Render(truncate(keys, inner)), width, statusBarHeight)
 }
 
-// --- Help overlay ---
+// --- Overlays ---
 
 func (m *Model) renderHelpOverlay() string {
-	help := `
-  gtl dashboard — Keyboard Shortcuts
-
-  j/k, ↑/↓     Navigate worktree list
-  Enter         Focus detail panel
-  Tab           Cycle focus
-  s             Start/stop supervisor
-  o             Open in browser
-  r             Restart supervisor
-  e             Sync env file
-  n             New worktree
-  d             Release worktree (confirm)
-  /             Filter worktrees
-  Esc           Clear filter
-  ?             Toggle this help
-  q, Ctrl+C     Quit
-`
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(highlight).
-		Padding(1, 2).
-		Render(help)
-
-	return lipgloss.Place(m.width, m.height-statusBarHeight,
-		lipgloss.Center, lipgloss.Center, box)
+	return m.renderOverlay("gtl dashboard — Shortcuts\n\nj/k, ↑/↓  Navigate / scroll focused panel\nEnter      Focus details\nTab        Switch list / details\n1 / 2 / 3  Overview / Health / Activity\nh          Run / recheck health\ns          Start / stop server\nr          Restart server\ne          Sync env file\no          Open in browser\nn          New worktree\nd          Release allocations (confirm)\n/          Filter worktrees\nEsc / ←    Return to list; Esc clears filter\n?          Toggle help\nq, Ctrl+C  Quit\n\nPress any key to close.", false)
 }
 
-// --- Confirm overlay ---
-
 func (m *Model) renderConfirmOverlay() string {
-	wt := m.confirmTarget
-	if wt == nil {
+	if m.confirmTarget == nil {
 		return ""
 	}
-	prompt := fmt.Sprintf("Release worktree %q?\n\n  y = confirm   any other key = cancel", wt.Branch)
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(danger).
-		Padding(1, 2).
-		Render(prompt)
-
-	return lipgloss.Place(m.width, m.height-statusBarHeight,
-		lipgloss.Center, lipgloss.Center, box)
+	prompt := fmt.Sprintf("Release allocations for %q?\n\ny: release   any other key: cancel\n\nStops its server and frees its allocated resources.\nKeeps the worktree directory and databases.\nConfigured release hooks also run.", m.confirmTarget.Branch)
+	return m.renderOverlay(prompt, true)
 }
 
 func (m *Model) renderInputOverlay() string {
-	prompt := fmt.Sprintf("New worktree — branch name:\n\n  %s▌\n\n  Enter = create   Esc = cancel", m.inputText)
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(highlight).
-		Padding(1, 2).
-		Render(prompt)
-
-	return lipgloss.Place(m.width, m.height-statusBarHeight,
-		lipgloss.Center, lipgloss.Center, box)
+	prompt := fmt.Sprintf("New worktree — branch name\n\n%s▌\n\nEnter: create   Esc: cancel", m.inputText)
+	if m.inputTarget != nil {
+		prompt += "\n\nProject: " + m.inputTarget.Project + "\nFrom: " + m.inputTarget.WorktreePath
+	}
+	return m.renderOverlay(prompt, false)
 }
 
-func truncate(s string, max int) string {
-	if max <= 0 {
+func (m Model) renderOverlay(content string, destructive bool) string {
+	width := max(1, min(62, m.width-6))
+	height := max(1, m.height-4)
+	color := highlight
+	if destructive {
+		color = danger
+	}
+	body := clipBlock(ansi.Hardwrap(content, width, false), width, height)
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(color).Padding(0, 1).Render(body)
+	box = clipBlock(box, m.width, m.height)
+	return lipgloss.Place(max(0, m.width), max(0, m.height), lipgloss.Center, lipgloss.Center, box)
+}
+
+func truncate(s string, width int) string {
+	if width <= 0 {
 		return ""
 	}
-	if lipgloss.Width(s) <= max {
+	if lipgloss.Width(s) <= width {
 		return s
 	}
-	if max <= 3 {
-		return truncateToWidth(s, max)
+	if width <= 3 {
+		return truncateToWidth(s, width)
 	}
-	return truncateToWidth(s, max-3) + "..."
+	return ansi.Truncate(s, width, "...")
 }
 
-// truncateToWidth returns the longest prefix of s whose display width does not
-// exceed max cells, counting multi-cell runes (e.g. CJK) correctly and never
-// cutting mid-rune.
-func truncateToWidth(s string, max int) string {
-	if max <= 0 {
+func truncateToWidth(s string, width int) string {
+	if width <= 0 {
 		return ""
 	}
-	width := 0
-	var b strings.Builder
-	for _, r := range s {
-		w := lipgloss.Width(string(r))
-		if width+w > max {
-			break
-		}
-		b.WriteRune(r)
-		width += w
+	return ansi.Truncate(s, width, "")
+}
+
+func clipBlock(s string, width, height int) string {
+	if width <= 0 || height <= 0 {
+		return ""
 	}
-	return b.String()
+	lines := strings.Split(s, "\n")
+	lines = lines[:min(len(lines), height)]
+	for i := range lines {
+		lines[i] = truncateToWidth(lines[i], width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func plainOutput(s string) string {
+	s = strings.ReplaceAll(ansi.Strip(s), "\t", "    ")
+	return strings.Map(func(r rune) rune {
+		if r != '\n' && unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
