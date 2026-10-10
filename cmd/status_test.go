@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/git-treeline/cli/internal/process"
+	"github.com/git-treeline/cli/internal/registry"
 )
 
 func TestProbeAll(t *testing.T) {
@@ -240,5 +241,54 @@ esac
 				}
 			}
 		})
+	}
+}
+
+func TestRedisEndpointDisplayRedactsUserinfo(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"password", "redis://alice:s3cret@cache.example.com:6380/2", "redis://cache.example.com:6380/2"},
+		{"username only", "rediss://alice@cache.example.com:6380", "rediss://cache.example.com:6380"},
+		{"sensitive query and fragment", "redis://cache.example.com:6380/2?token=s3cret#alice", "redis://cache.example.com:6380/2"},
+		{"no userinfo", "redis://localhost:6379", "redis://localhost:6379"},
+		{"malformed escape", "redis://alice:s3cret%zz@cache.example.com", "<invalid Redis URL>"},
+		{"missing authority", "alice:s3cret@cache.example.com", "<invalid Redis URL>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := redisEndpointDisplay(tt.raw)
+			if got != tt.want {
+				t.Fatalf("redisEndpointDisplay() = %q, want %q", got, tt.want)
+			}
+			if strings.Contains(got, "alice") || strings.Contains(got, "s3cret") {
+				t.Fatalf("userinfo leaked in %q", got)
+			}
+		})
+	}
+}
+
+func TestRenderRedisCapacityDoesNotPrintCredentials(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GTL_HOME", home)
+	const secret = "credential-do-not-print"
+	configJSON := `{"redis":{"strategy":"database","databases":16,"url":"redis://alice:` + secret + `@cache.example.com:6380/2?token=` + secret + `#` + secret + `"}}`
+	if err := os.WriteFile(filepath.Join(home, "config.json"), []byte(configJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registryJSON := `{"version":2,"allocations":[{"project":"club","worktree_name":"feature","redis_db":1}]}`
+	reg := registry.New(filepath.Join(home, "registry.json"))
+	if err := os.WriteFile(reg.Path, []byte(registryJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStdout(t, func() { renderRedisCapacity(reg) })
+	if strings.Contains(out, secret) || strings.Contains(out, "alice") {
+		t.Fatalf("Redis credential leaked in status output: %q", out)
+	}
+	if !strings.Contains(out, "redis://cache.example.com:6380/2") {
+		t.Fatalf("redacted endpoint missing from status output: %q", out)
 	}
 }

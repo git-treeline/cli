@@ -177,7 +177,7 @@ func provisionDeps(pc *config.ProjectConfig, repoDir string) provision.Deps {
 // dpkgInstalled reports whether an apt package is installed. An unknown package
 // makes dpkg-query exit non-zero, which we treat as "not installed".
 func dpkgInstalled(pkg string) (bool, error) {
-	out, err := exec.Command("dpkg-query", "-W", "-f=${Status}", pkg).Output()
+	out, err := exec.Command("dpkg-query", "-W", "-f=${Status}", "--", pkg).Output()
 	if err != nil {
 		return false, nil
 	}
@@ -189,12 +189,12 @@ func aptUpdate() error {
 }
 
 func aptInstall(pkgs []string) error {
-	args := append([]string{"apt-get", "install", "-y"}, pkgs...)
+	args := append([]string{"apt-get", "install", "-y", "--"}, pkgs...)
 	return sudoCommand(args...)
 }
 
 func systemctlEnableNow(name string) error {
-	return sudoCommand("systemctl", "enable", "--now", name)
+	return sudoCommand("systemctl", "enable", "--now", "--", name)
 }
 
 func createDB(connArgs []string, name string) error {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -406,7 +407,7 @@ func renderRedisCapacity(reg *registry.Registry) {
 	}
 
 	usable := uc.RedisDatabases() - 1
-	fmt.Printf("\nRedis (database strategy): %d/%d slots used on %s\n", len(byDB), usable, uc.RedisURL())
+	fmt.Printf("\nRedis (database strategy): %d/%d slots used on %s\n", len(byDB), usable, redisEndpointDisplay(uc.RedisURL()))
 
 	var shared []int
 	for db, names := range byDB {
@@ -426,4 +427,18 @@ func renderRedisCapacity(reg *registry.Registry) {
 	}
 	fmt.Println("  Fix: raise `databases` in redis.conf + `gtl config set redis.databases <N>`,")
 	fmt.Println("       or `gtl config set redis.strategy prefixed`, then `gtl reallocate --all-registry --apply`.")
+}
+
+// redisEndpointDisplay removes all URL userinfo before a Redis endpoint is
+// written to status output. Invalid URLs are never echoed because parse errors
+// can themselves contain the original credential-bearing input.
+func redisEndpointDisplay(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "<invalid Redis URL>"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
 }

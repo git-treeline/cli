@@ -19,7 +19,6 @@ func parsePostgresURL(raw, defaultSSLMode string) (*ConnInfo, error) {
 	if err != nil {
 		return nil, &URLParseError{
 			Reason: "could not parse postgres URL (ensure the password is percent-encoded)",
-			Err:    err,
 		}
 	}
 	if u.Scheme != "postgres" && u.Scheme != "postgresql" {

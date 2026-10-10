@@ -119,6 +119,57 @@ func TestRun_Apt_DarwinSkip_NoEffects(t *testing.T) {
 	}
 }
 
+func TestRun_RejectsUnsafePackageOperandsBeforeEffects(t *testing.T) {
+	for _, operand := range []string{
+		"-oDpkg::Pre-Invoke=evil",
+		"--allow-unauthenticated",
+		"./payload.deb",
+		"/tmp/payload.deb",
+		"pkg name",
+	} {
+		t.Run(operand, func(t *testing.T) {
+			f := newFakeSys()
+			err := Run([]Action{{Kind: ActionApt, Packages: []string{operand}}}, "/repo", f.deps("linux"))
+			if err == nil || !strings.Contains(err.Error(), "invalid apt package operand") {
+				t.Fatalf("expected invalid operand error, got %v", err)
+			}
+			if len(f.calls) != 0 {
+				t.Fatalf("unsafe operand reached system effects: %v", f.calls)
+			}
+		})
+	}
+}
+
+func TestRun_AptAcceptsDebianPackageSelectors(t *testing.T) {
+	for _, operand := range []string{
+		"libstdc++6",
+		"postgresql-16:amd64",
+		"postgresql-client=16.4-1.pgdg120+1",
+		"postgresql-client/bookworm-backports",
+	} {
+		t.Run(operand, func(t *testing.T) {
+			f := newFakeSys()
+			if err := Run([]Action{{Kind: ActionApt, Packages: []string{operand}}}, "/repo", f.deps("linux")); err != nil {
+				t.Fatalf("legitimate Debian package operand rejected: %v", err)
+			}
+			if !f.called("apt-install:" + operand) {
+				t.Fatalf("package was not installed: %v", f.calls)
+			}
+		})
+	}
+}
+
+func TestRun_RejectsUnsafeServiceOperandsBeforeEffects(t *testing.T) {
+	f := newFakeSys()
+	err := Run([]Action{{Kind: ActionService, Packages: []string{"--now"}}}, "/repo", f.deps("linux"))
+	if err == nil {
+		t.Fatal("expected unsafe service operand to be rejected")
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("unsafe service operand reached system effects: %v", f.calls)
+	}
+}
+
 func TestRun_AptUpdate_RunsOnceBeforeFirstInstall(t *testing.T) {
 	f := newFakeSys()
 	// Two install-triggering steps (apt packages + a service package) on a fresh

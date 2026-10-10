@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strings"
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/confirm"
@@ -95,7 +97,7 @@ var dbDropCmd = &cobra.Command{
 			fmt.Printf("Would drop database %s. (dry-run)\n", info.target)
 			return nil
 		}
-		prompt := fmt.Sprintf("This will DROP worktree db '%s'.", info.target)
+		prompt := fmt.Sprintf("This will DROP %s.", destructiveDBTarget(info))
 		if !confirm.Prompt(prompt, dbDropForce, nil) {
 			fmt.Println("Aborted.")
 			return nil
@@ -137,7 +139,7 @@ in .treeline.yml. Use --from to clone from a different database instead.`,
 			fmt.Printf("Would drop %s and re-clone from %s. (dry-run)\n", info.target, source)
 			return nil
 		}
-		prompt := fmt.Sprintf("This will DROP and re-clone worktree db '%s' from %s.", info.target, source)
+		prompt := fmt.Sprintf("This will DROP and re-clone %s from database %q.", destructiveDBTarget(info), source)
 		if !confirm.Prompt(prompt, dbResetForce, nil) {
 			fmt.Println("Aborted.")
 			return nil
@@ -182,7 +184,7 @@ pg_dump file. Supports both custom format and plain SQL dumps.`,
 			fmt.Printf("Would drop %s and restore from %s. (dry-run)\n", info.target, dumpFile)
 			return nil
 		}
-		prompt := fmt.Sprintf("This will DROP and restore worktree db '%s' from %s.", info.target, dumpFile)
+		prompt := fmt.Sprintf("This will DROP and restore %s from %s.", destructiveDBTarget(info), dumpFile)
 		if !confirm.Prompt(prompt, dbRestoreForce, nil) {
 			fmt.Println("Aborted.")
 			return nil
@@ -225,6 +227,115 @@ type dbInfo struct {
 	worktreeDir  string
 	mainWorktree bool
 	isMainRepo   bool
+	endpoint     databaseEndpoint
+}
+
+type databaseEndpoint struct {
+	Host        string
+	HostAddress string
+	Port        string
+	User        string
+	Database    string
+	Service     string
+	ServiceFile string
+}
+
+func (e databaseEndpoint) description() string {
+	parts := []string{fmt.Sprintf("host=%q", e.Host)}
+	if e.HostAddress != "" {
+		parts = append(parts, fmt.Sprintf("hostaddr=%q", e.HostAddress))
+	}
+	parts = append(parts,
+		fmt.Sprintf("port=%q", e.Port),
+		fmt.Sprintf("user=%q", e.User),
+		fmt.Sprintf("database=%q", e.Database),
+	)
+	if e.Service != "" {
+		parts = append(parts, fmt.Sprintf("service=%q", e.Service))
+	}
+	if e.ServiceFile != "" {
+		parts = append(parts, fmt.Sprintf("service_file=%q", e.ServiceFile))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func destructiveDBTarget(info *dbInfo) string {
+	if info.adapterName != "postgresql" {
+		return fmt.Sprintf("SQLite database %q", info.target)
+	}
+	return "PostgreSQL database (" + info.endpoint.description() + ")"
+}
+
+// resolvePostgresEndpoint summarizes every endpoint selector visible without
+// asking libpq to connect. Service-file values override environment fallbacks,
+// so unresolved service-derived fields are labeled rather than guessed. Direct
+// command flags override the corresponding service-file values. Password
+// inputs are intentionally never read.
+func resolvePostgresEndpoint(database string, connArgs []string, getenv func(string) string, defaultUser string) databaseEndpoint {
+	service := getenv("PGSERVICE")
+	e := databaseEndpoint{
+		Host:        getenv("PGHOST"),
+		HostAddress: getenv("PGHOSTADDR"),
+		Port:        getenv("PGPORT"),
+		User:        getenv("PGUSER"),
+		Database:    database,
+		Service:     service,
+		ServiceFile: getenv("PGSERVICEFILE"),
+	}
+	if service != "" {
+		e.Host = serviceSettingDescription(service, "PGHOST", e.Host, "libpq default local socket")
+		e.HostAddress = serviceSettingDescription(service, "PGHOSTADDR", e.HostAddress, "unset")
+		e.Port = serviceSettingDescription(service, "PGPORT", e.Port, "5432 (libpq default)")
+		e.User = serviceSettingDescription(service, "PGUSER", e.User, defaultUser)
+	}
+	if e.Host == "" {
+		if e.HostAddress != "" {
+			e.Host = "unset (hostaddr selects network endpoint)"
+		} else {
+			e.Host = "libpq default local socket"
+		}
+	}
+	if e.Port == "" {
+		e.Port = "5432 (libpq default)"
+	}
+	if e.User == "" {
+		e.User = defaultUser
+	}
+	if e.User == "" {
+		e.User = "libpq default OS user"
+	}
+	for i := 0; i+1 < len(connArgs); i++ {
+		switch connArgs[i] {
+		case "-h":
+			e.Host = connArgs[i+1]
+			i++
+		case "-p":
+			e.Port = connArgs[i+1]
+			i++
+		case "-U":
+			e.User = connArgs[i+1]
+			i++
+		}
+	}
+	return e
+}
+
+func serviceSettingDescription(service, envName, envValue, defaultValue string) string {
+	fallback := envValue
+	if fallback == "" {
+		fallback = defaultValue
+	}
+	if fallback == "" {
+		fallback = "libpq default OS user"
+	}
+	return fmt.Sprintf("from libpq service %q (fallback %s=%q)", service, envName, fallback)
+}
+
+func localUsername() string {
+	if current, err := user.Current(); err == nil {
+		return current.Username
+	}
+	return strings.TrimSpace(os.Getenv("USER"))
 }
 
 // resolveDBPaths returns the resolved target and template paths for a database
@@ -257,7 +368,8 @@ func resolveDB() (*dbInfo, error) {
 	}
 
 	adapterName := pc.DatabaseAdapter()
-	adapter, err := database.ForAdapter(adapterName, pc.DatabaseConnArgs())
+	connArgs := pc.DatabaseConnArgs()
+	adapter, err := database.ForAdapter(adapterName, connArgs)
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +377,7 @@ func resolveDB() (*dbInfo, error) {
 	template := pc.DatabaseTemplate()
 	target, tmpl := resolveDBPaths(adapterName, absPath, mainRepo, dbName, template)
 
-	return &dbInfo{
+	info := &dbInfo{
 		target:       target,
 		template:     tmpl,
 		adapter:      adapter,
@@ -273,5 +385,9 @@ func resolveDB() (*dbInfo, error) {
 		worktreeDir:  absPath,
 		mainWorktree: wt.Entry["main_worktree"] == true,
 		isMainRepo:   repoRootErr == nil && repoRoot == mainRepo,
-	}, nil
+	}
+	if adapterName == "postgresql" {
+		info.endpoint = resolvePostgresEndpoint(target, connArgs, os.Getenv, localUsername())
+	}
+	return info, nil
 }

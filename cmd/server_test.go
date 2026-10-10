@@ -790,6 +790,44 @@ func TestClearOrphanedPortProcess_LivePidNotPortOwner(t *testing.T) {
 	}
 }
 
+func TestStopPortProcessesAfterConfirmationRequiresExplicitApproval(t *testing.T) {
+	for _, input := range []string{"\n", "n\n", "no\n", ""} {
+		t.Run(fmt.Sprintf("input_%q", input), func(t *testing.T) {
+			var killed []int
+			approved := stopPortProcessesAfterConfirmation(
+				"Kill pid 42 and continue?", []int{42}, 3000, strings.NewReader(input),
+				func(pid int, _ syscall.Signal) error {
+					killed = append(killed, pid)
+					return nil
+				},
+				func(int, time.Duration) bool { return true },
+			)
+			if approved {
+				t.Fatal("expected refusal without an explicit yes")
+			}
+			if len(killed) != 0 {
+				t.Fatalf("killed processes before approval: %v", killed)
+			}
+		})
+	}
+
+	var killed []int
+	approved := stopPortProcessesAfterConfirmation(
+		"Kill pids 42, 43 and continue?", []int{42, 43}, 3000, strings.NewReader("yes\n"),
+		func(pid int, _ syscall.Signal) error {
+			killed = append(killed, pid)
+			return nil
+		},
+		func(int, time.Duration) bool { return true },
+	)
+	if !approved {
+		t.Fatal("expected explicit yes to approve")
+	}
+	if got := fmt.Sprint(killed); got != "[42 43]" {
+		t.Fatalf("killed = %s, want [42 43] after approval", got)
+	}
+}
+
 func privateTestSocket(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("/tmp", "gtl-cmd-test-")
