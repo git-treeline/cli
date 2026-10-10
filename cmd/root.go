@@ -19,19 +19,60 @@ var rootCmd = &cobra.Command{
 	Use:           "git-treeline",
 	Short:         "Worktree environment manager — ports, databases, and Redis across parallel development environments",
 	SilenceErrors: true,
-	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if appManagedDev() {
+			return guardAppManagedDev(cmd, args)
+		}
+		readOnly, err := readOnlyIntrospection(cmd)
+		if err != nil || readOnly {
+			return err
+		}
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		if dryRun {
 			maybeWarnStaleRouter(cmd)
-			return
+			return nil
 		}
 		_ = platform.EnsureConfigDir()
 		maybeWarnStaleRouter(cmd)
 		maybeCheckForUpdate(cmd)
+		return nil
 	},
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {
-		printUpdateNotice()
+		if readOnly, _ := readOnlyIntrospection(cmd); !readOnly && !appManagedDev() {
+			printUpdateNotice()
+		}
 	},
+}
+
+// readOnlyIntrospection recognizes read-only JSON queries before any root-hook effects.
+func readOnlyIntrospection(cmd *cobra.Command) (bool, error) {
+	if cmd.Name() == "dev-resources" {
+		return true, nil
+	}
+	if cmd.Name() == "claim" {
+		inspect, _ := cmd.Flags().GetBool("inspect-json")
+		request, _ := cmd.Flags().GetString("request-file")
+		operation, _ := cmd.Flags().GetString("operation-id")
+		if inspect || request != "" || operation != "" {
+			return true, nil
+		}
+	}
+	jsonOutput, _ := cmd.Flags().GetBool("json")
+	if cmd.Name() == "related" && jsonOutput {
+		return true, nil
+	}
+	readOnly, _ := cmd.Flags().GetBool("read-only")
+	if !readOnly {
+		return false, nil
+	}
+	allowed := cmd.Name() == "status" || cmd.Name() == "routes" || cmd.Name() == "doctor" || cmd.Name() == "env" ||
+		(cmd.Name() == "show" && cmd.Parent() != nil && cmd.Parent().Name() == "env")
+	fix, _ := cmd.Flags().GetBool("fix")
+	template, _ := cmd.Flags().GetBool("template")
+	if !allowed || !jsonOutput || fix || template {
+		return false, fmt.Errorf("--read-only requires status, routes, env, env show, or doctor with --json and without --fix or --template")
+	}
+	return true, nil
 }
 
 // commandsThatSelfRepair are commands the user runs to FIX a stale router —

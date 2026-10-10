@@ -1,6 +1,7 @@
 package allocator
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/registry"
+	"github.com/google/uuid"
 )
 
 func testAllocator(t *testing.T, portsNeeded int, yamlExtra string) (*Allocator, *registry.Registry) {
@@ -42,6 +44,251 @@ func testAllocator(t *testing.T, portsNeeded int, yamlExtra string) (*Allocator,
 
 func itoa(n int) string {
 	return string(rune('0') + rune(n))
+}
+
+func managedDevAllocator(t *testing.T, reservationKey string) (*Allocator, *registry.Registry) {
+	t.Helper()
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("TREELINE_MANAGED", "app")
+	t.Setenv("TREELINE_CHANNEL", "dev")
+	private := filepath.Join(home, ".treeline-dev", "gtl")
+	normal := filepath.Join(home, "Library", "Application Support", "git-treeline")
+	for _, directory := range []string{private, normal} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("GTL_HOME", private)
+	normalConfig := `{"port":{"increment":10,"reservations":{"@treeline-dev-qa/slot-01":42000,"@treeline-dev-qa/slot-02":42010,"@treeline-dev-qa/slot-03":42020,"@treeline-dev-qa/slot-04":42030}}}`
+	privateConfig := fmt.Sprintf(`{"port":{"base":42000,"increment":10,"reservations":{%q:42000}},"router":{"mode":"disabled"}}`, reservationKey)
+	for path, body := range map[string]string{
+		filepath.Join(normal, "config.json"):    normalConfig,
+		filepath.Join(normal, "registry.json"):  `{"version":4,"allocations":[],"relationships":[]}`,
+		filepath.Join(private, "config.json"):   privateConfig,
+		filepath.Join(private, "registry.json"): `{"version":4,"allocations":[]}`,
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	project := filepath.Join(home, ".treeline-dev", "workspaces", "fixture")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, config.ProjectConfigFile), []byte("project: fixture\nport_count: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg := registry.New(filepath.Join(private, "registry.json"))
+	al := New(config.LoadUserConfig(filepath.Join(private, "config.json")), config.LoadProjectConfigReadOnly(project), reg)
+	al.PortFree = func(int) bool { return true }
+	return al, reg
+}
+
+func TestManagedDevAllocateUsesExactMappedPort(t *testing.T) {
+	al, _ := managedDevAllocator(t, "fixture/feature")
+	alloc, err := al.Allocate("/fixture/worktree", "worktree", false, "feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(alloc.Ports, []int{42000}) || alloc.PrimaryDatabase() != "" || alloc.RedisPrefix != "" || alloc.RedisDB != 0 {
+		t.Fatalf("managed allocation = %#v", alloc)
+	}
+}
+
+func TestManagedDevAllocateRefusesUnmappedWithoutRegistryWrite(t *testing.T) {
+	al, _ := managedDevAllocator(t, "fixture/feature")
+	registryPath := filepath.Join(os.Getenv("GTL_HOME"), "registry.json")
+	before, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := al.Allocate("/fixture/worktree", "worktree", false, "other"); err == nil {
+		t.Fatal("unmapped branch was allocated")
+	}
+	after, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(before, after) {
+		t.Fatal("registry changed after managed-dev refusal")
+	}
+}
+
+func TestManagedDevAllocateRejectsConfiguredResources(t *testing.T) {
+	al, _ := managedDevAllocator(t, "fixture/feature")
+	path := filepath.Join(al.ProjectConfig.ProjectRoot, config.ProjectConfigFile)
+	unsafe := "project: fixture\nport_count: 1\ndatabase:\n  adapter: sqlite\n  name: fixture.sqlite3\n"
+	if err := os.WriteFile(path, []byte(unsafe), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := al.Allocate("/fixture/worktree", "worktree", false, "feature"); err == nil {
+		t.Fatal("managed-dev allocator silently discarded configured database resources")
+	}
+}
+
+func TestManagedDevSQLiteAllocationRetainsAndReusesDatabase(t *testing.T) {
+	for _, main := range []bool{false, true} {
+		t.Run(fmt.Sprint("main=", main), func(t *testing.T) {
+			key := "fixture/feature"
+			if main {
+				key = "fixture"
+			}
+			al, reg := managedDevAllocator(t, key)
+			configPath := filepath.Join(al.ProjectConfig.ProjectRoot, config.ProjectConfigFile)
+			body := "project: fixture\nport_count: 1\ndatabase:\n  adapter: sqlite\n  template: db/template.sqlite3\n  name: 'db/{worktree}.sqlite3'\n"
+			if err := os.WriteFile(configPath, []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			root := al.ProjectConfig.ProjectRoot
+			name := filepath.Base(root)
+			first, err := al.Allocate(root, name, main, "feature")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "db_fixture_sqlite3"
+			if main {
+				want = "db/template.sqlite3"
+			}
+			if first.DatabaseAdapter != "sqlite" || !slices.Equal(first.Databases, []string{want}) {
+				t.Fatalf("database stripped or naming changed: %#v", first)
+			}
+			second, err := al.Allocate(root, name, main, "feature")
+			if err != nil || !second.Reused || !slices.Equal(second.Databases, first.Databases) {
+				t.Fatalf("reuse: %#v %v", second, err)
+			}
+			before, err := os.ReadFile(reg.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed := strings.ReplaceAll(body, "db/template.sqlite3", "db/replaced.sqlite3")
+			if !main {
+				changed = strings.ReplaceAll(body, "db/{worktree}.sqlite3", "other/{worktree}.sqlite3")
+			}
+			if err := os.WriteFile(configPath, []byte(changed), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := al.Allocate(root, name, main, "feature"); err == nil {
+				t.Fatal("changed database configuration reused retained allocation")
+			}
+			after, err := os.ReadFile(reg.Path)
+			if err != nil || !slices.Equal(before, after) {
+				t.Fatal("refusal changed retained registry", err)
+			}
+		})
+	}
+}
+
+func TestManagedDevSQLiteAllocationRefusesDriftBeforeRegistryWrite(t *testing.T) {
+	al, _ := managedDevAllocator(t, "fixture/feature")
+	configPath := filepath.Join(al.ProjectConfig.ProjectRoot, config.ProjectConfigFile)
+	body := "project: fixture\nport_count: 1\ndatabase:\n  adapter: sqlite\n  template: db/template.sqlite3\n  name: '{worktree}'\n"
+	if err := os.WriteFile(configPath, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	registryPath := filepath.Join(os.Getenv("GTL_HOME"), "registry.json")
+	before, err := os.ReadFile(registryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	al.PortFree = func(int) bool {
+		if err := os.WriteFile(configPath, []byte(strings.ReplaceAll(body, "'{worktree}'", "'changed_{worktree}'")), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return true
+	}
+	if _, err := al.Allocate(al.ProjectConfig.ProjectRoot, "fixture", false, "feature"); err == nil {
+		t.Fatal("changed database configuration allocated")
+	}
+	after, err := os.ReadFile(registryPath)
+	if err != nil || !slices.Equal(before, after) {
+		t.Fatal("refusal changed registry", err)
+	}
+}
+
+func TestManagedDevAllocateRefusesRetainedMismatchAndBusyOwnPort(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		port int
+		free bool
+	}{
+		{name: "outside mapping", port: 43000, free: true},
+		{name: "busy despite supervisor", port: 42000, free: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			al, reg := managedDevAllocator(t, "fixture/feature")
+			entry := registry.Allocation{"project": "fixture", "worktree": "/fixture/worktree", "worktree_name": "worktree", "branch": "feature", "port": test.port, "ports": []any{test.port}, "port_1": test.port, "database": "", "database_adapter": "", "redis_db": nil, "redis_prefix": nil}
+			if err := reg.Allocate(entry); err != nil {
+				t.Fatal(err)
+			}
+			al.PortFree = func(int) bool { return test.free }
+			al.SupervisorLive = func(string) bool { return true }
+			if _, err := al.Allocate("/fixture/worktree", "worktree", false, "feature"); err == nil {
+				t.Fatal("unsafe retained allocation was accepted")
+			}
+		})
+	}
+}
+
+func TestNormalAllocateSkipsManagedDevSentinelBlocksAndPreservesRegistry(t *testing.T) {
+	t.Setenv("TREELINE_MANAGED", "")
+	t.Setenv("TREELINE_CHANNEL", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	userConfig := `{"port":{"base":42000,"increment":10,"reservations":{"@treeline-dev-qa/slot-01":42000,"@treeline-dev-qa/slot-02":42010,"@treeline-dev-qa/slot-03":42020,"@treeline-dev-qa/slot-04":42030}},"router":{"mode":"disabled"}}`
+	if err := os.WriteFile(configPath, []byte(userConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(dir, "project")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, config.ProjectConfigFile), []byte("project: ordinary\nport_count: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg := registry.New(filepath.Join(dir, "registry.json"))
+	for i := range 53 {
+		port := 43000 + i
+		entry := registry.Allocation{
+			"project": "ordinary", "worktree": fmt.Sprintf("/ordinary/%02d", i),
+			"worktree_name": fmt.Sprintf("ordinary-%02d", i), "branch": fmt.Sprintf("branch-%02d", i),
+			"port": port, "ports": []any{port}, "port_1": port,
+		}
+		if err := reg.Allocate(entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := reg.Allocations()
+	al := New(config.LoadUserConfig(configPath), config.LoadProjectConfigReadOnly(project), reg)
+	var inspected []int
+	al.PortFree = func(port int) bool {
+		inspected = append(inspected, port)
+		return true
+	}
+	alloc, err := al.Allocate("/ordinary/new", "new", false, "new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alloc.Port != 42040 {
+		t.Fatalf("normal allocation port = %d, want first port after all four sentinel blocks", alloc.Port)
+	}
+	if !slices.Equal(inspected, []int{42040}) {
+		t.Fatalf("listener probe candidates = %v, want only 42040", inspected)
+	}
+	after := reg.Allocations()
+	if len(after) != len(before)+1 {
+		t.Fatalf("allocation count = %d, want %d", len(after), len(before)+1)
+	}
+	for i := range before {
+		beforeJSON, _ := json.Marshal(before[i])
+		afterJSON, _ := json.Marshal(after[i])
+		if !slices.Equal(beforeJSON, afterJSON) {
+			t.Fatalf("ordinary allocation %d changed\nbefore: %s\nafter:  %s", i, beforeJSON, afterJSON)
+		}
+	}
 }
 
 func TestAllocate_SinglePort(t *testing.T) {
@@ -1580,5 +1827,237 @@ func TestAllocate_ListFormExtrasStayUnnamed(t *testing.T) {
 	}
 	if entry := reg.Find("/wt/feature-branch"); entry["database_extra"] != nil {
 		t.Errorf("expected no database_extra in the registry for a positional list, got %v", entry["database_extra"])
+	}
+}
+
+func freshAllocatorFixture(t *testing.T) (*Allocator, *registry.Registry, string) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	al, reg := testAllocator(t, 1, "")
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	// Reserved branch ports avoid probing or binding any host TCP sockets.
+	if err := os.WriteFile(configPath, []byte(`{"port":{"base":4000,"increment":10,"reservations":{"test/fresh":4100}},"redis":{"strategy":"database","databases":16,"url":"redis://localhost:6379"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	al.UserConfig = config.LoadUserConfig(configPath)
+	root, err := registry.CanonicalLifecycleTarget(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := registry.CaptureReleaseTarget(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locks, err := registry.AcquireLifecycleLocks(context.Background(), []string{root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = locks.Close() })
+	al.FreshTarget, al.FreshLocks = &target, locks
+	al.SupervisorLive = func(string) bool { t.Fatal("fresh allocation probed a legacy supervisor"); return false }
+	return al, reg, root
+}
+
+func TestFreshAllocationPersistsResourcesAndNeverStartedAtomically(t *testing.T) {
+	al, reg, root := freshAllocatorFixture(t)
+	if err := reg.Allocate(registry.Allocation{"worktree": filepath.Join(root, "other"), "port": 4200, "redis_db": 1}); err != nil {
+		t.Fatal(err)
+	}
+	alloc, err := al.Allocate(root, "fresh", false, "fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alloc.Port != 4100 || alloc.RedisDB != 2 || alloc.Reused {
+		t.Fatalf("allocation=%+v", alloc)
+	}
+	retained, err := reg.FindForRelease(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := registry.AllocationRuntimeBinding(retained)
+	if err != nil || binding.Kind != "never_started" || registry.GetString(retained, "allocation_generation") == "" {
+		t.Fatal("fresh enrollment missing", err)
+	}
+	if got := registry.ExtractPorts(retained); !slices.Equal(got, alloc.Ports) {
+		t.Fatal("computed allocation differs from retained resources")
+	}
+	before, _ := os.ReadFile(reg.Path)
+	if _, err := al.Allocate(root, "fresh", false, "fresh"); err == nil {
+		t.Fatal("fresh context silently reused existing allocation")
+	}
+	after, _ := os.ReadFile(reg.Path)
+	if string(before) != string(after) {
+		t.Fatal("refused fresh reuse changed registry")
+	}
+}
+
+func TestFreshAllocationRefusesExistingLegacyAndConflictingResources(t *testing.T) {
+	for _, fixture := range []string{"existing", "legacy_store", "reserved_port", "missing_lock", "main", "dry_run", "mismatched_target"} {
+		t.Run(fixture, func(t *testing.T) {
+			al, reg, root := freshAllocatorFixture(t)
+			main := false
+			switch fixture {
+			case "existing":
+				if err := reg.Allocate(registry.Allocation{"worktree": root, "port": 4100}); err != nil {
+					t.Fatal(err)
+				}
+			case "legacy_store":
+				if err := os.WriteFile(reg.Path, []byte(`{"version":3,"allocations":[]}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "reserved_port":
+				if err := reg.Allocate(registry.Allocation{"worktree": filepath.Join(root, "other"), "port": 4100}); err != nil {
+					t.Fatal(err)
+				}
+			case "missing_lock":
+				al.FreshLocks = nil
+			case "main":
+				main = true
+			case "dry_run":
+				al.DryRun = true
+			case "mismatched_target":
+				root = filepath.Join(root, "other")
+			}
+			before, _ := os.ReadFile(reg.Path)
+			if _, err := al.Allocate(root, "fresh", main, "fresh"); err == nil {
+				t.Fatal("invalid fresh enrollment accepted")
+			}
+			after, _ := os.ReadFile(reg.Path)
+			if string(before) != string(after) {
+				t.Fatal("refusal changed registry")
+			}
+		})
+	}
+}
+
+func TestOrdinaryAllocationCannotInventFreshRuntimeOwnership(t *testing.T) {
+	al, reg, root := freshAllocatorFixture(t)
+	al.FreshTarget, al.FreshLocks = nil, nil
+	if _, err := al.Allocate(root, "fresh", false, "fresh"); err != nil {
+		t.Fatal(err)
+	}
+	retained, err := reg.FindForRelease(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := registry.AllocationRuntimeBinding(retained)
+	if err != nil || binding.Kind != "unknown" {
+		t.Fatal("ordinary setup invented freshness", err)
+	}
+}
+
+func TestFreshAllocationPrefixedRedisCanPrepareRelease(t *testing.T) {
+	al, reg, root := freshAllocatorFixture(t)
+	al.UserConfig.Data["redis"].(map[string]any)["strategy"] = "prefixed"
+	alloc, err := al.Allocate(root, "fresh", false, "fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value, present := alloc.ToRegistryEntry()["redis_db"]; !present || value != nil {
+		t.Fatal("fixture did not exercise the allocator's null Redis DB shape")
+	}
+	retained, err := reg.FindForRelease(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := registry.AllocationRuntimeBinding(retained)
+	if err != nil {
+		t.Fatal(err)
+	}
+	op, _, err := reg.PrepareRelease(registry.ReleaseRequest{
+		OperationID: uuid.NewString(), Target: *al.FreshTarget,
+		Allocation:     registry.AllocationRef{Kind: "allocated", Generation: registry.GetString(retained, "allocation_generation")},
+		RuntimeBinding: &binding, HooksDigest: strings.Repeat("0", 64),
+	})
+	if err != nil || op.Snapshot == nil || op.Snapshot.RedisDB != nil {
+		t.Fatalf("prefixed cleanup snapshot=%+v error=%v", op.Snapshot, err)
+	}
+}
+
+func TestReuseOnlyAllocationRefusesReplacement(t *testing.T) {
+	for _, variant := range []string{"unchanged", "busy", "ports", "project", "database", "missing"} {
+		t.Run(variant, func(t *testing.T) {
+			al, reg, root := freshAllocatorFixture(t)
+			al.PortFree = func(int) bool { return true }
+			if _, err := al.Allocate(root, "fresh", false, "fresh"); err != nil {
+				t.Fatal(err)
+			}
+			al.FreshTarget, al.FreshLocks, al.ReuseOnly = nil, nil, true
+			switch variant {
+			case "busy":
+				al.PortFree = func(int) bool { return false }
+			case "ports":
+				al.ProjectConfig.Data["port_count"] = 2
+			case "project":
+				al.ProjectConfig.Data["project"] = "different"
+			case "database":
+				al.ProjectConfig.Data["database"] = map[string]any{"adapter": "sqlite", "template": "fixture.db", "name": "clone"}
+			case "missing":
+				root = filepath.Join(root, "missing")
+			}
+			before, err := os.ReadFile(reg.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := al.Allocate(root, "fresh", false, "fresh")
+			if variant == "unchanged" {
+				if err != nil || got == nil || !got.Reused {
+					t.Fatal("retained allocation refused", err)
+				}
+			} else if err == nil {
+				t.Fatal("reuse-only replaced resources")
+			}
+			after, err := os.ReadFile(reg.Path)
+			if err != nil || string(before) != string(after) {
+				t.Fatal("reuse-only changed registry", err)
+			}
+		})
+	}
+}
+
+func TestManagedDevPostgreSQLAllocationRetainsBinding(t *testing.T) {
+	for _, main := range []bool{false, true} {
+		t.Run(fmt.Sprint(main), func(t *testing.T) {
+			key := "host_migration_qa/feature"
+			if main {
+				key = "host_migration_qa"
+			}
+			al, reg := managedDevAllocator(t, key)
+			root := al.ProjectConfig.ProjectRoot
+			body := "project: host_migration_qa\ndatabase: {adapter: postgresql, template: treeline_dev_host_migration_qa_template, name: '{template}_{worktree}', host: 127.0.0.1, port: 5432, user: qa}\n"
+			if err := os.WriteFile(filepath.Join(root, config.ProjectConfigFile), []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			first, err := al.Allocate(root, filepath.Base(root), main, "feature")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "treeline_dev_host_migration_qa_template_fixture"
+			if main {
+				want = "treeline_dev_host_migration_qa_template"
+			}
+			if first.DatabaseAdapter != "postgresql" || !slices.Equal(first.Databases, []string{want}) {
+				t.Fatalf("allocation: %#v", first)
+			}
+			second, err := al.Allocate(root, filepath.Base(root), main, "feature")
+			if err != nil || !second.Reused || !slices.Equal(second.Databases, first.Databases) {
+				t.Fatalf("reuse: %#v %v", second, err)
+			}
+			before, err := os.ReadFile(reg.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, config.ProjectConfigFile), []byte(strings.Replace(body, "127.0.0.1", "remote.invalid", 1)), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := al.Allocate(root, filepath.Base(root), main, "feature"); err == nil {
+				t.Fatal("remote config admitted")
+			}
+			after, err := os.ReadFile(reg.Path)
+			if err != nil || !slices.Equal(before, after) {
+				t.Fatal("refusal mutated registry", err)
+			}
+		})
 	}
 }

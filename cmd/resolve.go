@@ -9,7 +9,6 @@ import (
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/resolve"
-	"github.com/git-treeline/cli/internal/service"
 	"github.com/git-treeline/cli/internal/worktree"
 	"github.com/spf13/cobra"
 )
@@ -64,14 +63,13 @@ Examples:
 			return err
 		}
 
-		svcRunning := service.IsRunning()
-		if svcRunning {
+		uc := config.LoadUserConfig("")
+		if uc.RouterMode() != config.RouterModeDisabled && routerServiceRunning() {
 			targetAlloc := findResolvedAlloc(reg, project, explicitBranch, branch, absPath)
 			if targetAlloc != nil {
 				targetBranch, _ := targetAlloc["branch"].(string)
 				targetProject, _ := targetAlloc["project"].(string)
 				if targetBranch != "" && targetProject != "" {
-					uc := config.LoadUserConfig("")
 					url = routerURLFor(uc, 0, targetProject, targetBranch)
 				}
 			}

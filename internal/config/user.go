@@ -511,9 +511,15 @@ var userKnownKeys = map[string]bool{
 	"worktree": true, "editor": true, "warnings": true, "review": true,
 }
 
+// LoadError reports a failure to read or parse user configuration.
+func (uc *UserConfig) LoadError() error { return uc.loadErr }
+
 func (uc *UserConfig) load() map[string]any {
 	raw, err := os.ReadFile(uc.Path)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			uc.loadErr = fmt.Errorf("reading %s: %w", filepath.Base(uc.Path), err)
+		}
 		return copyMap(UserDefaults)
 	}
 

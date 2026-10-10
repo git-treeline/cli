@@ -17,6 +17,7 @@ var relatedJSON bool
 
 func init() {
 	relatedCmd.Flags().BoolVar(&relatedJSON, "json", false, "Output as JSON")
+	relatedCmd.Flags().Bool("read-only", false, "Require non-writing JSON inspection (host compatibility guard)")
 	rootCmd.AddCommand(relatedCmd)
 }
 
@@ -39,7 +40,11 @@ when it isn't currently checked out (dangling).`,
 		abs, _ := filepath.Abs(cwd)
 
 		reg := registry.New("")
-		idx := buildWorktreeIndex(cmd.Context(), reg.Allocations())
+		snapshot, err := reg.SnapshotStrict()
+		if err != nil {
+			return fmt.Errorf("reading related registry: %w", err)
+		}
+		idx := buildWorktreeIndex(cmd.Context(), snapshot.Allocations)
 
 		selfRef, ok := idx.refByPath[resolveIndexPath(idx, abs)]
 		if !ok {
@@ -54,8 +59,11 @@ when it isn't currently checked out (dangling).`,
 			selfRef = registry.RepoRef{Repo: repo, Branch: worktree.CurrentBranch(abs)}
 		}
 
-		pc := config.LoadProjectConfig(worktree.DetectRepoRoot(abs))
-		entries := buildRelated(idx, selfRef, reg.EdgesFor(selfRef), pc.RelatedRepos())
+		relatedRepos, err := loadRelatedRepos(worktree.DetectRepoRoot(abs))
+		if err != nil {
+			return err
+		}
+		entries := buildRelated(idx, selfRef, indexEdges(snapshot.Edges)[selfRef], relatedRepos)
 
 		if relatedJSON {
 			data, err := json.MarshalIndent(entries, "", "  ")
@@ -202,11 +210,10 @@ func buildRelated(idx *worktreeIndex, selfRef registry.RepoRef, edges []registry
 	// repo, not a branch; expand it to every live worktree of that repo.
 	for _, rr := range relatedRepos {
 		matchedLive := false
-		for path, ref := range idx.refByPath {
+		for _, ref := range idx.refByPath {
 			if ref.Repo != rr.Repo || ref == selfRef {
 				continue
 			}
-			_ = path
 			add(ref, rr.Type, "config", "")
 			matchedLive = true
 		}
@@ -218,4 +225,46 @@ func buildRelated(idx *worktreeIndex, selfRef registry.RepoRef, edges []registry
 	}
 
 	return entries
+}
+
+func loadRelatedRepos(root string) ([]config.RelatedRepo, error) {
+	pc := config.LoadProjectConfigReadOnlyQuiet(root)
+	if err := pc.Validate(); err != nil {
+		return nil, fmt.Errorf("reading related config: %w", err)
+	}
+	if err := validateRelatedRepos(pc); err != nil {
+		return nil, err
+	}
+	return pc.RelatedRepos(), nil
+}
+
+func validateRelatedRepos(pc *config.ProjectConfig) error {
+	raw := pc.Data["related_repos"]
+	if raw == nil {
+		return nil
+	}
+	entries, ok := raw.([]any)
+	if !ok {
+		return fmt.Errorf("related_repos in .treeline.yml must be a list")
+	}
+	for _, entry := range entries {
+		switch value := entry.(type) {
+		case string:
+			if value != "" {
+				continue
+			}
+		case map[string]any:
+			repo, valid := value["repo"].(string)
+			if valid && repo != "" {
+				if typ, present := value["type"]; present {
+					if _, valid := typ.(string); !valid {
+						return fmt.Errorf("related_repos type in .treeline.yml must be a string")
+					}
+				}
+				continue
+			}
+		}
+		return fmt.Errorf("related_repos entries in .treeline.yml require a nonempty repo string")
+	}
+	return nil
 }

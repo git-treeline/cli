@@ -329,6 +329,13 @@ func doctorProjectDriftJSONWith(absPath string, reg *registry.Registry) map[stri
 	if !drifted {
 		return nil
 	}
+	return projectDriftJSON(yamlName, registryName)
+}
+
+func projectDriftJSON(yamlName, registryName string) map[string]string {
+	if registryName == "" || yamlName == registryName {
+		return nil
+	}
 	return map[string]string{
 		"status":        "drift",
 		"yaml_project":  yamlName,

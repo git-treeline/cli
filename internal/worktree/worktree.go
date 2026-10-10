@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/git-treeline/cli/internal/process"
 )
@@ -111,6 +112,26 @@ func RepoRoot(path string) (string, error) {
 	}
 	if root == "" {
 		return "", fmt.Errorf("git rev-parse returned an empty repository root")
+	}
+	return root, nil
+}
+
+// RepoRootStrict preserves path whitespace for execution admission. Git emits
+// one terminating newline; additional whitespace can belong to the directory.
+func RepoRootStrict(path string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Dir = path
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("resolving Git worktree root: %w", err)
+	}
+	if !bytes.HasSuffix(out, []byte{'\n'}) {
+		return "", fmt.Errorf("invalid Git worktree root output")
+	}
+	root := string(out[:len(out)-1])
+	if !filepath.IsAbs(root) || !utf8.ValidString(root) || strings.ContainsRune(root, 0) {
+		return "", fmt.Errorf("invalid Git worktree root path")
 	}
 	return root, nil
 }
@@ -236,7 +257,11 @@ func createInRepoWithOptions(repoPath, path, branch string, newBranch bool, base
 		args = append(args, path, branch)
 	}
 
-	if !opts.DeferSetup {
+	return gitRunWithDeferredSetup(repoPath, args, opts.DeferSetup)
+}
+
+func gitRunWithDeferredSetup(repoPath string, args []string, deferSetup bool) error {
+	if !deferSetup {
 		_, err := gitRun(repoPath, args...)
 		return err
 	}
@@ -342,6 +367,85 @@ func FindWorktreeForBranchInRepo(repoPath, branch string) string {
 		}
 	}
 	return ""
+}
+
+// DiscoverWorktreeTargets resolves the primary root and an optional existing
+// branch root from one successful query. Admission callers must distinguish an
+// absent branch from failed or ambiguous discovery; legacy readers remain
+// unchanged.
+func DiscoverWorktreeTargets(repoPath, branch string) (string, string, error) {
+	out, err := gitRun(repoPath, "worktree", "list", "--porcelain", "-z")
+	if err != nil {
+		return "", "", err
+	}
+	return parseWorktreeTargets(out, branch)
+}
+
+func parseWorktreeTargets(out, branch string) (string, string, error) {
+	invalid := func() (string, string, error) {
+		return "", "", fmt.Errorf("invalid or ambiguous git worktree discovery")
+	}
+	if !utf8.ValidString(out) || !strings.HasSuffix(out, "\x00\x00") {
+		return invalid()
+	}
+	var main, target string
+	paths, branches := map[string]bool{}, map[string]bool{}
+	for _, record := range strings.Split(strings.TrimSuffix(out, "\x00\x00"), "\x00\x00") {
+		fields := strings.Split(record, "\x00")
+		if !strings.HasPrefix(fields[0], "worktree ") {
+			return invalid()
+		}
+		path := strings.TrimPrefix(fields[0], "worktree ")
+		if !filepath.IsAbs(path) || len(path) > 4096 || paths[path] {
+			return invalid()
+		}
+		paths[path] = true
+		values := map[string]string{}
+		for _, field := range fields[1:] {
+			key, value, hasValue := strings.Cut(field, " ")
+			if _, duplicate := values[key]; duplicate {
+				return invalid()
+			}
+			switch key {
+			case "HEAD":
+				if !hasValue || len(value) != 40 && len(value) != 64 || strings.Trim(value, "0123456789abcdef") != "" {
+					return invalid()
+				}
+			case "branch":
+				if !strings.HasPrefix(value, "refs/heads/") || len(value) == len("refs/heads/") || branches[value] {
+					return invalid()
+				}
+				branches[value] = true
+			case "detached", "bare":
+				if hasValue {
+					return invalid()
+				}
+			case "locked", "prunable":
+			default:
+				return invalid()
+			}
+			values[key] = value
+		}
+		_, bare := values["bare"]
+		_, detached := values["detached"]
+		_, hasBranch := values["branch"]
+		if bare && (main != "" || values["HEAD"] != "" || detached || hasBranch) {
+			return invalid()
+		}
+		if !bare && (values["HEAD"] == "" || detached == hasBranch) {
+			return invalid()
+		}
+		if main == "" {
+			main = path
+		}
+		if values["branch"] == "refs/heads/"+branch {
+			target = path
+		}
+	}
+	if main == "" {
+		return invalid()
+	}
+	return main, target, nil
 }
 
 // MergedBranches returns branch names that have been merged into the default
@@ -475,8 +579,23 @@ func WorktreeBranches(repoPath string) map[string]string {
 
 // Checkout switches the current directory's worktree to a different branch.
 func Checkout(branch string) error {
-	_, err := gitRun("", "checkout", branch)
-	return err
+	return CheckoutWithOptions(branch, CheckoutOptions{})
+}
+
+type CheckoutOptions struct {
+	DeferSetup bool
+}
+
+// CheckoutWithOptions can defer legacy automatic setup to an admitted caller
+// without suppressing other post-checkout hook behavior.
+func CheckoutWithOptions(branch string, opts CheckoutOptions) error {
+	return CheckoutInRepoWithOptions("", branch, opts)
+}
+
+// CheckoutInRepoWithOptions keeps admitted checkout execution bound to its
+// resolved worktree directory even when the caller runs from a subdirectory.
+func CheckoutInRepoWithOptions(repoPath, branch string, opts CheckoutOptions) error {
+	return gitRunWithDeferredSetup(repoPath, []string{"checkout", branch}, opts.DeferSetup)
 }
 
 // ListBranches returns branch names matching the given prefix.
@@ -502,20 +621,84 @@ func ListBranches(prefix string) []string {
 	return result
 }
 
-// Remove runs `git worktree remove` on the given path. If force is true,
-// it passes --force to remove even with uncommitted changes.
-// Returns nil if the path is the main worktree (cannot be removed).
-func Remove(worktreePath string, force bool) error {
-	mainRepo := DetectMainRepo(worktreePath)
-	if mainRepo == worktreePath {
-		return fmt.Errorf("cannot remove the main worktree")
+// ValidateRemoval refuses primary clones and non-root paths before release effects.
+func ValidateRemoval(worktreePath string) (string, error) {
+	root, err := filepath.EvalSymlinks(worktreePath)
+	if err != nil {
+		return "", err
 	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	top, err := removalGit(root, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", err
+	}
+	topPath, err := filepath.EvalSymlinks(strings.TrimSuffix(string(top), "\n"))
+	if err != nil || topPath != root {
+		return "", fmt.Errorf("release target is not a Git worktree root")
+	}
+	listing, err := removalGit(root, "worktree", "list", "--porcelain", "-z")
+	if err != nil {
+		return "", err
+	}
+	first, _, found := strings.Cut(string(listing), "\x00")
+	if !found || !strings.HasPrefix(first, "worktree ") {
+		return "", fmt.Errorf("cannot establish the primary worktree")
+	}
+	primary, err := filepath.EvalSymlinks(strings.TrimPrefix(first, "worktree "))
+	if err != nil {
+		return "", err
+	}
+	if primary == root {
+		return "", fmt.Errorf("cannot remove the main worktree")
+	}
+	return primary, nil
+}
 
-	args := []string{"worktree", "remove", worktreePath}
-	if force {
-		args = []string{"worktree", "remove", "--force", worktreePath}
+func removalGit(dir string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.fsmonitor=false"}, args...)...)
+	cmd.Dir = dir
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(value, "GIT_") && !strings.HasPrefix(value, "LC_ALL=") {
+			cmd.Env = append(cmd.Env, value)
+		}
 	}
-	_, err := gitRun(mainRepo, args...)
+	cmd.Env = append(cmd.Env, "GIT_OPTIONAL_LOCKS=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	cmd.WaitDelay = time.Second
+	out, err := cmd.Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && len(exit.Stderr) > 0 {
+			return nil, fmt.Errorf("git %s failed: %s: %w", args[0], strings.TrimSpace(string(exit.Stderr)), err)
+		}
+		return nil, fmt.Errorf("git %s failed: %w", args[0], err)
+	}
+	return out, nil
+}
+
+// Remove runs git worktree remove after validating the target, preserving errors.
+func Remove(worktreePath string, force bool) error {
+	mainRepo, err := ValidateRemoval(worktreePath)
+	if err != nil {
+		return err
+	}
+	root, err := filepath.EvalSymlinks(worktreePath)
+	if err != nil {
+		return err
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	args := []string{"worktree", "remove"}
+	if force {
+		args = append(args, "--force")
+	}
+	_, err = removalGit(mainRepo, append(args, "--", root)...)
 	return err
 }
 

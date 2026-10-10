@@ -1573,3 +1573,93 @@ func TestValidate_DatabasePatternAndExtra(t *testing.T) {
 		})
 	}
 }
+
+func TestReadOnlyConfigMatchesWritableOracle(t *testing.T) {
+	families := map[string]string{
+		"database":     "database:\n  pattern: legacy_{worktree}\n",
+		"branch":       "default_branch: release\n",
+		"commands":     "setup_commands:\n  - bin/setup\nstart_command: bin/dev\n",
+		"env_simple":   "env_file:\n  target: .env.test\n  source: .env.test\n",
+		"env_extended": "env_file:\n  target: .env.test\n  source: .env.seed\n",
+		"env_inline":   "env_file: {target: .env.test, source: .env.seed}\n",
+		"editor":       "editor:\n  vscode_title: Legacy\n",
+		"ports":        "ports_needed: 4\n",
+		"modern":       "merge_target: main\ncommands: {start: bin/run}\nenv_file: .env.modern\nport_count: 2\n",
+		"conflicts":    "database: {pattern: old, name: modern}\ndefault_branch: old\nmerge_target: modern\nsetup_commands: [old]\nstart_command: old\ncommands: {start: modern, setup: [modern]}\nenv_file: {target: .env.old, path: .env.modern}\neditor: {vscode_title: old, title: modern}\nports_needed: 8\nport_count: 2\n",
+	}
+	families["combined"] = families["database"] + families["branch"] + families["commands"] + families["env_extended"] + families["editor"] + families["ports"]
+	for name, legacy := range families {
+		t.Run(name, func(t *testing.T) {
+			original, oracle := t.TempDir(), t.TempDir()
+			content := []byte("project: fixture\n" + legacy)
+			path := filepath.Join(original, ProjectConfigFile)
+			for _, dir := range []string{original, oracle} {
+				if err := os.WriteFile(filepath.Join(dir, ProjectConfigFile), content, 0640); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := LoadProjectConfig(oracle)
+			for range 2 {
+				got := LoadProjectConfigReadOnly(original)
+				if got.LoadError() != nil {
+					t.Fatal(got.LoadError())
+				}
+				if !reflect.DeepEqual(got.Data, want.Data) {
+					t.Fatalf("readonly=%#v\nwritable=%#v", got.Data, want.Data)
+				}
+			}
+			after, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entries, err := os.ReadDir(original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != string(content) || before.Mode() != after.Mode() || !os.SameFile(before, after) || len(entries) != 1 {
+				t.Fatal("readonly changed bytes, mode, inode, or entries")
+			}
+		})
+	}
+}
+
+func TestLoadProjectConfigReadOnlyQuietPreservesConfigAndSilence(t *testing.T) {
+	root := t.TempDir()
+	name := filepath.Join(root, ProjectConfigFile)
+	original := []byte("project: fixture\nprivate_unknown_key: private-value\nports_needed: 2\ndatabase:\n  pattern: fixture_database\n")
+	if err := os.WriteFile(name, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	captured, err := os.CreateTemp(t.TempDir(), "output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := captured.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	stdout, stderr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = captured, captured
+	defer func() { os.Stdout, os.Stderr = stdout, stderr }()
+	pc := LoadProjectConfigReadOnlyQuiet(root)
+	os.Stdout, os.Stderr = stdout, stderr
+	if pc.LoadError() != nil || pc.Data["port_count"] != 2 || Dig(pc.Data, "database", "name") != "fixture_database" {
+		t.Fatal("quiet loader lost in-memory compatibility")
+	}
+	if info, err := captured.Stat(); err != nil || info.Size() != 0 {
+		t.Fatal("quiet loader printed configuration", err)
+	}
+	after, err := os.ReadFile(name)
+	if err != nil || string(after) != string(original) {
+		t.Fatal("quiet loader rewrote config", err)
+	}
+}

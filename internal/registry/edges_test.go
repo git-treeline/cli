@@ -206,8 +206,8 @@ func TestMigrate_V1RegistryGainsEdges(t *testing.T) {
 	if err := json.Unmarshal(raw, &data); err != nil {
 		t.Fatal(err)
 	}
-	if data.Version != currentVersion {
-		t.Errorf("expected version %d after migration, got %d", currentVersion, data.Version)
+	if data.Version != 3 {
+		t.Errorf("expected legacy write to remain schema 3, got %d", data.Version)
 	}
 	if len(data.Allocations) != 2 {
 		t.Errorf("expected 2 allocations to survive migration, got %d", len(data.Allocations))
@@ -222,18 +222,21 @@ func TestMigrate_V1RegistryGainsEdges(t *testing.T) {
 }
 
 func TestMigrate_Idempotent(t *testing.T) {
-	data := RegistryData{Version: 1, Allocations: nil, Edges: nil}
+	data := RegistryData{Version: 1, Allocations: []Allocation{{"worktree": "/wt/legacy"}}, Edges: nil}
 	migrate(&data)
-	if data.Version != currentVersion {
-		t.Errorf("expected version %d, got %d", currentVersion, data.Version)
+	if data.Version != 2 {
+		t.Errorf("expected readonly legacy version 2, got %d", data.Version)
 	}
 	if data.Allocations == nil || data.Edges == nil {
 		t.Error("expected non-nil slices after migrate")
 	}
+	if GetString(data.Allocations[0], "allocation_generation") != "" {
+		t.Fatal("readonly migration assigned an enrollment")
+	}
 	// Second pass must not change anything.
 	before := len(data.Edges)
 	migrate(&data)
-	if len(data.Edges) != before || data.Version != currentVersion {
+	if len(data.Edges) != before || data.Version != 2 {
 		t.Error("migrate is not idempotent")
 	}
 }

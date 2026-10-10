@@ -75,7 +75,11 @@ func TestBuildRelated_EdgeResolution(t *testing.T) {
 		},
 	}
 
-	entries := buildRelated(idx, self, reg.EdgesFor(self), nil)
+	snapshot, err := reg.SnapshotStrict()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := buildRelated(idx, self, indexEdges(snapshot.Edges)[self], nil)
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 related entries, got %d", len(entries))
 	}

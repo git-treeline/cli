@@ -10,6 +10,8 @@ import (
 	"github.com/git-treeline/cli/internal/confirm"
 	"github.com/git-treeline/cli/internal/detect"
 	"github.com/git-treeline/cli/internal/format"
+	"github.com/git-treeline/cli/internal/registry"
+	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/style"
 	"github.com/git-treeline/cli/internal/worktree"
 	"github.com/spf13/cobra"
@@ -22,6 +24,7 @@ var newOpen bool
 var newDryRun bool
 var newForce bool
 var newNoSetup bool
+var newAllocateOnly bool
 var newStrict bool
 
 func init() {
@@ -32,10 +35,14 @@ func init() {
 	newCmd.Flags().BoolVar(&newDryRun, "dry-run", false, "Print what would happen without making changes")
 	newCmd.Flags().BoolVarP(&newForce, "force", "f", false, "Skip confirmation when creating from inside a worktree")
 	newCmd.Flags().BoolVar(&newNoSetup, "no-setup", false, "Create the worktree only — skip allocation, env, and setup commands (run 'gtl setup' later)")
+	newCmd.Flags().BoolVar(&newAllocateOnly, "allocate-only", false, "Create a fresh worktree and allocate resource metadata; defer environment and setup effects")
 	newCmd.Flags().BoolVar(&newStrict, "strict", false, "Fail instead of continuing with a warning when the worktree database cannot be cloned")
 	newCmd.MarkFlagsMutuallyExclusive("no-setup", "start")
 	newCmd.MarkFlagsMutuallyExclusive("no-setup", "strict")
 	newCmd.MarkFlagsMutuallyExclusive("no-setup", "open")
+	for _, flag := range []string{"no-setup", "start", "open", "strict"} {
+		newCmd.MarkFlagsMutuallyExclusive("allocate-only", flag)
+	}
 	newCmd.ValidArgsFunction = completeBranches
 	rootCmd.AddCommand(newCmd)
 }
@@ -47,7 +54,12 @@ var newCmd = &cobra.Command{
 and run setup commands. Combines 'git worktree add' with 'gtl setup' in one step.
 
 If the branch already exists locally or on origin, it is checked out.
-Otherwise a new branch is created from --base (or the current branch).`,
+Otherwise a new branch is created from --base (or the current branch).
+
+With --allocate-only, the destination must be new and .treeline.yml must exist.
+Resource metadata is enrolled during creation. Complete setup with
+gtl setup --complete-allocation <generation> to write the environment, copy files,
+provision databases, and run setup hooks and commands.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		branch := args[0]
@@ -58,16 +70,52 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		}
 		absPath, _ := filepath.Abs(cwd)
 		mainRepo := worktree.DetectMainRepo(absPath)
-		var pc *config.ProjectConfig
-		if newDryRun {
-			pc = config.LoadProjectConfigReadOnly(mainRepo)
-		} else {
-			pc = config.LoadProjectConfig(mainRepo)
-		}
+		pc := config.LoadProjectConfigReadOnly(mainRepo)
 		uc := config.LoadUserConfig("")
+		var admission *creationAdmission
+		if !newDryRun {
+			admission, err = admitCreation(cmd.Context(), func() (creationSelection, error) {
+				selected, err := discoverCreation(cwd, branch, false, func(source string, pc *config.ProjectConfig, uc *config.UserConfig) string {
+					return resolveWorktreePath(newPath, source, pc.Project(), branch, uc)
+				})
+				if err == nil && newAllocateOnly {
+					if selected.existing != "" {
+						return selected, fmt.Errorf("--allocate-only requires a fresh worktree destination")
+					}
+					if _, statErr := os.Lstat(selected.target); statErr == nil || !os.IsNotExist(statErr) {
+						return selected, fmt.Errorf("--allocate-only requires an absent worktree destination")
+					}
+				}
+				return selected, err
+			})
+			if err != nil {
+				return err
+			}
+			// Cleanup does not change the completed operation or its receipt.
+			defer func() { _ = admission.locks.Close() }()
+			mainRepo = admission.source
+			if !newAllocateOnly {
+				pc = config.LoadProjectConfig(mainRepo)
+			} else {
+				pc = config.LoadProjectConfigReadOnly(mainRepo)
+			}
+			uc = config.LoadUserConfig("")
+		}
+
+		if newAllocateOnly {
+			if err := pc.LoadError(); err != nil {
+				return err
+			}
+			if !pc.Exists() {
+				return fmt.Errorf("--allocate-only requires .treeline.yml")
+			}
+			if err := pc.Validate(); err != nil {
+				return err
+			}
+		}
 
 		if isInWorktree(absPath, mainRepo) && !newForce && !newDryRun {
-			wtPath := resolveWorktreePath(newPath, mainRepo, pc.Project(), branch, uc)
+			wtPath := admission.target
 
 			fmt.Println()
 			fmt.Printf("You're in worktree '%s'. The new worktree will be created at:\n", filepath.Base(absPath))
@@ -95,24 +143,29 @@ Otherwise a new branch is created from --base (or the current branch).`,
 						return err
 					}
 					pc = config.LoadProjectConfig(mainRepo)
+					if err := admission.recheck(); err != nil {
+						return err
+					}
 				} else {
 					// User declined — create worktree only, no allocation
-					return createWorktreeOnly(mainRepo, branch, uc, pc)
+					return createWorktreeOnly(branch, pc, admission)
 				}
 			} else {
 				// Not a server project — create worktree only, no allocation
-				return createWorktreeOnly(mainRepo, branch, uc, pc)
+				return createWorktreeOnly(branch, pc, admission)
 			}
 		}
 
 		warnServeNotInstalled()
 
 		projectName := pc.Project()
-		wtPath := resolveWorktreePath(newPath, mainRepo, projectName, branch, uc)
-
 		if newDryRun {
 			return printNewDryRun(branch, mainRepo, pc, uc, false)
 		}
+		if err := admission.recheck(); err != nil {
+			return err
+		}
+		wtPath := admission.target
 
 		if err := ensureGitignored(mainRepo, wtPath, os.Stdout); err != nil {
 			return err
@@ -120,7 +173,7 @@ Otherwise a new branch is created from --base (or the current branch).`,
 
 		// If the branch is already in a worktree, ensure it has an allocation
 		// and treat the command as resumable.
-		if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
+		if existingWT := admission.existing; existingWT != "" {
 			fmt.Println(style.Actionf("Branch '%s' already checked out at %s", branch, existingWT))
 			if newNoSetup {
 				fmt.Printf("\n  cd %s\n", existingWT)
@@ -141,7 +194,10 @@ Otherwise a new branch is created from --base (or the current branch).`,
 				}
 			}
 
-			if handled, err := maybeStartServer(newStart, pc, existingWT); handled {
+			if err := admission.retainForStart(newStart); err != nil {
+				return err
+			}
+			if handled, err := maybeStartServer(newStart, pc, existingWT, admission.locks); handled {
 				return err
 			}
 
@@ -154,15 +210,34 @@ Otherwise a new branch is created from --base (or the current branch).`,
 		if existing {
 			_ = worktree.Fetch("origin", branch) // non-fatal: branch may only exist locally
 			fmt.Println(style.Actionf("Checking out existing branch '%s'", branch))
-			if err := worktree.CreateWithOptions(wtPath, branch, false, "", worktree.CreateOptions{DeferSetup: newNoSetup}); err != nil {
+			if err := worktree.CreateWithOptions(wtPath, branch, false, "", worktree.CreateOptions{DeferSetup: true}); err != nil {
 				return err
 			}
 		} else {
 			base := resolveBase(pc)
 			fmt.Println(style.Actionf("Creating branch '%s' from '%s'", branch, base))
-			if err := worktree.CreateWithOptions(wtPath, branch, true, base, worktree.CreateOptions{DeferSetup: newNoSetup}); err != nil {
+			if err := worktree.CreateWithOptions(wtPath, branch, true, base, worktree.CreateOptions{DeferSetup: true}); err != nil {
 				return err
 			}
+		}
+
+		if newAllocateOnly {
+			target, err := registry.CaptureReleaseTarget(wtPath)
+			if err != nil {
+				return err
+			}
+			s := setup.NewWithOptions(wtPath, mainRepo, uc, setup.Options{AllocateOnly: true})
+			s.Allocator.FreshTarget, s.Allocator.FreshLocks = &target, admission.locks
+			if _, err := s.Run(); err != nil {
+				return err
+			}
+			fmt.Println(style.Actionf("Worktree created and resources allocated at %s", wtPath))
+			allocation, err := s.Registry.FindForRelease(wtPath)
+			if err != nil {
+				return err
+			}
+			fmt.Println(style.Dimf("Run 'gtl setup --complete-allocation %s' to prepare the environment and dependencies.", registry.GetString(allocation, "allocation_generation")))
+			return nil
 		}
 
 		if newNoSetup {
@@ -172,14 +247,18 @@ Otherwise a new branch is created from --base (or the current branch).`,
 			return nil
 		}
 
-		alloc, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stdout, newStrict)
+		alloc, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stdout, newStrict, admission.locks)
 		if err != nil {
 			return err
 		}
 
 		maybeOpenInBrowser(newOpen, uc, alloc.Port, projectName, alloc.Branch)
 
-		if handled, err := maybeStartServer(newStart, config.LoadProjectConfig(wtPath), wtPath); handled {
+		startConfig := config.LoadProjectConfig(wtPath)
+		if err := admission.retainForStart(newStart); err != nil {
+			return err
+		}
+		if handled, err := maybeStartServer(newStart, startConfig, wtPath, admission.locks); handled {
 			return err
 		}
 
@@ -189,6 +268,17 @@ Otherwise a new branch is created from --base (or the current branch).`,
 
 func printNewDryRun(branch, mainRepo string, pc *config.ProjectConfig, uc *config.UserConfig, noConfig bool) error {
 	wtPath := resolveWorktreePath(newPath, mainRepo, pc.Project(), branch, uc)
+	if newAllocateOnly {
+		if existing := worktree.FindWorktreeForBranch(branch); existing != "" {
+			return fmt.Errorf("--allocate-only requires a fresh worktree destination")
+		}
+		if _, err := os.Lstat(wtPath); err == nil || !os.IsNotExist(err) {
+			return fmt.Errorf("--allocate-only requires an absent worktree destination")
+		}
+		if err := validateManagedDevCreation(mainRepo, wtPath, branch); err != nil {
+			return err
+		}
+	}
 	if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
 		wtPath = existingWT
 		fmt.Printf("[dry-run] Would reuse worktree for branch '%s'\n", branch)
@@ -204,6 +294,10 @@ func printNewDryRun(branch, mainRepo string, pc *config.ProjectConfig, uc *confi
 		} else {
 			fmt.Println("[dry-run] --no-setup: would skip gtl setup")
 		}
+		return nil
+	}
+	if newAllocateOnly {
+		fmt.Println("[dry-run] Would allocate resource metadata; environment and setup effects deferred")
 		return nil
 	}
 	fmt.Println("[dry-run] Would run: gtl setup")
@@ -247,13 +341,13 @@ func completeBranches(cmd *cobra.Command, args []string, toComplete string) ([]s
 
 // createWorktreeOnly creates a worktree without any port/database allocation.
 // Used for non-server projects or when user declines full setup.
-func createWorktreeOnly(mainRepo, branch string, uc *config.UserConfig, pc *config.ProjectConfig) error {
-	wtPath := resolveWorktreePath(newPath, mainRepo, pc.Project(), branch, uc)
-	if newDryRun {
-		return printNewDryRun(branch, mainRepo, pc, uc, true)
+func createWorktreeOnly(branch string, pc *config.ProjectConfig, admission *creationAdmission) error {
+	if err := admission.recheck(); err != nil {
+		return err
 	}
+	mainRepo, wtPath := admission.source, admission.target
 
-	if existingWT := worktree.FindWorktreeForBranch(branch); existingWT != "" {
+	if existingWT := admission.existing; existingWT != "" {
 		fmt.Println(style.Actionf("Branch '%s' already checked out at %s", branch, existingWT))
 		fmt.Println()
 		fmt.Printf("  cd %s\n", existingWT)
@@ -269,13 +363,13 @@ func createWorktreeOnly(mainRepo, branch string, uc *config.UserConfig, pc *conf
 	if existing {
 		_ = worktree.Fetch("origin", branch)
 		fmt.Println(style.Actionf("Checking out existing branch '%s'", branch))
-		if err := worktree.CreateWithOptions(wtPath, branch, false, "", worktree.CreateOptions{DeferSetup: newNoSetup}); err != nil {
+		if err := worktree.CreateWithOptions(wtPath, branch, false, "", worktree.CreateOptions{DeferSetup: true}); err != nil {
 			return err
 		}
 	} else {
 		base := resolveBase(pc)
 		fmt.Println(style.Actionf("Creating branch '%s' from '%s'", branch, base))
-		if err := worktree.CreateWithOptions(wtPath, branch, true, base, worktree.CreateOptions{DeferSetup: newNoSetup}); err != nil {
+		if err := worktree.CreateWithOptions(wtPath, branch, true, base, worktree.CreateOptions{DeferSetup: true}); err != nil {
 			return err
 		}
 	}

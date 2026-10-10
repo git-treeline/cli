@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/git-treeline/cli/internal/allocator"
 	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/devresources"
 	"github.com/git-treeline/cli/internal/proxy"
 	"github.com/git-treeline/cli/internal/registry"
 	"github.com/git-treeline/cli/internal/service"
@@ -85,7 +87,7 @@ func maybeOpenInBrowser(open bool, uc *config.UserConfig, port int, project, bra
 // with --start. handled reports whether the flag was set at all — when true
 // the caller should return err as its own result (the flag consumed the rest
 // of the command), when false the caller continues its normal tail.
-func maybeStartServer(start bool, pc *config.ProjectConfig, dir string) (handled bool, err error) {
+func maybeStartServer(start bool, pc *config.ProjectConfig, dir string, held ...*registry.LifecycleLocks) (handled bool, err error) {
 	if !start {
 		return false, nil
 	}
@@ -95,6 +97,20 @@ func maybeStartServer(start bool, pc *config.ProjectConfig, dir string) (handled
 		return true, nil
 	}
 	fmt.Println(style.Actionf("Starting: %s", startCmd))
+	tracked, err := hasTrackedRuntime(registry.New(""), dir)
+	if err != nil {
+		return true, err
+	}
+	if tracked {
+		var locks *registry.LifecycleLocks
+		if len(held) == 1 {
+			locks = held[0]
+		}
+		return true, runTrackedStart(context.Background(), dir, locks, "", false)
+	}
+	if devresources.Active() {
+		return true, fmt.Errorf("managed dev start requires a tracked allocation")
+	}
 	return true, execInWorktree(dir, startCmd)
 }
 
@@ -106,6 +122,9 @@ func maybeStartServer(start bool, pc *config.ProjectConfig, dir string) (handled
 func ensureWorktreeAllocation(wtPath, mainRepo string, uc *config.UserConfig, progress io.Writer, strictDB bool) (registry.Allocation, error) {
 	reg := registry.New("")
 	if alloc := reg.Find(wtPath); alloc != nil {
+		if err := validateManagedDevRuntime(wtPath, alloc, false); err != nil {
+			return nil, err
+		}
 		return alloc, nil
 	}
 	_, _ = fmt.Fprintln(progress, style.Actionf("No allocation found — running setup..."))
@@ -124,7 +143,16 @@ func ensureWorktreeAllocation(wtPath, mainRepo string, uc *config.UserConfig, pr
 // so a failed 'new'/'claim' leaves no trace (no orphaned directory,
 // invisible to prune). Shared by 'gtl new' (both the new-branch and
 // existing-branch paths) and 'gtl claim' (its adopt path).
-func runSetupWithRollback(cmd *cobra.Command, wtPath, mainRepo string, uc *config.UserConfig, progress io.Writer, strictDB bool) (*allocator.Allocation, error) {
+func runSetupWithRollback(cmd *cobra.Command, wtPath, mainRepo string, uc *config.UserConfig, progress io.Writer, strictDB bool, locks *registry.LifecycleLocks) (*allocator.Allocation, error) {
+	allocation, _, err := runSetupWithRollbackPolicy(cmd, wtPath, mainRepo, uc, progress, strictDB, locks, true)
+	return allocation, err
+}
+
+func runSetupWithRollbackOutcome(cmd *cobra.Command, wtPath, mainRepo string, uc *config.UserConfig, progress io.Writer, strictDB bool, locks *registry.LifecycleLocks) (*allocator.Allocation, string, error) {
+	return runSetupWithRollbackPolicy(cmd, wtPath, mainRepo, uc, progress, strictDB, locks, false)
+}
+
+func runSetupWithRollbackPolicy(cmd *cobra.Command, wtPath, mainRepo string, uc *config.UserConfig, progress io.Writer, strictDB bool, locks *registry.LifecycleLocks, allowLegacy bool) (*allocator.Allocation, string, error) {
 	_, _ = fmt.Fprintln(progress, style.Actionf("Worktree created at %s", wtPath))
 	_, _ = fmt.Fprintln(progress, style.Actionf("Running setup..."))
 
@@ -132,6 +160,31 @@ func runSetupWithRollback(cmd *cobra.Command, wtPath, mainRepo string, uc *confi
 	s.Log = progress
 	s.Options.DryRun = false
 	s.Options.StrictDB = strictDB
+	target, err := registry.CaptureReleaseTarget(wtPath)
+	if err != nil {
+		return nil, "unknown", cliErr(cmd, errSetupFailed(err))
+	}
+	if locks == nil {
+		return nil, "unknown", cliErr(cmd, errSetupFailed(fmt.Errorf("fresh creation lifecycle lock is required")))
+	}
+	existing, err := s.Registry.FindForRelease(target.Path)
+	if err != nil {
+		return nil, "unknown", cliErr(cmd, errSetupFailed(err))
+	}
+	if existing != nil {
+		return nil, "unknown", cliErr(cmd, errSetupFailed(fmt.Errorf("fresh creation target is already allocated")))
+	}
+	tracked := true
+	if allowLegacy && !devresources.Active() {
+		snapshot, err := s.Registry.SnapshotStrict()
+		if err != nil {
+			return nil, "unknown", cliErr(cmd, errSetupFailed(err))
+		}
+		tracked = snapshot.Version >= 4
+	}
+	if tracked {
+		s.Allocator.FreshTarget, s.Allocator.FreshLocks = &target, locks
+	}
 	alloc, err := s.Run()
 	if err != nil {
 		var sce *setup.SetupCommandError
@@ -140,18 +193,24 @@ func runSetupWithRollback(cmd *cobra.Command, wtPath, mainRepo string, uc *confi
 			// Don't remove the worktree; user can fix env and re-run gtl setup.
 			_, _ = fmt.Fprintln(progress, style.Warnf("Setup commands failed — worktree kept at %s", wtPath))
 			_, _ = fmt.Fprintln(progress, style.Dimf("Fix the issue above and re-run 'gtl setup'."))
-			return nil, cliErr(cmd, errSetupFailed(err))
+			return nil, "retained", cliErr(cmd, errSetupFailed(err))
 		}
 		// Fatal setup error (allocation, config, env file, DB) — roll back.
-		if rmErr := worktree.Remove(wtPath, true); rmErr != nil {
+		outcome := "unknown"
+		rmErr := registry.VerifyReleaseTarget(target)
+		if rmErr == nil {
+			rmErr = worktree.Remove(wtPath, true)
+		}
+		if rmErr != nil {
 			fmt.Fprintln(os.Stderr, style.Warnf("Could not remove worktree after failed setup: %s", rmErr))
 			fmt.Fprintln(os.Stderr, style.Dimf("  Remove it manually: git worktree remove --force %s", wtPath))
 		} else {
+			outcome = "rolled_back"
 			_, _ = fmt.Fprintln(progress, style.Dimf("Rolled back worktree %s after setup failure.", wtPath))
 		}
-		return nil, cliErr(cmd, errSetupFailed(err))
+		return nil, outcome, cliErr(cmd, errSetupFailed(err))
 	}
-	return alloc, nil
+	return alloc, "retained", nil
 }
 
 // ensureGitignored delegates to worktree.EnsureGitignored and prints a

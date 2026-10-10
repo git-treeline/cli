@@ -840,3 +840,38 @@ func TestExtractDatabases(t *testing.T) {
 		})
 	}
 }
+
+func TestFindStrict(t *testing.T) {
+	for _, kind := range []string{"missing", "valid", "malformed", "directory"} {
+		t.Run(kind, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "registry.json")
+			switch kind {
+			case "valid":
+				if err := os.WriteFile(path, []byte(`{"allocations":[{"worktree":"/tmp/strict/../fixture","project":"app","links":{"api":"feature","invalid":3}}]}`), 0640); err != nil {
+					t.Fatal(err)
+				}
+			case "malformed":
+				if err := os.WriteFile(path, []byte(`{"allocations":`), 0640); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Mkdir(path, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			alloc, err := New(path).FindStrict("/tmp/fixture")
+			if (err != nil) != (kind == "malformed" || kind == "directory") {
+				t.Fatalf("error=%v", err)
+			}
+			if (alloc != nil) != (kind == "valid") {
+				t.Fatalf("allocation=%v", alloc)
+			}
+			if kind == "valid" {
+				links := LinksFromAllocation(alloc)
+				if len(links) != 1 || links["api"] != "feature" {
+					t.Fatalf("links=%v", links)
+				}
+			}
+		})
+	}
+}

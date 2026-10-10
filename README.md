@@ -296,6 +296,62 @@ git worktree remove ../myapp-feature-auth
 
 For bulk cleanup: `gtl release --project myapp --drop-db` or `gtl release --all --drop-db`.
 
+Tracked allocations retain an operation ID when release cannot finish. Use the
+reported `gtl release status <operation-id>` to inspect its JSON outcome, and
+`gtl release resume <operation-id>` to continue that same request. Resume skips
+completed phases; it refuses to repeat a hook or cleanup whose outcome is unknown.
+Changed target identities or bound configuration also block execution.
+
+The development host contract begins with
+`gtl release inspect PATH --operation-id UUID`, which returns a
+[`ReleaseRequest`](internal/registry/release_operations.go) without starting
+cleanup or retaining an operation. Explicit `--drop-db`, `--remove-worktree`,
+`--force-dirty` and `--ignore-hook-failure` flags set the requested policies.
+The host must retain that exact request before submitting it to
+`gtl release start` as bounded JSON on stdin. Use the same status/resume commands
+after a lost response; do not inspect again to replace an interrupted request.
+Its explicit policies independently select
+database cleanup, directory removal, dirty removal and hook-failure override.
+Submitting a request does not silently enable any of them. JSON responses use
+schema 1 and include the retained operation and its phase outcomes.
+
+Tracked execution requires registry schema 4 and a fresh supported worktree
+creation/start sequence. Legacy ownership is not inferred from a missing process
+or socket; structured release refuses unknown runtime ownership. Mixed old/new
+lifecycle writers and automatic live migration are not supported. Host rollout
+must require a compatible CLI before enabling this contract. Ordinary `new`,
+`review`, and `claim` continue to work with existing legacy registries without
+opting those allocations into tracked runtime ownership. Do not run an older CLI
+against a registry enrolled in tracked execution: older release commands can run
+hooks or database cleanup before detecting an unsupported registry version.
+
+App-managed development hosts (`TREELINE_MANAGED=app` and
+`TREELINE_CHANNEL=dev`) support a bounded fixture lifecycle using the canonical
+`GTL_HOME=$HOME/.treeline-dev/gtl`. Existing state directories must be owned by
+the current user: `.treeline-dev` must not be group/world writable, and `gtl`
+must be private. Neither directory nor its registry/config files may redirect
+through symlinks. Missing state is not created by inspection.
+
+Supported reads are `status --json`, `related --json`, `env`/`env show`, `routes`
+and `doctor` with `--json --read-only`, `claim --inspect-json --operation-id UUID`,
+`release status UUID`, and `provision --dry-run`, plus help/version. Status does
+not reap processes, create process trackers, or update stored branches.
+
+With the resource contract configured, `setup`, `new`, `claim`, `start`, `stop`,
+`restart`, and `release inspect`/`start`/`resume` are admitted after resource and
+ownership checks. Repositories, worktrees, Git metadata, and copied fixtures
+must stay within `$HOME/.treeline-dev/workspaces`. Ports come only from four
+explicitly reserved ten-port blocks, 42000–42039, with project/branch mappings
+and no overlap with normal allocations. Supported resources are HTTP services,
+contained SQLite files, the loopback PostgreSQL QA template
+`treeline_dev_host_migration_qa_template` and its worktree-suffixed databases,
+and Redis prefixes `host_migration_qa:<worktree-name>` on
+`redis://localhost:6379`. PostgreSQL and Redis require the `host_migration_qa`
+project. Hooks, arbitrary setup commands, Redis database allocation, shared
+router/hosts-file/tunnel changes, and resources outside this contract remain
+unavailable. Normal CLI use, including a standalone `GTL_HOME` override, retains
+its existing behavior.
+
 ### 14. Refresh after config changes
 
 ```bash
@@ -930,16 +986,16 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 |---|---|---|
 | `gtl install` | | Set up git-treeline for this project and machine (config, hook, setup, optional HTTPS) |
 | `gtl init` | `--project` `--template-db` `--skip-agent-config` | Generate `.treeline.yml` (auto-detects framework, writes `AGENTS.md` section) |
-| `gtl new <branch>` | `--base` `--path` `--start` `--open` `--no-setup` `--strict` `--dry-run` `--force`/`-f` | Create worktree + allocate + setup in one step |
+| `gtl new <branch>` | `--base` `--path` `--start` `--open` `--no-setup` `--allocate-only` `--strict` `--dry-run` `--force`/`-f` | Create worktree + allocate + setup in one step; `--allocate-only` requires a fresh destination and defers environment/provisioning to `gtl setup --complete-allocation <generation>` |
 | `gtl claim <branch>` | `--path` `--no-setup` | Fetch a branch and ensure a worktree exists at its latest commit — adopts (never creates) the branch and fast-forwards; idempotent, prints only the worktree path to stdout |
 | `gtl review <PR#>` | `--path` `--start` `--open` `--no-setup` | Check out a GitHub PR into a worktree with full setup (requires `gh`) |
 | `gtl switch <branch-or-PR#>` | `--setup` `--restart` | Switch worktree to a different branch or PR — fetches, checks out, refreshes env |
-| `gtl setup [PATH]` | `--main-repo` `--dry-run` | Allocate resources and configure a worktree (idempotent) |
+| `gtl setup [PATH]` | `--main-repo` `--dry-run` `--complete-allocation <generation>` | Allocate resources and configure a worktree (idempotent) |
 | `gtl provision [PATH]` | `--dry-run` | Make a host meet a repo's declared prerequisites (apt/services/runtimes/template DB) before setup (idempotent) |
 | `gtl release [PATH]` | `--drop-db` `--remove-worktree` `--project` `--all` `--force`/`-f` `--dry-run` | Free allocated resources (confirms before releasing unless `--force`) |
 | `gtl port` | `--json` | Print the allocated port for the current worktree |
 | `gtl refresh` | `--dry-run` `--force`/`-f` | Re-allocate all worktrees with current reservations; restarts supervised servers |
-| `gtl doctor` | `--json` | Check config, allocation, runtime, and diagnostics |
+| `gtl doctor` | `--json` `--fix` `--read-only` | Check config, allocation, runtime, and diagnostics |
 | `gtl update` | `--check` `--json` | Update git-treeline via the package manager it was installed with (Homebrew or `go install`); `--check` only reports |
 | `gtl status` | `--project` `--json` `--check` `--watch` `--interval` | Show allocations across projects |
 | `gtl worktrees` | aliases: `wt` | Interactive TUI picker for worktrees (grouped by project) |
@@ -950,9 +1006,9 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl restart` | | Restart the server process in the original terminal |
 | `gtl open` | | Open current worktree in browser (prefers serve HTTPS URL) |
 | `gtl clone <url>` | (passthrough to git) | Clone + detect framework + init + setup in one step |
-| `gtl env` / `gtl env show` | `--json` `--template` | Print env file with Treeline-managed key annotations |
+| `gtl env` / `gtl env show` | `--json` `--template` `--read-only` | Print env file with Treeline-managed key annotations |
 | `gtl env sync` | | Re-sync env file and editor settings from `.treeline.yml` |
-| `gtl routes` | `--json` | Show routing URLs for the current worktree (all ports + tunnel) |
+| `gtl routes` | `--json` `--read-only` | Show routing URLs for the current worktree (all ports + tunnel) |
 | `gtl resolve <project> [branch]` | `--json` | Look up another project's allocated URL |
 | `gtl link <project> <branch>` | `--restart` `--json` | Override resolve target for a project |
 | `gtl unlink <project>` | | Revert resolve override to same-branch default |
@@ -985,6 +1041,14 @@ gtl db name --json         # {"database": "myapp_feature_xyz"}
 | `gtl dashboard` | aliases: `dash`, `ui` | Interactive TUI for monitoring and managing all worktrees |
 | `gtl mcp` | | MCP server for AI agents (started automatically by your editor) |
 | `gtl version` | | Print version |
+
+`routes`, `env`, `env show`, and `doctor` accept `--json --read-only` for
+non-writing introspection: no configuration migrations, state-directory changes,
+update checks, or lifecycle hooks. This flag requires JSON and cannot combine
+with `--fix` or `--template`; it does not apply to `env sync` or lifecycle commands.
+Malformed or unreadable configuration and registry files fail instead of silently
+using defaults. Missing files keep their usual defaults or missing-allocation
+behavior. Runtime health probes still run; this is not an offline mode.
 
 ## Acknowledgments
 

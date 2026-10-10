@@ -21,6 +21,7 @@ var reviewPath string
 var reviewStart bool
 var reviewOpen bool
 var reviewNoSetup bool
+var lookupReviewPR = github.LookupPR
 
 // parsePRNumber parses a PR number argument, accepting an optional leading '#'
 // (e.g. both "473" and "#473") and surrounding whitespace (e.g. a "#473 "
@@ -71,7 +72,7 @@ The PR may be given as a bare number or with a leading '#':
 		}
 
 		fmt.Printf("==> Looking up PR #%d...\n", prNumber)
-		pr, err := github.LookupPR(prNumber)
+		pr, err := lookupReviewPR(prNumber)
 		if err != nil {
 			return err
 		}
@@ -83,10 +84,26 @@ The PR may be given as a bare number or with a leading '#':
 		if err != nil {
 			return fmt.Errorf("getting working directory: %w", err)
 		}
-		absPath, _ := filepath.Abs(cwd)
-		mainRepo := worktree.DetectMainRepo(absPath)
+		admission, err := admitCreation(cmd.Context(), func() (creationSelection, error) {
+			return discoverCreation(cwd, branch, true, func(source string, pc *config.ProjectConfig, uc *config.UserConfig) string {
+				if reviewPath != "" {
+					return reviewPath
+				}
+				if path := uc.ResolveWorktreePath(source, pc.Project(), branch); path != "" {
+					return path
+				}
+				return filepath.Join(filepath.Dir(source), fmt.Sprintf("%s-pr-%d", pc.Project(), prNumber))
+			})
+		})
+		if err != nil {
+			return err
+		}
+		// Cleanup does not change the completed operation or its receipt.
+		defer func() { _ = admission.locks.Close() }()
+		mainRepo := admission.source
 
-		if isInWorktree(absPath, mainRepo) {
+		if admission.inPlace {
+			absPath := admission.target
 			pc := config.LoadProjectConfig(absPath)
 			uc := config.LoadUserConfig("")
 
@@ -101,7 +118,7 @@ The PR may be given as a bare number or with a leading '#':
 				return nil
 			}
 			fmt.Println()
-			if err := switchWorktreeBranch(absPath, mainRepo, branch, false); err != nil {
+			if err := switchWorktreeBranchWithOptions(absPath, mainRepo, branch, false, worktree.CheckoutOptions{DeferSetup: true}); err != nil {
 				return cliErr(cmd, err)
 			}
 
@@ -119,7 +136,10 @@ The PR may be given as a bare number or with a leading '#':
 				maybeOpenInBrowser(reviewOpen, uc, primaryPort, projectName, branch)
 			}
 
-			if handled, err := maybeStartServer(reviewStart, pc, absPath); handled {
+			if err := admission.retainForStart(reviewStart); err != nil {
+				return err
+			}
+			if handled, err := maybeStartServer(reviewStart, pc, absPath, admission.locks); handled {
 				return err
 			}
 
@@ -130,13 +150,7 @@ The PR may be given as a bare number or with a leading '#':
 		uc := config.LoadUserConfig("")
 		projectName := pc.Project()
 
-		wtPath := reviewPath
-		if wtPath == "" {
-			wtPath = uc.ResolveWorktreePath(mainRepo, projectName, branch)
-		}
-		if wtPath == "" {
-			wtPath = filepath.Join(filepath.Dir(mainRepo), fmt.Sprintf("%s-pr-%d", projectName, prNumber))
-		}
+		wtPath := admission.target
 
 		if err := ensureGitignored(mainRepo, wtPath, os.Stdout); err != nil {
 			return err
@@ -144,7 +158,7 @@ The PR may be given as a bare number or with a leading '#':
 
 		// If the branch is already in a worktree, ensure it has an allocation
 		// and treat the command as resumable rather than a dead end.
-		if existing := worktree.FindWorktreeForBranch(branch); existing != "" {
+		if existing := admission.existing; existing != "" {
 			fmt.Printf("==> Branch '%s' already checked out at %s\n", branch, existing)
 			alloc, err := ensureWorktreeAllocation(existing, mainRepo, uc, os.Stdout, false)
 			if err != nil {
@@ -160,7 +174,10 @@ The PR may be given as a bare number or with a leading '#':
 				}
 			}
 
-			if handled, err := maybeStartServer(reviewStart, pc, existing); handled {
+			if err := admission.retainForStart(reviewStart); err != nil {
+				return err
+			}
+			if handled, err := maybeStartServer(reviewStart, pc, existing, admission.locks); handled {
 				return err
 			}
 
@@ -174,7 +191,7 @@ The PR may be given as a bare number or with a leading '#':
 		}
 
 		fmt.Printf("==> Creating worktree at %s\n", wtPath)
-		if err := worktree.Create(wtPath, branch, false, ""); err != nil {
+		if err := worktree.CreateWithOptions(wtPath, branch, false, "", worktree.CreateOptions{DeferSetup: true}); err != nil {
 			return err
 		}
 
@@ -188,7 +205,7 @@ The PR may be given as a bare number or with a leading '#':
 			return nil
 		}
 
-		alloc, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stdout, false)
+		alloc, err := runSetupWithRollback(cmd, wtPath, mainRepo, uc, os.Stdout, false, admission.locks)
 		if err != nil {
 			return err
 		}
@@ -205,7 +222,11 @@ The PR may be given as a bare number or with a leading '#':
 			maybeOpenInBrowser(reviewOpen, uc, alloc.Port, projectName, alloc.Branch)
 		}
 
-		if handled, err := maybeStartServer(reviewStart, config.LoadProjectConfig(wtPath), wtPath); handled {
+		startConfig := config.LoadProjectConfig(wtPath)
+		if err := admission.retainForStart(reviewStart); err != nil {
+			return err
+		}
+		if handled, err := maybeStartServer(reviewStart, startConfig, wtPath, admission.locks); handled {
 			return err
 		}
 

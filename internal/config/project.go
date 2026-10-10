@@ -77,6 +77,7 @@ type ProjectConfig struct {
 	Data        map[string]any
 	loadErr     error
 	readOnly    bool
+	quiet       bool
 	// sawPatternKey records that the file on disk still spells the primary
 	// database key as `pattern`, so migrateDatabaseName knows to rewrite it.
 	sawPatternKey bool
@@ -93,8 +94,18 @@ func LoadProjectConfigReadOnly(projectRoot string) *ProjectConfig {
 	return loadProjectConfig(projectRoot, true)
 }
 
+// LoadProjectConfigReadOnlyQuiet is for checked effects whose diagnostics must
+// not echo configuration values. Migrations remain in memory only.
+func LoadProjectConfigReadOnlyQuiet(projectRoot string) *ProjectConfig {
+	return loadProjectConfigOptions(projectRoot, true, true)
+}
+
 func loadProjectConfig(projectRoot string, readOnly bool) *ProjectConfig {
-	pc := &ProjectConfig{ProjectRoot: projectRoot, readOnly: readOnly}
+	return loadProjectConfigOptions(projectRoot, readOnly, false)
+}
+
+func loadProjectConfigOptions(projectRoot string, readOnly, quiet bool) *ProjectConfig {
+	pc := &ProjectConfig{ProjectRoot: projectRoot, readOnly: readOnly, quiet: quiet}
 	pc.Data = pc.load()
 	pc.migrateDatabaseName()
 	pc.migrateDefaultBranch()
@@ -1198,18 +1209,12 @@ func (pc *ProjectConfig) migrateEnvFile() {
 		return
 	}
 
-	if pc.readOnly {
-		if target == source || source == "" {
-			pc.Data["env_file"] = target
-		} else {
-			pc.Data["env_file"] = map[string]any{"path": target, "seed_from": source}
-		}
-		return
-	}
-
 	path := pc.configPath()
 	raw, err := os.ReadFile(path)
 	if err != nil {
+		if pc.readOnly {
+			pc.loadErr = err
+		}
 		return
 	}
 	content := string(raw)
@@ -1230,7 +1235,9 @@ func (pc *ProjectConfig) migrateEnvFile() {
 	} else {
 		pc.Data["env_file"] = map[string]any{"path": target, "seed_from": source}
 	}
-	_ = platform.AtomicWriteFile(path, []byte(newContent), 0o644)
+	if !pc.readOnly {
+		_ = platform.AtomicWriteFile(path, []byte(newContent), 0o644)
+	}
 }
 
 // migrateEditor rewrites editor.vscode_title → editor.title in the YAML file
@@ -1266,18 +1273,12 @@ func (pc *ProjectConfig) migratePortCount() {
 	if !hasOld {
 		return
 	}
-	if pc.readOnly {
-		raw, err := os.ReadFile(pc.configPath())
-		if err == nil && !strings.Contains(string(raw), "port_count:") {
-			pc.Data["port_count"] = pc.Data["ports_needed"]
-		}
-		delete(pc.Data, "ports_needed")
-		return
-	}
-
 	path := pc.configPath()
 	raw, err := os.ReadFile(path)
 	if err != nil {
+		if pc.readOnly {
+			pc.loadErr = err
+		}
 		return
 	}
 	content := string(raw)
@@ -1290,6 +1291,9 @@ func (pc *ProjectConfig) migratePortCount() {
 	pc.Data["port_count"] = pc.Data["ports_needed"]
 	delete(pc.Data, "ports_needed")
 
+	if pc.readOnly {
+		return
+	}
 	_, _ = fmt.Fprintf(os.Stderr, "Warning: ports_needed is deprecated, renamed to port_count in %s\n", path)
 	content = strings.Replace(content, "ports_needed:", "port_count:", 1)
 	_ = platform.AtomicWriteFile(path, []byte(content), 0o644)
@@ -1368,7 +1372,9 @@ func (pc *ProjectConfig) load() map[string]any {
 		return copyMap(ProjectDefaults)
 	}
 
-	WarnUnknownKeys(yamlData, projectKnownKeys, ProjectConfigFile)
+	if !pc.quiet {
+		WarnUnknownKeys(yamlData, projectKnownKeys, ProjectConfigFile)
+	}
 
 	// Fold the legacy `pattern` key into `name` before the defaults are merged
 	// in: the defaults supply `name`, so a post-merge fold could not tell a

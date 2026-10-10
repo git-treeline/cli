@@ -3,12 +3,19 @@
 package format
 
 import (
+	"context"
+	"crypto/sha256"
+	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
+	"unicode/utf8"
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/database"
@@ -254,4 +261,213 @@ func DropSingleDB(alloc Allocation, worktreePath string, keep map[string]bool) e
 	}
 	a["worktree"] = worktreePath
 	return DropDatabases([]Allocation{a}, keep)
+}
+
+var ErrDatabaseCleanupConfig = errors.New("database_cleanup_config_changed")
+var ErrDatabaseCleanupPlan = errors.New("database_cleanup_plan_unavailable")
+var ErrDatabaseCleanupEffect = errors.New("database_cleanup_effect_unknown")
+
+type DatabaseCleanupCheck struct {
+	ValidateOnly   bool
+	ConfigRevision string
+	BeforeDrop     func() error
+	NewAdapter     func(string, []string) (database.Adapter, error)
+}
+
+// DatabaseCleanupConfigRevision binds the exact existing config bytes. Its caller
+// must establish that this configuration identifies the intended allocation.
+func DatabaseCleanupConfigRevision(root string) (string, error) {
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil || !filepath.IsAbs(root) || canonical != root {
+		return "", ErrDatabaseCleanupConfig
+	}
+	name := filepath.Join(root, config.ProjectConfigFile)
+	before, err := os.Lstat(name)
+	if err != nil || !before.Mode().IsRegular() || before.Size() > 1024*1024 {
+		return "", ErrDatabaseCleanupConfig
+	}
+	fd, err := syscall.Open(name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return "", ErrDatabaseCleanupConfig
+	}
+	file := os.NewFile(uintptr(fd), name)
+	// This descriptor is read-only; the read result determines success.
+	defer func() { _ = file.Close() }()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(before, opened) {
+		return "", ErrDatabaseCleanupConfig
+	}
+	data, err := io.ReadAll(io.LimitReader(file, 1024*1024+1))
+	after, statErr := os.Lstat(name)
+	if err != nil || statErr != nil || len(data) > 1024*1024 || !os.SameFile(before, after) || !after.Mode().IsRegular() || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		return "", ErrDatabaseCleanupConfig
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
+}
+
+// DropDatabasesChecked prepares the complete target set before the first drop.
+// attempted remains true after any dispatched drop, including a partial failure.
+// The caller owns lifecycle exclusion; these checks do not lock external writers.
+func DropDatabasesChecked(ctx context.Context, root string, snapshot registry.CleanupSnapshot, keep map[string]bool, check DatabaseCleanupCheck) (attempted bool, err error) {
+	names := append([]string(nil), snapshot.Databases...)
+	keep = maps.Clone(keep)
+	if len(names) > 256 || len(check.ConfigRevision) != 64 || check.BeforeDrop == nil {
+		return false, ErrDatabaseCleanupPlan
+	}
+	recheck := func() error {
+		if ctx.Err() != nil {
+			return ErrDatabaseCleanupPlan
+		}
+		if err := check.BeforeDrop(); err != nil {
+			return ErrDatabaseCleanupPlan
+		}
+		actual, err := DatabaseCleanupConfigRevision(root)
+		if err != nil || actual != check.ConfigRevision {
+			return ErrDatabaseCleanupConfig
+		}
+		return nil
+	}
+	if err := recheck(); err != nil {
+		return false, err
+	}
+	if len(names) == 0 {
+		return false, nil
+	}
+	pc := config.LoadProjectConfigReadOnlyQuiet(root)
+	if pc.LoadError() != nil || pc.Validate() != nil || !checkedDatabaseConfig(pc) {
+		return false, ErrDatabaseCleanupPlan
+	}
+	if err := recheck(); err != nil {
+		return false, err
+	}
+	adapterName := snapshot.DatabaseAdapter
+	if adapterName == "" {
+		adapterName = "postgresql"
+	}
+	if (adapterName != "postgresql" && adapterName != "sqlite") || pc.DatabaseAdapter() != adapterName {
+		return false, ErrDatabaseCleanupPlan
+	}
+	for _, name := range names {
+		if name == "" || len(name) > 4096 || !utf8.ValidString(name) || strings.ContainsRune(name, 0) || adapterName == "postgresql" && !config.IsValidIdentifier(name) {
+			return false, ErrDatabaseCleanupPlan
+		}
+	}
+	factory := check.NewAdapter
+	if factory == nil {
+		factory = database.ForCheckedCleanup
+	}
+	adapter, err := factory(adapterName, pc.DatabaseConnArgs())
+	if err != nil || adapter == nil {
+		return false, ErrDatabaseCleanupPlan
+	}
+	var listed []string
+	haveList := false
+	if len(names) > 1 {
+		if lister, ok := adapter.(databaseLister); ok {
+			listed, err = lister.ListDatabases()
+			if err != nil || len(listed) > 4096 {
+				return false, ErrDatabaseCleanupPlan
+			}
+			for _, name := range listed {
+				if !config.IsValidIdentifier(name) {
+					return false, ErrDatabaseCleanupPlan
+				}
+			}
+			haveList = true
+		} else if adapterName != "sqlite" {
+			return false, ErrDatabaseCleanupPlan
+		}
+	}
+	var targets []string
+	seen := map[string]bool{}
+	for index, name := range names {
+		for _, target := range shardTargets(name, index > 0, listed, haveList, keep) {
+			if keepAsTemplate(pc, root, target, adapterName, snapshot.MainWorktree, index == 0) || seen[target] {
+				continue
+			}
+			seen[target] = true
+			if adapterName == "sqlite" {
+				if err := checkedSQLiteTarget(root, target); err != nil {
+					return false, err
+				}
+			}
+			targets = append(targets, target)
+		}
+	}
+	if check.ValidateOnly {
+		return false, recheck()
+	}
+	for _, target := range targets {
+		if err := recheck(); err != nil {
+			return attempted, err
+		}
+		if adapterName == "sqlite" {
+			if err := checkedSQLiteTarget(root, target); err != nil {
+				return attempted, err
+			}
+			target = filepath.Join(root, target)
+		}
+		attempted = true
+		if err := adapter.Drop(target); err != nil {
+			return true, ErrDatabaseCleanupEffect
+		}
+	}
+	return attempted, recheck()
+}
+
+func checkedSQLiteTarget(root, name string) error {
+	if name == "." || name == ".." || filepath.IsAbs(name) || filepath.Clean(name) != name || strings.HasPrefix(name, "../") {
+		return ErrDatabaseCleanupPlan
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		parts := strings.Split(name+suffix, string(filepath.Separator))
+		current := root
+		for index, part := range parts {
+			current = filepath.Join(current, part)
+			info, err := os.Lstat(current)
+			if os.IsNotExist(err) {
+				break
+			}
+			if err != nil || info.Mode()&os.ModeSymlink != 0 || (index < len(parts)-1 && !info.IsDir()) || (index == len(parts)-1 && !info.Mode().IsRegular()) {
+				return ErrDatabaseCleanupPlan
+			}
+		}
+	}
+	return nil
+}
+
+func checkedDatabaseConfig(pc *config.ProjectConfig) bool {
+	fields, ok := pc.Data["database"].(map[string]any)
+	if !ok {
+		return false
+	}
+	for _, key := range []string{"adapter", "template", "host", "user"} {
+		value, exists := fields[key]
+		if !exists || key == "template" && value == nil {
+			continue
+		}
+		text, ok := value.(string)
+		if !ok || len(text) > 4096 || !utf8.ValidString(text) || strings.ContainsRune(text, 0) {
+			return false
+		}
+	}
+	if value, exists := fields["port"]; exists {
+		switch port := value.(type) {
+		case string:
+			if port == "" {
+				return true
+			}
+			number, err := strconv.Atoi(port)
+			if err != nil || number < 1 || number > 65535 || strconv.Itoa(number) != port {
+				return false
+			}
+		case int:
+			if port < 1 || port > 65535 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }

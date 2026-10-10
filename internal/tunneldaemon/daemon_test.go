@@ -431,6 +431,23 @@ func TestDaemon_DisconnectRegeneratesConfig(t *testing.T) {
 	})
 }
 
+func TestDaemon_IdleTimeoutIsCapturedAtConstruction(t *testing.T) {
+	prev := IdleShutdown
+	IdleShutdown = time.Hour
+	defer func() { IdleShutdown = prev }()
+	d := New("test-tunnel")
+
+	IdleShutdown = time.Millisecond
+	d.armIdleTimer()
+	defer d.idleTimer.Stop()
+
+	select {
+	case <-d.Done():
+		t.Fatal("an existing daemon used a later idle timeout default")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestDaemon_LastDisconnectStopsCloudflaredAndExits(t *testing.T) {
 	prev := IdleShutdown
 	IdleShutdown = 100 * time.Millisecond

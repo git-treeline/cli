@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/github"
@@ -17,6 +16,8 @@ import (
 
 var switchRunSetup bool
 var switchRestart bool
+var lookupSwitchPR = github.LookupPR
+var configureSwitchSupervisor = supervisor.ConfigureAndSend
 
 func init() {
 	switchCmd.Flags().BoolVar(&switchRunSetup, "setup", false, "Re-run commands.setup after switching (for when deps changed)")
@@ -42,17 +43,36 @@ Must be run from inside a worktree (not the main repo).`,
 		if err != nil {
 			return fmt.Errorf("getting working directory: %w", err)
 		}
-		absPath, _ := filepath.Abs(cwd)
-		mainRepo := worktree.DetectMainRepo(absPath)
-
-		if !isInWorktree(absPath, mainRepo) {
-			return cliErr(cmd, errNotInWorktree())
+		discover := func() (creationSelection, error) {
+			main, _, err := worktree.DiscoverWorktreeTargets(cwd, "")
+			if err != nil {
+				return creationSelection{}, err
+			}
+			source, err := registry.CanonicalLifecycleTarget(main)
+			if err != nil {
+				return creationSelection{}, err
+			}
+			root, err := worktree.RepoRootStrict(cwd)
+			if err != nil {
+				return creationSelection{}, err
+			}
+			current, err := registry.CanonicalLifecycleTarget(root)
+			if err != nil {
+				return creationSelection{}, err
+			}
+			if current == source {
+				return creationSelection{}, cliErr(cmd, errNotInWorktree())
+			}
+			return creationSelection{source: source, target: current, inPlace: true}, nil
+		}
+		if _, err := discover(); err != nil {
+			return cliErr(cmd, err)
 		}
 
 		branch := target
 		if prNum, err := parsePRNumber(target); err == nil {
 			fmt.Println(style.Actionf("Looking up PR #%d...", prNum))
-			pr, err := github.LookupPR(prNum)
+			pr, err := lookupSwitchPR(prNum)
 			if err != nil {
 				return err
 			}
@@ -60,7 +80,14 @@ Must be run from inside a worktree (not the main repo).`,
 			fmt.Println(style.Actionf("PR #%d → branch '%s'", prNum, branch))
 		}
 
-		if err := switchWorktreeBranch(absPath, mainRepo, branch, switchRunSetup); err != nil {
+		admission, err := admitCreation(cmd.Context(), discover)
+		if err != nil {
+			return err
+		}
+		// Cleanup does not change the completed operation or its receipt.
+		defer func() { _ = admission.locks.Close() }()
+		absPath, mainRepo := admission.target, admission.source
+		if err := switchWorktreeBranchWithOptions(absPath, mainRepo, branch, switchRunSetup, worktree.CheckoutOptions{DeferSetup: true}); err != nil {
 			return err
 		}
 
@@ -73,7 +100,7 @@ Must be run from inside a worktree (not the main repo).`,
 				})
 			}
 			sockPath := supervisor.SocketPath(absPath)
-			if resp, err := supervisor.ConfigureAndSend(sockPath, "restart", envVars, resolvePort(absPath)); err == nil && resp == "ok" {
+			if resp, err := configureSwitchSupervisor(sockPath, "restart", envVars, resolvePort(absPath)); err == nil && resp == "ok" {
 				fmt.Println("Server restarted.")
 			} else {
 				fmt.Fprintln(os.Stderr, style.Warnf("could not restart server (is it running?)"))
@@ -84,17 +111,14 @@ Must be run from inside a worktree (not the main repo).`,
 	},
 }
 
-// switchWorktreeBranch fetches a branch, checks it out in the current worktree,
-// updates the registry, and refreshes the environment. Shared by gtl switch
-// and gtl review (when switching in place).
-func switchWorktreeBranch(absPath, mainRepo, branch string, runSetup bool) error {
+func switchWorktreeBranchWithOptions(absPath, mainRepo, branch string, runSetup bool, opts worktree.CheckoutOptions) error {
 	fmt.Println(style.Actionf("Fetching origin/%s...", branch))
-	if err := worktree.Fetch("origin", branch); err != nil {
+	if err := worktree.FetchInRepo(mainRepo, "origin", branch); err != nil {
 		fmt.Fprintln(os.Stderr, style.Warnf("fetch failed (%s), trying local checkout", err))
 	}
 
 	fmt.Println(style.Actionf("Checking out '%s'...", branch))
-	if err := worktree.Checkout(branch); err != nil {
+	if err := worktree.CheckoutInRepoWithOptions(absPath, branch, opts); err != nil {
 		return err
 	}
 

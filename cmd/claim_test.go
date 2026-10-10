@@ -50,6 +50,7 @@ func runGit(t *testing.T, dir string, args ...string) string {
 // treeline-configured. Returns mainRepo and seed paths.
 func claimFixture(t *testing.T) (mainRepo, seed string) {
 	t.Helper()
+	commandLifecycleEnvironment(t)
 	skipIfNoGitClaim(t)
 
 	tmp := t.TempDir()

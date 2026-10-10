@@ -11,6 +11,11 @@ import (
 	"github.com/git-treeline/cli/internal/service"
 )
 
+var (
+	routerServiceRunning        = service.IsRunning
+	routerPortForwardConfigured = service.IsPortForwardConfigured
+)
+
 // wtAlloc is the current directory's registry allocation, resolved once so
 // commands don't each repeat the cwd -> registry -> allocation lookup.
 type wtAlloc struct {
@@ -22,6 +27,10 @@ type wtAlloc struct {
 // currentAllocation resolves the allocation for the current working
 // directory. Returns errNoAllocation if nothing is registered for it.
 func currentAllocation() (*wtAlloc, error) {
+	return currentAllocationWith(false)
+}
+
+func currentAllocationWith(readOnly bool) (*wtAlloc, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, err
@@ -29,7 +38,15 @@ func currentAllocation() (*wtAlloc, error) {
 	absPath, _ := filepath.Abs(cwd)
 
 	reg := registry.New("")
-	entry := reg.Find(absPath)
+	var entry registry.Allocation
+	if readOnly {
+		entry, err = reg.FindStrict(absPath)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		entry = reg.Find(absPath)
+	}
 	if entry == nil {
 		return nil, errNoAllocation(absPath)
 	}
@@ -56,5 +73,13 @@ func (w *wtAlloc) PrimaryPort() (int, error) {
 // domain/port and the live socket / port-forward checks) shared by call
 // sites that resolve a URL for a project/branch/port from user config.
 func routerURLFor(uc *config.UserConfig, port int, project, branch string) string {
-	return proxy.BuildRouterURL(port, project, branch, uc.RouterDomain(), uc.RouterPort(), service.IsRunning(), service.IsPortForwardConfigured())
+	running, forwarded := routerStatus(uc)
+	return proxy.BuildRouterURL(port, project, branch, uc.RouterDomain(), uc.RouterPort(), running, forwarded)
+}
+
+func routerStatus(uc *config.UserConfig) (bool, bool) {
+	if uc.RouterMode() == config.RouterModeDisabled {
+		return false, false
+	}
+	return routerServiceRunning(), routerPortForwardConfigured()
 }

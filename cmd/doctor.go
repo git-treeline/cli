@@ -22,11 +22,13 @@ import (
 )
 
 var (
-	doctorJSON bool
-	doctorFix  bool
+	doctorJSON        bool
+	doctorFix         bool
+	doctorCheckHealth = service.CheckHealth
 )
 
 func init() {
+	doctorCmd.Flags().Bool("read-only", false, "Read JSON without modifying configuration or state")
 	doctorCmd.Flags().BoolVar(&doctorJSON, "json", false, "Output as JSON")
 	doctorCmd.Flags().BoolVar(&doctorFix, "fix", false, "Run auto-remediation for detected issues (router restart, pf reload, registry prune)")
 	rootCmd.AddCommand(doctorCmd)
@@ -43,10 +45,19 @@ var doctorCmd = &cobra.Command{
 		absPath, _ := filepath.Abs(cwd)
 		det := detect.Detect(absPath)
 		// Load from worktree (not mainRepo) so branch-specific config is respected
-		pc := config.LoadProjectConfig(absPath)
+		readOnly, _ := readOnlyIntrospection(cmd)
+		var pc *config.ProjectConfig
+		if readOnly {
+			pc = config.LoadProjectConfigReadOnly(absPath)
+		} else {
+			pc = config.LoadProjectConfig(absPath)
+		}
+		if readOnly && pc.LoadError() != nil {
+			return pc.LoadError()
+		}
 
 		if doctorJSON {
-			return doctorJSONOutput(pc, det, absPath)
+			return doctorJSONOutput(pc, det, absPath, readOnly)
 		}
 
 		// One health snapshot for the whole run. The Serve section, the
@@ -88,7 +99,28 @@ var doctorCmd = &cobra.Command{
 	},
 }
 
-func doctorJSONOutput(pc *config.ProjectConfig, det *detect.Result, absPath string) error {
+func doctorJSONOutput(pc *config.ProjectConfig, det *detect.Result, absPath string, readOnly bool) error {
+	reg := registry.New("")
+	var alloc registry.Allocation
+	var drift map[string]string
+	uc := config.LoadUserConfig("")
+	if readOnly {
+		if pc.LoadError() != nil {
+			return pc.LoadError()
+		}
+		if uc.LoadError() != nil {
+			return uc.LoadError()
+		}
+		var err error
+		alloc, err = reg.FindStrict(absPath)
+		if err != nil {
+			return err
+		}
+		drift = projectDriftJSON(pc.Project(), registry.GetString(alloc, "project"))
+	} else {
+		drift = doctorProjectDriftJSON(absPath)
+		alloc = reg.Find(absPath)
+	}
 	// Two top-level sections mirror the human output: machine-level health
 	// (serve/router — identical from any directory) vs project-level state
 	// (config/allocation/runtime — specific to this worktree).
@@ -113,18 +145,16 @@ func doctorJSONOutput(pc *config.ProjectConfig, det *detect.Result, absPath stri
 	}
 	project["config"] = cfgInfo
 
-	if drift := doctorProjectDriftJSON(absPath); drift != nil {
+	if drift != nil {
 		project["project_drift"] = drift
 	}
 
-	reg := registry.New("")
-	alloc := reg.Find(absPath)
 	allocInfo := map[string]any{}
 	if alloc != nil {
 		fa := format.Allocation(alloc)
 		allocInfo["ports"] = format.GetPorts(fa)
 		allocInfo["database"] = format.GetStr(fa, "database")
-		if links := reg.GetLinks(absPath); len(links) > 0 {
+		if links := registry.LinksFromAllocation(alloc); len(links) > 0 {
 			allocInfo["links"] = links
 		}
 	} else {
@@ -148,9 +178,8 @@ func doctorJSONOutput(pc *config.ProjectConfig, det *detect.Result, absPath stri
 	}
 	project["runtime"] = rt
 
-	uc := config.LoadUserConfig("")
 	servePort := uc.RouterPort()
-	checks := service.CheckHealth(servePort, Version)
+	checks := doctorCheckHealth(servePort, Version)
 	serveInfo := map[string]any{}
 	for _, c := range checks {
 		entry := map[string]any{"status": c.Status, "detail": c.Detail}

@@ -20,8 +20,10 @@ var envJSON bool
 var envTemplate bool
 
 func init() {
+	envCmd.Flags().Bool("read-only", false, "Read JSON without modifying configuration or state")
 	envCmd.PersistentFlags().BoolVar(&envJSON, "json", false, "Output as JSON")
 	envCmd.PersistentFlags().BoolVar(&envTemplate, "template", false, "Print unresolved env: template from .treeline.yml")
+	envShowCmd.Flags().Bool("read-only", false, "Read JSON without modifying configuration or state")
 	envCmd.AddCommand(envShowCmd)
 	envCmd.AddCommand(envSyncCmd)
 	rootCmd.AddCommand(envCmd)
@@ -34,7 +36,7 @@ var envCmd = &cobra.Command{
 
 Without a subcommand, shows the current env file contents (same as 'gtl env show').`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return envShowCmd.RunE(envShowCmd, args)
+		return envShowCmd.RunE(cmd, args)
 	},
 }
 
@@ -48,7 +50,16 @@ var envShowCmd = &cobra.Command{
 			return err
 		}
 		absPath, _ := filepath.Abs(cwd)
-		pc := config.LoadProjectConfig(absPath)
+		readOnly, _ := readOnlyIntrospection(cmd)
+		var pc *config.ProjectConfig
+		if readOnly {
+			pc = config.LoadProjectConfigReadOnly(absPath)
+		} else {
+			pc = config.LoadProjectConfig(absPath)
+		}
+		if readOnly && pc.LoadError() != nil {
+			return pc.LoadError()
+		}
 		if err := pc.Validate(); err != nil {
 			return cliErr(cmd, err)
 		}
@@ -69,7 +80,7 @@ var envShowCmd = &cobra.Command{
 			return nil
 		}
 
-		if _, err := currentAllocation(); err != nil {
+		if _, err := currentAllocationWith(readOnly); err != nil {
 			return cliErr(cmd, err)
 		}
 

@@ -3,12 +3,14 @@ package setup
 import (
 	"encoding/json"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/interpolation"
 	"github.com/git-treeline/cli/internal/registry"
 )
 
@@ -226,5 +228,51 @@ func TestWriteManagedEnvSharesOwnershipAcrossSymlinkedParent(t *testing.T) {
 	}
 	if strings.Contains(string(contents), "OLD_TARGET=") {
 		t.Errorf("managed assignment remained through symlink alias: %s", contents)
+	}
+}
+
+func TestResolveRuntimeEnvRouterTokensMatchSetup(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("GTL_HOME", filepath.Join(root, "gtl"))
+	worktree := filepath.Join(root, "worktree")
+	if err := os.Mkdir(worktree, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, config.ProjectConfigFile), []byte("project: app\nenv:\n  PORT: '{port}'\n  ROUTER_URL: '{router_url}'\n  ROUTER_HOST: '{router_host}'\n  ROUTER_DOMAIN: '{router_domain}'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldRegistryPath := RegistryPath
+	RegistryPath = filepath.Join(root, "registry.json")
+	t.Cleanup(func() { RegistryPath = oldRegistryPath })
+	entry := registry.Allocation{"worktree": worktree, "project": "app", "branch": "", "port": float64(4100), "ports": []any{float64(4100)}}
+	if err := registry.New(RegistryPath).Allocate(entry); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{config.RouterModeDisabled, config.RouterModeEnabled, config.RouterModePrompt} {
+		t.Run(mode, func(t *testing.T) {
+			uc := config.LoadUserConfig(filepath.Join(root, "config.json"))
+			uc.Set("router.mode", mode)
+			uc.Set("router.domain", "router.test")
+			initial := &Setup{UserConfig: uc, ProjectConfig: config.LoadProjectConfigReadOnly(worktree)}
+			setupEnv, err := initial.buildEnvVars(interpolation.Allocation(maps.Clone(entry)), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtimeEnv, err := ResolveRuntimeEnv(worktree, uc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !maps.Equal(setupEnv, runtimeEnv) {
+				t.Fatalf("setup = %#v, runtime = %#v", setupEnv, runtimeEnv)
+			}
+			want := map[string]string{"PORT": "4100", "ROUTER_URL": "https://app.router.test", "ROUTER_HOST": "router.test", "ROUTER_DOMAIN": "router.test"}
+			if mode == config.RouterModeDisabled {
+				want["ROUTER_URL"], want["ROUTER_HOST"], want["ROUTER_DOMAIN"] = "", "", ""
+			}
+			if !maps.Equal(runtimeEnv, want) {
+				t.Fatalf("runtime = %#v, want %#v", runtimeEnv, want)
+			}
+		})
 	}
 }

@@ -26,7 +26,7 @@ import (
 // IdleShutdown is how long the daemon waits with zero registrations before
 // stopping cloudflared and exiting. Short enough that an unused daemon goes
 // away quickly; long enough that fast unregister/re-register cycles don't
-// cause flapping.
+// cause flapping. New captures the default for each daemon before it runs.
 var IdleShutdown = 5 * time.Second
 
 // SocketPath returns the per-user, per-tunnel-config Unix socket path used
@@ -81,9 +81,10 @@ type Daemon struct {
 	clients map[*client]struct{}
 	session *cloudflaredSession
 
-	idleTimer *time.Timer
-	done      chan struct{}
-	doneOnce  sync.Once
+	idleShutdown time.Duration
+	idleTimer    *time.Timer
+	done         chan struct{}
+	doneOnce     sync.Once
 }
 
 // cloudflaredSession bundles a running cloudflared with the metadata we
@@ -106,12 +107,13 @@ type client struct {
 // New returns a daemon ready to serve. Call Run with a listening socket.
 func New(tunnelName string) *Daemon {
 	return &Daemon{
-		TunnelName:  tunnelName,
-		Runner:      cloudflaredRunner{},
-		WriteConfig: tunnel.WriteMultiHostConfig,
-		LogSink:     os.Stderr,
-		clients:     make(map[*client]struct{}),
-		done:        make(chan struct{}),
+		TunnelName:   tunnelName,
+		Runner:       cloudflaredRunner{},
+		WriteConfig:  tunnel.WriteMultiHostConfig,
+		LogSink:      os.Stderr,
+		clients:      make(map[*client]struct{}),
+		done:         make(chan struct{}),
+		idleShutdown: IdleShutdown,
 	}
 }
 
@@ -469,7 +471,7 @@ func (d *Daemon) armIdleTimer() {
 	if d.idleTimer != nil {
 		d.idleTimer.Stop()
 	}
-	d.idleTimer = time.AfterFunc(IdleShutdown, func() {
+	d.idleTimer = time.AfterFunc(d.idleShutdown, func() {
 		d.mu.Lock()
 		stillEmpty := len(d.clients) == 0
 		d.mu.Unlock()

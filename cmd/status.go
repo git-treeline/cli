@@ -26,6 +26,7 @@ import (
 
 var statusProject string
 var statusJSON bool
+var statusReadOnly bool
 var statusCheck bool
 var statusWatch bool
 var statusInterval int
@@ -45,6 +46,7 @@ func init() {
 		return projects, cobra.ShellCompDirectiveNoFileComp
 	})
 	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "Output as JSON")
+	statusCmd.Flags().BoolVar(&statusReadOnly, "read-only", false, "Read JSON without modifying configuration or state")
 	statusCmd.Flags().BoolVar(&statusCheck, "check", false, "Probe allocated ports to check if services are running")
 	statusCmd.Flags().BoolVar(&statusWatch, "watch", false, "Auto-refresh status on a loop (implies --check)")
 	statusCmd.Flags().IntVar(&statusInterval, "interval", 5, "Refresh interval in seconds (used with --watch)")
@@ -209,16 +211,28 @@ func renderStatus(ctx context.Context) error {
 	// way to tie a child's lifetime to its parent, so orphaned git probes are
 	// reaped by the next run instead. This keeps a repeatedly-killed poll from
 	// accumulating them — the process storm this bounding exists to prevent.
-	stateDir := platform.ConfigDir()
-	if n := process.ReapStale(stateDir); n > 0 {
-		fmt.Fprintf(os.Stderr, "note: reaped %d orphaned git process group(s) from a previous run\n", n)
+	readOnly := appManagedDev() || statusReadOnly
+	if !readOnly {
+		stateDir := platform.ConfigDir()
+		if n := process.ReapStale(stateDir); n > 0 {
+			fmt.Fprintf(os.Stderr, "note: reaped %d orphaned git process group(s) from a previous run\n", n)
+		}
+		tracker := process.NewTracker(stateDir)
+		defer tracker.Close()
+		ctx = process.WithTracker(ctx, tracker)
 	}
-	tracker := process.NewTracker(stateDir)
-	defer tracker.Close()
-	ctx = process.WithTracker(ctx, tracker)
 
 	reg := registry.New("")
-	snapshot := reg.Snapshot()
+	var snapshot registry.RegistryData
+	if statusJSON || readOnly {
+		var err error
+		snapshot, err = reg.SnapshotStrict()
+		if err != nil {
+			return fmt.Errorf("reading related registry: %w", err)
+		}
+	} else {
+		snapshot = reg.Snapshot()
+	}
 	all := snapshot.Allocations
 	allocs := all
 	if statusProject != "" {
@@ -263,14 +277,28 @@ func renderStatus(ctx context.Context) error {
 				relatedPaths = append(relatedPaths, wt)
 			}
 		}
+		type relatedConfig struct {
+			repos []config.RelatedRepo
+			err   error
+		}
+		var configErr error
 		probeAll(ctx, relatedPaths,
-			func(ctx context.Context, wt string) []config.RelatedRepo {
+			func(ctx context.Context, wt string) relatedConfig {
 				ctx, cancel := context.WithTimeout(ctx, gitProbeTimeout)
 				defer cancel()
 				root := worktree.DetectRepoRootContext(ctx, wt)
-				return config.LoadProjectConfigReadOnly(root).RelatedRepos()
+				repos, err := loadRelatedRepos(root)
+				return relatedConfig{repos: repos, err: err}
 			},
-			func(i int, repos []config.RelatedRepo) { relatedReposByPath[relatedPaths[i]] = repos })
+			func(i int, result relatedConfig) {
+				if result.err != nil && configErr == nil {
+					configErr = result.err
+				}
+				relatedReposByPath[relatedPaths[i]] = result.repos
+			})
+		if configErr != nil {
+			return configErr
+		}
 	}
 
 	if statusCheck || statusJSON {
@@ -293,7 +321,7 @@ func renderStatus(ctx context.Context) error {
 
 	// One lock acquisition for every branch write-back, and none once the
 	// budget is spent, so a contended registry costs at most one lock wait.
-	if len(branchChanges) > 0 && ctx.Err() == nil {
+	if !readOnly && len(branchChanges) > 0 && ctx.Err() == nil {
 		if err := reg.UpdateBranches(branchChanges); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not update branches in registry: %v\n", err)
 		}

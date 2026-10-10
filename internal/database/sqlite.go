@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/git-treeline/cli/internal/devresources"
 )
 
 type SQLite struct {
@@ -71,7 +73,11 @@ func (s *SQLite) Clone(template, target string) error {
 	if err != nil {
 		return err
 	}
-	cmd := s.command("sqlite3", templatePath, ".backup \""+quotedTarget+"\"")
+	args := []string{templatePath, ".backup \"" + quotedTarget + "\""}
+	if devresources.Active() {
+		args = append([]string{"-init", os.DevNull, "-readonly", "-nofollow"}, args...)
+	}
+	cmd := s.command("sqlite3", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -100,7 +106,13 @@ func (s *SQLite) Create(name string) error {
 	if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
 		return fmt.Errorf("creating target directory: %w", err)
 	}
-	f, err := os.Create(name)
+	var f *os.File
+	var err error
+	if devresources.Active() {
+		f, err = os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	} else {
+		f, err = os.Create(name)
+	}
 	if err != nil {
 		return fmt.Errorf("creating database %s: %w", name, err)
 	}
@@ -112,9 +124,10 @@ func (s *SQLite) Drop(target string) error {
 		return err
 	}
 	// SQLite WAL mode companion files
-	_ = removeIfExists(target + "-wal")
-	_ = removeIfExists(target + "-shm")
-	return nil
+	if err := removeIfExists(target + "-wal"); err != nil {
+		return err
+	}
+	return removeIfExists(target + "-shm")
 }
 
 func (s *SQLite) Rename(oldPath, newPath string) error {
