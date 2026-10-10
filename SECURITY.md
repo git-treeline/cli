@@ -6,15 +6,19 @@ Git Treeline executes commands defined in your repository's `.treeline.yml` — 
 
 Review `.treeline.yml` before running `gtl setup`, `gtl new`, or `gtl start` in repositories you don't control.
 
+Managed env and copy paths must stay within their project roots, including during branch refreshes that skip setup commands. These restrictions do not sandbox repository-defined shell commands. Generated Vite and Django start commands bind to loopback; an explicitly configured start command can choose a different interface.
+
 ## Privileged operations
 
 Some operations require `sudo` and will prompt for your password:
 
 - **CA trust** (`gtl serve install`): Adds a locally-generated certificate authority to the system trust store so `*.localhost` HTTPS works without browser warnings. Uses `/usr/bin/security` on macOS, distro-appropriate trust commands plus per-user NSS stores (`certutil`) on Linux. The CA carries X.509 **name constraints** limiting it to `localhost` and the configured router domain (plus loopback IPs), so a stolen CA key cannot mint browser-trusted certificates for arbitrary sites — the blast radius is confined to Treeline's own hostnames. Upgrading from an older, unconstrained CA regenerates and re-trusts it once (one extra password prompt).
 - **Port forwarding** (`gtl serve install`): Configures OS-level port forwarding (443 → router port) so HTTPS works on the standard port. Uses `/sbin/pfctl` on macOS, `iptables`/`nft` on Linux.
-- **Hosts file** (`gtl serve hosts sync`): Writes entries to `/etc/hosts` for Safari compatibility. Uses atomic copy via `/bin/cp`.
+- **Hosts file** (`gtl serve hosts sync`): Writes validated hostnames to a managed block in `/etc/hosts` for Safari compatibility.
 
-The router process itself runs unprivileged. Privilege is used once during install, not at runtime.
+The router process itself runs unprivileged. Installation, repair, and removal require privilege. A root-owned macOS repair script and Linux forwarding service can also restore forwarding at boot. Privileged installers stage captured content in a private root-owned directory after authorization, rather than reopening caller-writable source files. Linux forwarding selects `iptables` only from system directories.
+
+The configured router domain must be a narrow DNS suffix, not a public suffix, IP address, or wildcard. Reused CA certificates must match the intended DNS and loopback IP constraints and their private key. System trust installation validates and installs the same certificate snapshot.
 
 ## Public tunnels and the same-user trust boundary
 

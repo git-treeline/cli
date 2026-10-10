@@ -59,7 +59,10 @@ func TestRouter_ServesStatusPageWhenBackendDown(t *testing.T) {
 	if !strings.Contains(body, "git-treeline router") {
 		t.Errorf("response should be the styled router page; body:\n%s", body)
 	}
-	if !strings.Contains(body, "cdn.tailwindcss.com") {
-		t.Errorf("response should include Tailwind styling; body:\n%s", body)
+	if !strings.Contains(body, "<style>") {
+		t.Errorf("response should include self-contained styling; body:\n%s", body)
+	}
+	if strings.Contains(body, "cdn.tailwindcss.com") || strings.Contains(body, "https://") {
+		t.Errorf("response should not load third-party assets; body:\n%s", body)
 	}
 }

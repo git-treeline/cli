@@ -7,11 +7,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -296,6 +299,191 @@ func TestEnsureCA_RegeneratesUnconstrainedCA(t *testing.T) {
 	}
 	if caNeedsRegen("prt.dev") {
 		t.Error("freshly generated prt.dev CA should not need regen")
+	}
+}
+
+func TestCANeedsRegen_RejectsUnexpectedAuthorityAndInvalidKeys(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*x509.Certificate)
+	}{
+		{name: "extra DNS suffix", mutate: func(cert *x509.Certificate) {
+			cert.PermittedDNSDomains = append(cert.PermittedDNSDomains, "example.com")
+		}},
+		{name: "non-critical constraints", mutate: func(cert *x509.Certificate) {
+			cert.PermittedDNSDomainsCritical = false
+		}},
+		{name: "broad IP range", mutate: func(cert *x509.Certificate) {
+			_, broad, _ := net.ParseCIDR("0.0.0.0/0")
+			cert.PermittedIPRanges = append(cert.PermittedIPRanges, broad)
+		}},
+		{name: "wrong key usage", mutate: func(cert *x509.Certificate) {
+			cert.KeyUsage |= x509.KeyUsageDigitalSignature
+		}},
+		{name: "not a CA", mutate: func(cert *x509.Certificate) {
+			cert.IsCA = false
+		}},
+		{name: "expired", mutate: func(cert *x509.Certificate) {
+			cert.NotBefore = time.Now().Add(-2 * time.Hour)
+			cert.NotAfter = time.Now().Add(-time.Hour)
+		}},
+		{name: "not yet valid", mutate: func(cert *x509.Certificate) {
+			cert.NotBefore = time.Now().Add(time.Hour)
+			cert.NotAfter = time.Now().Add(365 * 24 * time.Hour)
+		}},
+		{name: "unhandled critical extension", mutate: func(cert *x509.Certificate) {
+			cert.ExtraExtensions = append(cert.ExtraExtensions, pkix.Extension{
+				Id:       asn1.ObjectIdentifier{1, 2, 3, 4, 5, 6, 7},
+				Critical: true,
+				Value:    []byte{0x05, 0x00},
+			})
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withTempCertsDir(t)
+			writeCAFixture(t, "prt.dev", tt.mutate)
+			if !caNeedsRegen("prt.dev") {
+				t.Errorf("CA with %s should require regeneration", tt.name)
+			}
+		})
+	}
+
+	t.Run("mismatched private key", func(t *testing.T) {
+		withTempCertsDir(t)
+		writeCAFixture(t, "prt.dev", nil)
+		other, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		der, err := x509.MarshalECPrivateKey(other)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(caKeyPath(), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !caNeedsRegen("prt.dev") {
+			t.Error("CA with a mismatched private key should require regeneration")
+		}
+	})
+}
+
+func TestCANeedsRegen_ReusesCurrentConstrainedCA(t *testing.T) {
+	withTempCertsDir(t)
+	writeCAFixture(t, "prt.dev", nil)
+	if caNeedsRegen("prt.dev") {
+		t.Error("a valid existing CA should be reused without another trust prompt")
+	}
+}
+
+func TestTrustCA_UsesValidatedSnapshot(t *testing.T) {
+	withTempCertsDir(t)
+	writeCAFixture(t, "prt.dev", nil)
+	original, err := os.ReadFile(caCertPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", "")
+	var script string
+	origRunner := privilegedScriptRunner
+	privilegedScriptRunner = func(_ string, gotScript string) error {
+		script = gotScript
+		return os.WriteFile(caCertPath(), []byte("replaced after validation"), 0o600)
+	}
+	t.Cleanup(func() { privilegedScriptRunner = origRunner })
+
+	if err := TrustCA(caCertPath(), "prt.dev"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, string(original)) {
+		t.Error("privileged trust operation did not stage the validated certificate snapshot")
+	}
+	if strings.Contains(script, "replaced after validation") {
+		t.Error("privileged trust operation reopened the mutable certificate path")
+	}
+}
+
+func TestTrustCA_RejectsMismatchedKeyBeforePrivilege(t *testing.T) {
+	withTempCertsDir(t)
+	writeCAFixture(t, "prt.dev", nil)
+	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, _ := x509.MarshalECPrivateKey(other)
+	if err := os.WriteFile(caKeyPath(), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	origRunner := privilegedScriptRunner
+	privilegedScriptRunner = func(_, _ string) error { called = true; return nil }
+	t.Cleanup(func() { privilegedScriptRunner = origRunner })
+
+	if err := TrustCA(caCertPath(), "prt.dev"); err == nil {
+		t.Fatal("expected mismatched key to be rejected")
+	}
+	if called {
+		t.Error("invalid CA must be rejected before privilege elevation")
+	}
+}
+
+func TestUntrustDarwin_UsesCertificateSnapshot(t *testing.T) {
+	withTempCertsDir(t)
+	original := []byte("legacy CA bytes")
+	if err := os.WriteFile(caCertPath(), original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var script string
+	origRunner := privilegedScriptRunner
+	privilegedScriptRunner = func(_ string, gotScript string) error {
+		script = gotScript
+		return os.WriteFile(caCertPath(), []byte("replaced after capture"), 0o600)
+	}
+	t.Cleanup(func() { privilegedScriptRunner = origRunner })
+
+	if err := untrustDarwin(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, string(original)) || strings.Contains(script, "replaced after capture") {
+		t.Errorf("untrust operation did not bind removal to the captured certificate bytes:\n%s", script)
+	}
+}
+
+func writeCAFixture(t *testing.T, domain string, mutate func(*x509.Certificate)) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:                big.NewInt(42),
+		Subject:                     pkix.Name{Organization: []string{"git-treeline"}, CommonName: "git-treeline Local CA"},
+		NotBefore:                   time.Now().Add(-time.Hour),
+		NotAfter:                    time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:                    x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid:       true,
+		IsCA:                        true,
+		MaxPathLen:                  0,
+		PermittedDNSDomainsCritical: true,
+		PermittedDNSDomains:         permittedDNSDomains(domain),
+		PermittedIPRanges:           loopbackIPRanges(),
+	}
+	if mutate != nil {
+		mutate(tmpl)
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(caCertPath(), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(caKeyPath(), pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

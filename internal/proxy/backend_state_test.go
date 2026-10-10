@@ -119,12 +119,12 @@ func TestDataForState_NotStartedSuggestsGtlStart(t *testing.T) {
 func TestToneClasses(t *testing.T) {
 	cases := []struct {
 		tone string
-		want string // substring expected to appear
+		want string
 	}{
-		{"amber", "amber-100"},
-		{"rose", "rose-100"},
-		{"slate", "slate-100"},
-		{"unknown", "slate-100"}, // default fallback
+		{"amber", "tone-amber"},
+		{"rose", "tone-rose"},
+		{"slate", "tone-slate"},
+		{"unknown", "tone-slate"},
 	}
 	for _, tc := range cases {
 		got := toneClasses(tc.tone)

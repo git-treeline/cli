@@ -3,10 +3,9 @@ package proxy
 import (
 	"html/template"
 	"net/http"
-	"strings"
 )
 
-// statusPageData drives the Tailwind status template.
+// statusPageData drives the self-contained status template.
 type statusPageData struct {
 	Title       string
 	Subdomain   string
@@ -83,40 +82,24 @@ func dataForState(state BackendState, subdomain string, port int) statusPageData
 	return d
 }
 
-// toneClasses returns the Tailwind utility classes for the small status
-// badge based on tone. Kept as a template function so the HTML stays
-// declarative.
 func toneClasses(tone string) string {
 	switch tone {
 	case "amber":
-		return "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200 ring-1 ring-amber-200 dark:ring-amber-800"
+		return "tone-amber"
 	case "rose":
-		return "bg-rose-100 text-rose-800 dark:bg-rose-900/40 dark:text-rose-200 ring-1 ring-rose-200 dark:ring-rose-800"
+		return "tone-rose"
 	default:
-		return "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 ring-1 ring-slate-200 dark:ring-slate-700"
-	}
-}
-
-func toneDot(tone string) string {
-	switch tone {
-	case "amber":
-		return "bg-amber-500"
-	case "rose":
-		return "bg-rose-500"
-	default:
-		return "bg-slate-400"
+		return "tone-slate"
 	}
 }
 
 var statusPageTemplate = template.Must(template.New("status").Funcs(template.FuncMap{
 	"toneClasses": toneClasses,
-	"toneDot":     toneDot,
-	"trimSpace":   strings.TrimSpace,
 }).Parse(statusPageHTML))
 
 // statusPageHTML is intentionally readable: served once per click, no
-// build step, dark-mode aware via prefers-color-scheme. Tailwind's play
-// CDN handles class compilation in the browser.
+// build step, external assets, or third-party script authority. The CSS is
+// dark-mode aware via prefers-color-scheme.
 const statusPageHTML = `<!doctype html>
 <html lang="en">
 <head>
@@ -124,38 +107,76 @@ const statusPageHTML = `<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{.Title}} · {{.Subdomain}}</title>
 {{if .Refresh}}<meta http-equiv="refresh" content="{{.Refresh}}">{{end}}
-<script src="https://cdn.tailwindcss.com"></script>
-<script>tailwind.config={darkMode:'media'}</script>
+<style>
+  :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f8fafc; color: #0f172a; -webkit-font-smoothing: antialiased; }
+  main { width: min(28rem, calc(100% - 2rem)); }
+  .card { padding: 2rem; border: 1px solid #e2e8f0; border-radius: 1rem; background: #fff; box-shadow: 0 1px 2px rgb(15 23 42 / .06); }
+  .header, .footer { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+  .title-wrap { min-width: 0; }
+  h1 { margin: 0; font-size: 1.25rem; line-height: 1.75rem; font-weight: 600; letter-spacing: -.025em; }
+  .subdomain { margin: .25rem 0 0; overflow: hidden; color: #64748b; font: .875rem/1.25rem ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { flex: none; display: inline-flex; align-items: center; gap: .375rem; padding: .25rem .625rem; border-radius: 9999px; font-size: .75rem; line-height: 1rem; font-weight: 500; box-shadow: inset 0 0 0 1px var(--ring); background: var(--badge-bg); color: var(--badge-fg); }
+  .badge-dot { width: .375rem; height: .375rem; border-radius: 9999px; background: var(--dot); }
+  .tone-amber { --badge-bg: #fef3c7; --badge-fg: #92400e; --ring: #fde68a; --dot: #f59e0b; }
+  .tone-rose { --badge-bg: #ffe4e6; --badge-fg: #9f1239; --ring: #fecdd3; --dot: #f43f5e; }
+  .tone-slate { --badge-bg: #f1f5f9; --badge-fg: #334155; --ring: #e2e8f0; --dot: #94a3b8; }
+  .pulse { animation: pulse 2s cubic-bezier(.4,0,.6,1) infinite; }
+  .message { margin: 1.25rem 0 0; color: #334155; line-height: 1.625; }
+  .hint { margin: 1rem 0 0; color: #475569; font-size: .875rem; line-height: 1.25rem; }
+  .command { position: relative; margin-top: .75rem; }
+  pre { margin: 0; padding: .5rem .75rem; overflow-x: auto; border-radius: .5rem; background: #f1f5f9; color: #1e293b; font: .875rem/1.25rem ui-monospace, SFMono-Regular, Menlo, monospace; }
+  button { position: absolute; top: .375rem; right: .375rem; padding: .125rem .5rem; border: 1px solid #e2e8f0; border-radius: .375rem; background: #fff; color: #475569; cursor: pointer; font-family: inherit; font-size: .75rem; line-height: 1rem; opacity: 0; transition: opacity .15s; }
+  .command:hover button, button:focus-visible { opacity: 1; }
+  .elapsed { margin: 1.25rem 0 0; color: #64748b; font-size: .75rem; line-height: 1rem; }
+  .footer { align-items: center; margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid #f1f5f9; color: #94a3b8; font-size: .75rem; line-height: 1rem; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .local-note { margin: .75rem 0 0; color: #94a3b8; text-align: center; font-size: .75rem; line-height: 1rem; }
+  @keyframes pulse { 50% { opacity: .45; } }
+  @media (prefers-color-scheme: dark) {
+    body { background: #020617; color: #f1f5f9; }
+    .card { border-color: #1e293b; background: #0f172a; box-shadow: none; }
+    .subdomain, .hint, .elapsed { color: #94a3b8; }
+    .message { color: #cbd5e1; }
+    .tone-amber { --badge-bg: rgb(120 53 15 / .4); --badge-fg: #fde68a; --ring: #92400e; }
+    .tone-rose { --badge-bg: rgb(136 19 55 / .4); --badge-fg: #fecdd3; --ring: #9f1239; }
+    .tone-slate { --badge-bg: #1e293b; --badge-fg: #cbd5e1; --ring: #334155; }
+    pre { background: rgb(30 41 59 / .8); color: #e2e8f0; }
+    button { border-color: #334155; background: #0f172a; color: #cbd5e1; }
+    .footer { border-color: #1e293b; color: #64748b; }
+    .local-note { color: #475569; }
+  }
+</style>
 </head>
-<body class="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans antialiased">
-  <main class="w-full max-w-md mx-4">
-    <div class="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm p-8">
-      <div class="flex items-start justify-between gap-4 mb-5">
-        <div class="min-w-0">
-          <h1 class="text-xl font-semibold tracking-tight">{{.Title}}</h1>
-          <p class="mt-1 text-sm font-mono text-slate-500 dark:text-slate-400 truncate">{{.Subdomain}}</p>
+<body>
+  <main>
+    <div class="card">
+      <div class="header">
+        <div class="title-wrap">
+          <h1>{{.Title}}</h1>
+          <p class="subdomain">{{.Subdomain}}</p>
         </div>
-        <span class="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium {{toneClasses .Tone}}">
-          <span class="w-1.5 h-1.5 rounded-full {{toneDot .Tone}} {{if eq .Tone "amber"}}animate-pulse{{end}}"></span>
+        <span class="badge {{toneClasses .Tone}}">
+          <span class="badge-dot {{if eq .Tone "amber"}}pulse{{end}}"></span>
           {{.StatusBadge}}
         </span>
       </div>
 
-      <p class="text-slate-700 dark:text-slate-300 leading-relaxed">{{.Message}}</p>
+      <p class="message">{{.Message}}</p>
 
-      {{if .Hint}}<p class="mt-4 text-sm text-slate-600 dark:text-slate-400">{{.Hint}}</p>{{end}}
+      {{if .Hint}}<p class="hint">{{.Hint}}</p>{{end}}
 
       {{if .Command}}
-      <div class="mt-3 group relative">
-        <pre class="px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-800/80 text-sm font-mono text-slate-800 dark:text-slate-200 overflow-x-auto"><code id="cmd">{{.Command}}</code></pre>
+      <div class="command">
+        <pre><code id="cmd">{{.Command}}</code></pre>
         <button type="button"
-                onclick="navigator.clipboard.writeText(document.getElementById('cmd').textContent).then(()=>{const b=event.currentTarget;b.textContent='copied';setTimeout(()=>b.textContent='copy',1200)})"
-                class="absolute top-1.5 right-1.5 px-2 py-0.5 text-xs rounded-md bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700 opacity-0 group-hover:opacity-100 transition-opacity">copy</button>
+                onclick="navigator.clipboard.writeText(document.getElementById('cmd').textContent).then(()=>{const b=event.currentTarget;b.textContent='copied';setTimeout(()=>b.textContent='copy',1200)})">copy</button>
       </div>
       {{end}}
 
       {{if .ShowElapsed}}
-      <p id="elapsed" class="mt-5 text-xs text-slate-500 dark:text-slate-400" aria-live="polite">Waiting…</p>
+      <p id="elapsed" class="elapsed" aria-live="polite">Waiting…</p>
       <script>
         (function(){
           var start = Date.now();
@@ -170,12 +191,12 @@ const statusPageHTML = `<!doctype html>
       </script>
       {{end}}
 
-      <div class="mt-6 pt-5 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-xs text-slate-400 dark:text-slate-500">
+      <div class="footer">
         <span>git-treeline router</span>
-        <span class="font-mono">port {{.Port}}</span>
+        <span class="mono">port {{.Port}}</span>
       </div>
     </div>
-    <p class="mt-3 text-center text-xs text-slate-400 dark:text-slate-600">This page is served by your local <code class="font-mono">gtl serve</code> router.</p>
+    <p class="local-note">This page is served by your local <code class="mono">gtl serve</code> router.</p>
   </main>
 </body>
 </html>

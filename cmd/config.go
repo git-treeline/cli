@@ -125,6 +125,13 @@ var configSetCmd = &cobra.Command{
 		uc := config.LoadUserConfig("")
 
 		key, raw := args[0], args[1]
+		if key == "router.domain" {
+			domain, err := config.ValidateRouterDomain(raw)
+			if err != nil {
+				return cliErr(cmd, &CliError{Message: err.Error(), Hint: "Use localhost or a narrow DNS suffix such as prt.dev."})
+			}
+			raw = domain
+		}
 		var value any
 		if n, err := strconv.ParseFloat(raw, 64); err == nil {
 			value = n

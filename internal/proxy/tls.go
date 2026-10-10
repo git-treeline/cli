@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"container/list"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/git-treeline/cli/internal/platform"
+	"github.com/git-treeline/cli/internal/routerdomain"
 )
 
 var certsDirFunc = defaultCertsDir
@@ -154,6 +156,11 @@ func certNeedsRegeneration(certFile string) bool {
 // so a stolen ca-key.pem can only MITM those names — not arbitrary public
 // hosts.
 func EnsureCA(domain string) (string, error) {
+	var err error
+	domain, err = routerdomain.Validate(domain)
+	if err != nil {
+		return "", fmt.Errorf("invalid router domain: %w", err)
+	}
 	if err := os.MkdirAll(certsDir(), 0o700); err != nil {
 		return "", err
 	}
@@ -229,13 +236,22 @@ func loopbackIPRanges() []*net.IPNet {
 // its name constraints don't cover the current domain (e.g. an older,
 // unconstrained CA from before name constraints were introduced).
 func caNeedsRegen(domain string) bool {
+	domain, err := routerdomain.Validate(domain)
+	if err != nil {
+		return true
+	}
 	if certNeedsRegeneration(caCertPath()) {
 		return true
 	}
-	if _, err := os.Stat(caKeyPath()); err != nil {
+	certPEM, err := os.ReadFile(caCertPath())
+	if err != nil {
 		return true
 	}
-	return !caCoversDomain(caCertPath(), domain)
+	keyPEM, err := os.ReadFile(caKeyPath())
+	if err != nil {
+		return true
+	}
+	return validateCA(certPEM, keyPEM, domain) != nil
 }
 
 // CANeedsRegen reports whether EnsureCA(domain) would replace the on-disk CA.
@@ -243,35 +259,104 @@ func caNeedsRegen(domain string) bool {
 // ca.pem (the untrust helpers match by the file's current content).
 func CANeedsRegen(domain string) bool { return caNeedsRegen(domain) }
 
-// caCoversDomain reports whether the CA at certFile carries name constraints
-// that include "localhost" and domain. An unconstrained CA returns false so it
-// is regenerated.
-func caCoversDomain(certFile, domain string) bool {
-	data, err := os.ReadFile(certFile)
+func validateCA(certPEM, keyPEM []byte, domain string) error {
+	domain, err := routerdomain.Validate(domain)
 	if err != nil {
-		return false
+		return fmt.Errorf("invalid router domain: %w", err)
 	}
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return false
+	certBlock, certRest := pem.Decode(certPEM)
+	if certBlock == nil || certBlock.Type != "CERTIFICATE" || len(bytes.TrimSpace(certRest)) != 0 {
+		return fmt.Errorf("CA certificate must contain exactly one PEM certificate")
 	}
-	cert, err := x509.ParseCertificate(block.Bytes)
+	cert, err := x509.ParseCertificate(certBlock.Bytes)
 	if err != nil {
+		return fmt.Errorf("parsing CA certificate: %w", err)
+	}
+	if err := validateCACertificate(cert, domain); err != nil {
+		return err
+	}
+
+	keyBlock, keyRest := pem.Decode(keyPEM)
+	if keyBlock == nil || keyBlock.Type != "EC PRIVATE KEY" || len(bytes.TrimSpace(keyRest)) != 0 {
+		return fmt.Errorf("CA key must contain exactly one PEM EC private key")
+	}
+	key, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return fmt.Errorf("parsing CA key: %w", err)
+	}
+	publicKey, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok || !publicKey.Equal(&key.PublicKey) {
+		return fmt.Errorf("CA certificate and private key do not match")
+	}
+	return nil
+}
+
+func validateCACertificate(cert *x509.Certificate, domain string) error {
+	if !cert.BasicConstraintsValid || !cert.IsCA {
+		return fmt.Errorf("CA certificate has invalid CA basic constraints")
+	}
+	if cert.KeyUsage != x509.KeyUsageCertSign|x509.KeyUsageCRLSign || len(cert.ExtKeyUsage) != 0 || len(cert.UnknownExtKeyUsage) != 0 {
+		return fmt.Errorf("CA certificate has invalid key usage")
+	}
+	if !cert.PermittedDNSDomainsCritical {
+		return fmt.Errorf("CA certificate name constraints must be critical")
+	}
+	if !exactStrings(cert.PermittedDNSDomains, permittedDNSDomains(domain)) {
+		return fmt.Errorf("CA certificate DNS constraints do not exactly match the router domain")
+	}
+	if !exactIPRanges(cert.PermittedIPRanges, loopbackIPRanges()) {
+		return fmt.Errorf("CA certificate IP constraints must contain only loopback ranges")
+	}
+	if len(cert.ExcludedDNSDomains) != 0 || len(cert.PermittedEmailAddresses) != 0 || len(cert.ExcludedEmailAddresses) != 0 ||
+		len(cert.ExcludedIPRanges) != 0 || len(cert.PermittedURIDomains) != 0 || len(cert.ExcludedURIDomains) != 0 {
+		return fmt.Errorf("CA certificate contains unexpected name constraints")
+	}
+	if !bytes.Equal(cert.RawIssuer, cert.RawSubject) || cert.CheckSignatureFrom(cert) != nil {
+		return fmt.Errorf("CA certificate is not self-signed")
+	}
+	now := time.Now()
+	if now.Before(cert.NotBefore) || !now.Before(cert.NotAfter) {
+		return fmt.Errorf("CA certificate is not currently valid")
+	}
+	if len(cert.UnhandledCriticalExtensions) != 0 {
+		return fmt.Errorf("CA certificate has unhandled critical extensions")
+	}
+	return nil
+}
+
+func exactStrings(got, want []string) bool {
+	if len(got) != len(want) {
 		return false
 	}
-	if len(cert.PermittedDNSDomains) == 0 {
-		return false
+	counts := make(map[string]int, len(got))
+	for _, value := range got {
+		counts[strings.ToLower(value)]++
 	}
-	have := make(map[string]bool, len(cert.PermittedDNSDomains))
-	for _, d := range cert.PermittedDNSDomains {
-		have[strings.ToLower(d)] = true
-	}
-	for _, want := range permittedDNSDomains(domain) {
-		if !have[want] {
+	for _, value := range want {
+		if counts[value] != 1 {
 			return false
 		}
+		delete(counts, value)
 	}
-	return true
+	return len(counts) == 0
+}
+
+func exactIPRanges(got, want []*net.IPNet) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	counts := make(map[string]int, len(got))
+	for _, value := range got {
+		counts[value.String()]++
+	}
+	for _, value := range want {
+		key := value.String()
+		if counts[key] != 1 {
+			return false
+		}
+		delete(counts, key)
+	}
+	return len(counts) == 0
 }
 
 // hostAllowedFor reports whether an SNI hostname is within the CA's name
@@ -312,6 +397,11 @@ type cacheEntry struct {
 // error if the CA hasn't been created yet (user needs to run
 // 'gtl serve install').
 func NewCertManager(domain string) (*CertManager, error) {
+	var err error
+	domain, err = routerdomain.Validate(domain)
+	if err != nil {
+		return nil, fmt.Errorf("invalid router domain: %w", err)
+	}
 	caKeyPEM, err := os.ReadFile(caKeyPath())
 	if err != nil {
 		return nil, fmt.Errorf("CA key not found — run 'gtl serve install': %w", err)
@@ -319,6 +409,9 @@ func NewCertManager(domain string) (*CertManager, error) {
 	caCertPEM, err := os.ReadFile(caCertPath())
 	if err != nil {
 		return nil, fmt.Errorf("CA cert not found — run 'gtl serve install': %w", err)
+	}
+	if err := validateCA(caCertPEM, caKeyPEM, domain); err != nil {
+		return nil, fmt.Errorf("invalid local CA — run 'gtl serve install' to regenerate it: %w", err)
 	}
 
 	caKeyBlock, _ := pem.Decode(caKeyPEM)
@@ -440,14 +533,26 @@ func (cm *CertManager) issueCert(hostname string) (*tls.Certificate, error) {
 	return &tlsCert, nil
 }
 
-// TrustCA adds the local CA certificate to the system trust store.
-// Requires sudo on macOS and Linux.
-func TrustCA(caCertFile string) error {
+// TrustCA validates one in-memory CA snapshot and adds that exact snapshot to
+// the system trust store. Requires sudo on macOS and Linux.
+func TrustCA(caCertFile, domain string) error {
+	certPEM, err := os.ReadFile(caCertFile)
+	if err != nil {
+		return fmt.Errorf("reading CA certificate: %w", err)
+	}
+	keyPEM, err := os.ReadFile(caKeyPath())
+	if err != nil {
+		return fmt.Errorf("reading CA key: %w", err)
+	}
+	if err := validateCA(certPEM, keyPEM, domain); err != nil {
+		return fmt.Errorf("refusing to trust invalid CA: %w", err)
+	}
+
 	switch runtime.GOOS {
 	case "darwin":
-		return trustDarwin(caCertFile)
+		return trustDarwin(certPEM)
 	case "linux":
-		return trustLinux(caCertFile)
+		return trustLinux(certPEM)
 	default:
 		return fmt.Errorf("CA trust not supported on %s", runtime.GOOS)
 	}
@@ -489,31 +594,35 @@ func CACertExpiry() (time.Time, error) {
 	return cert.NotAfter, nil
 }
 
-func trustDarwin(caCertFile string) error {
-	cmd := exec.Command("sudo", "-p",
-		"\nEnter your password (1 of 2): ",
-		"/usr/bin/security", "add-trusted-cert",
-		"-d", "-r", "trustRoot",
-		"-k", "/Library/Keychains/System.keychain",
-		caCertFile)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+var privilegedScriptRunner = platform.RunPrivilegedScript
+
+func trustDarwin(certPEM []byte) error {
+	script, err := platform.StagePrivilegedFiles(
+		[]platform.PrivilegedFile{{Name: "ca.pem", Data: certPEM}},
+		`/usr/bin/security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$stage/ca.pem"`,
+	)
+	if err != nil {
+		return err
+	}
+	return privilegedScriptRunner("\nEnter your password (1 of 2): ", script)
 }
 
 func untrustDarwin() error {
 	if !IsCAInstalled() {
 		return nil
 	}
-	cmd := exec.Command("sudo", "-p",
-		"\nEnter your password to remove git-treeline CA: ",
-		"/usr/bin/security", "remove-trusted-cert",
-		"-d", caCertPath())
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	certPEM, err := os.ReadFile(caCertPath())
+	if err != nil {
+		return fmt.Errorf("reading CA certificate for removal: %w", err)
+	}
+	script, err := platform.StagePrivilegedFiles(
+		[]platform.PrivilegedFile{{Name: "ca.pem", Data: certPEM}},
+		`/usr/bin/security remove-trusted-cert -d "$stage/ca.pem"`,
+	)
+	if err != nil {
+		return err
+	}
+	if err := privilegedScriptRunner("\nEnter your password to remove git-treeline CA: ", script); err != nil {
 		return fmt.Errorf("failed to remove CA from system keychain: %w", err)
 	}
 	return nil
@@ -525,10 +634,10 @@ type linuxTrustConfig struct {
 }
 
 var linuxTrustConfigs = map[string]linuxTrustConfig{
-	"debian": {"/usr/local/share/ca-certificates", "update-ca-certificates"},
-	"arch":   {"/etc/ca-certificates/trust-source/anchors", "update-ca-trust"},
-	"fedora": {"/etc/pki/ca-trust/source/anchors", "update-ca-trust"},
-	"suse":   {"/etc/pki/trust/anchors", "update-ca-certificates"},
+	"debian": {"/usr/local/share/ca-certificates", "/usr/sbin/update-ca-certificates"},
+	"arch":   {"/etc/ca-certificates/trust-source/anchors", "/usr/bin/update-ca-trust"},
+	"fedora": {"/etc/pki/ca-trust/source/anchors", "/usr/bin/update-ca-trust"},
+	"suse":   {"/etc/pki/trust/anchors", "/usr/sbin/update-ca-certificates"},
 }
 
 func detectLinuxDistro() string {
@@ -567,16 +676,6 @@ func linuxCACertFile(cfg linuxTrustConfig) string {
 	return filepath.Join(cfg.certDir, "git-treeline.crt")
 }
 
-// linuxTrustSteps returns the privileged commands, in order, that install the
-// CA into the system store for cfg.
-func linuxTrustSteps(cfg linuxTrustConfig, caCertFile string) [][]string {
-	return [][]string{
-		{"/bin/mkdir", "-p", cfg.certDir},
-		{"/bin/cp", caCertFile, linuxCACertFile(cfg)},
-		{cfg.updateCommand},
-	}
-}
-
 // linuxUntrustSteps returns the privileged commands, in order, that remove the
 // CA from the system store for cfg.
 func linuxUntrustSteps(cfg linuxTrustConfig) [][]string {
@@ -586,14 +685,21 @@ func linuxUntrustSteps(cfg linuxTrustConfig) [][]string {
 	}
 }
 
-func trustLinux(caCertFile string) error {
+func trustLinux(certPEM []byte) error {
 	cfg := linuxTrustConfigs[detectLinuxDistro()]
-	// sudo caches credentials after the first step, so later steps normally
-	// do not prompt again.
-	for _, argv := range linuxTrustSteps(cfg, caCertFile) {
-		if err := sudoRunCmd("\nEnter your password (1 of 2): ", argv...); err != nil {
-			return err
-		}
+	body := fmt.Sprintf("/bin/mkdir -p %s\n/usr/bin/install -m 0644 \"$stage/ca.pem\" %s\n%s",
+		platform.ShellQuote(cfg.certDir),
+		platform.ShellQuote(linuxCACertFile(cfg)),
+		platform.ShellQuote(cfg.updateCommand),
+	)
+	script, err := platform.StagePrivilegedFiles(
+		[]platform.PrivilegedFile{{Name: "ca.pem", Data: certPEM}}, body,
+	)
+	if err != nil {
+		return err
+	}
+	if err := privilegedScriptRunner("\nEnter your password (1 of 2): ", script); err != nil {
+		return err
 	}
 	// The system OpenSSL store above is what curl/wget/CLI tools consult.
 	// Browsers in the Chrome/Chromium/Brave and Firefox families do NOT use
@@ -602,7 +708,23 @@ func trustLinux(caCertFile string) error {
 	// still rejects the cert. NSS updates are per-user (no sudo), so they
 	// run after the sudo'd system step. Failure here is non-fatal: CLI trust
 	// still works and we tell the user how to fix browser trust.
-	trustNSS(caCertFile)
+	if err := withCertSnapshot(certPEM, trustNSS); err != nil {
+		fmt.Fprintln(os.Stderr, "  Note: could not stage the CA for browser trust:", err)
+	}
+	return nil
+}
+
+func withCertSnapshot(certPEM []byte, fn func(string)) error {
+	dir, err := os.MkdirTemp("", "git-treeline-ca-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	path := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(path, certPEM, 0o600); err != nil {
+		return err
+	}
+	fn(path)
 	return nil
 }
 

@@ -204,6 +204,21 @@ func maybeOfferServeInstall(uc *config.UserConfig) error {
 	return nil
 }
 
+// ensureRouterCA removes a stale trusted root before overwriting its certificate.
+// Failed removal must preserve the certificate so removal can be retried.
+func ensureRouterCA(domain string, untrust func() error) (string, error) {
+	if proxy.CANeedsRegen(domain) && proxy.IsCAInstalled() {
+		if err := untrust(); err != nil {
+			return "", fmt.Errorf("could not remove old CA from trust store: %w", err)
+		}
+	}
+	path, err := proxy.EnsureCA(domain)
+	if err != nil {
+		return "", fmt.Errorf("CA generation failed: %w", err)
+	}
+	return path, nil
+}
+
 // runServeInstall performs the HTTPS router installation steps.
 // Extracted from serveInstallCmd so gtl install can reuse it.
 func runServeInstall(uc *config.UserConfig) error {
@@ -213,23 +228,14 @@ func runServeInstall(uc *config.UserConfig) error {
 	}
 
 	port := uc.RouterPort()
-	domain := uc.RouterDomain()
-
-	// If the on-disk CA predates name constraints (or its constraints don't
-	// cover the current domain), EnsureCA regenerates it below. Remove the old
-	// trusted root first: the untrust helpers match the trust store by the
-	// cert file's current content, so this must run before EnsureCA overwrites
-	// ca.pem — otherwise the stale, unconstrained root lingers in the trust
-	// store and stays a valid MITM signer.
-	if proxy.CANeedsRegen(domain) && proxy.IsCAInstalled() {
-		if err := proxy.UntrustCA(); err != nil {
-			fmt.Fprintln(os.Stderr, style.Warnf("could not remove old CA from trust store: %v", err))
-		}
+	domain, err := uc.ValidatedRouterDomain()
+	if err != nil {
+		return err
 	}
 
-	caCertFile, err := proxy.EnsureCA(domain)
+	caCertFile, err := ensureRouterCA(domain, proxy.UntrustCA)
 	if err != nil {
-		return fmt.Errorf("CA generation failed: %w", err)
+		return err
 	}
 
 	if !uc.HasExplicitRouterDomain() {
@@ -245,7 +251,7 @@ func runServeInstall(uc *config.UserConfig) error {
 	fmt.Printf("  2. Port forwarding (443 → %d)\n", port)
 	fmt.Println()
 
-	if err := proxy.TrustCA(caCertFile); err != nil {
+	if err := proxy.TrustCA(caCertFile, domain); err != nil {
 		fmt.Fprintln(os.Stderr, style.Warnf("CA trust failed: %v", err))
 		fmt.Fprintln(os.Stderr, style.Dimf("  HTTPS will work but browsers will show a certificate warning."))
 	}

@@ -829,6 +829,32 @@ func TestHandleConfigSet_Boolean(t *testing.T) {
 	}
 }
 
+func TestHandleConfigSet_RejectsUnsafeRouterDomain(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("GTL_HOME", dir)
+
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "config_set"
+	req.Params.Arguments = map[string]any{
+		"key":   "router.domain",
+		"value": "github.io",
+	}
+
+	result, err := handleConfigSet(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatal("expected public suffix to be rejected")
+	}
+	if text := extractText(t, result); !strings.Contains(text, "public suffix") {
+		t.Errorf("error should explain rejected public suffix, got %q", text)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "config.json")); !os.IsNotExist(err) {
+		t.Fatalf("invalid router domain should not be persisted, stat error = %v", err)
+	}
+}
+
 func TestHandleLink_ListEmpty(t *testing.T) {
 	seedRegistry(t)
 

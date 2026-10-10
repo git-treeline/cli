@@ -648,7 +648,7 @@ Controls allocation policy for your machine. Created automatically by `gtl init`
 
 Without this setting, worktrees are created as siblings of the repo (e.g. `../myapp-feature-x`).
 
-**Router config:** `router.port` sets the port the subdomain router listens on (default 3001). Port 443 is forwarded here by `gtl serve install`.
+**Router config:** `router.port` sets the port the subdomain router listens on (default 3001). Port 443 is forwarded here by `gtl serve install`. `router.domain` must be `localhost` or a valid DNS suffix below a public suffix, such as `prt.dev` or `dev.example.com`. Wildcards, IP addresses, public suffixes such as `com` or `co.uk`, and whitespace are rejected because this value also limits the local CA's authority.
 
 **Tunnel config:** `tunnel.tunnels` stores named tunnel configurations, each with a domain. `tunnel.default` selects which tunnel is used when no `--tunnel` flag is passed. Run `gtl tunnel setup` to add tunnels interactively. Use `gtl tunnel default <name>` to switch the active default. Use `gtl tunnel remove <name>` to delete a tunnel from config (does not affect the Cloudflare tunnel itself). Old configs (`tunnel.name`/`tunnel.domain`) are auto-migrated on first load.
 
@@ -684,12 +684,12 @@ See [Framework examples](#framework-examples) for complete examples. Available f
 | `project` | Project name (defaults to directory name). Once allocated, renaming triggers drift detection — see below |
 | `merge_target` | Branch that `prune --merged` checks against (auto-detected if omitted) |
 | `port_count` | Number of contiguous ports per worktree (default: 1) |
-| `env_file` | Env file path (string shorthand, e.g. `.env.local`) — or map with `path` and `seed_from` when they differ |
+| `env_file` | Project-relative env file path (string shorthand, e.g. `.env.local`) — or map with `path` and `seed_from` when they differ. Absolute paths, `..` components, and symlinks escaping the project root are rejected |
 | `database.adapter` | `postgresql` or `sqlite` |
 | `database.template` | Source database to clone from (omit if no DB needed) |
 | `database.name` | Naming pattern for the worktree's database — `{template}_{worktree}` — with `{template}` `{worktree}` `{project}` tokens. Mints `{database.name}` (alias `{database}`). Reads the older `database.pattern` key and migrates it in place |
 | `database.extra` | Auxiliary databases (e.g. a Rails test DB), either a map of `name: pattern` entries — each minting `{database.extra.<name>}` — or a list of patterns, each minting `{database_N}` by position. Same tokens as `database.name` plus `{database.name}` (alias `{database}`) — extras render independently of each other, so one extra cannot reference another. Treeline names them, tracks them, and drops them on `release --drop-db` (including `_0..N` parallel-test shards), but never creates them |
-| `copy_files` | Files copied from main repo to worktree |
+| `copy_files` | Project-relative files copied from main repo to worktree. Paths must remain inside both roots; absolute paths, `..` components, and escaping symlinks are rejected |
 | `env` | Key-value pairs written to the env file, with token interpolation |
 | `commands.setup` | Shell commands run in the worktree after setup |
 | `commands.start` | Whatever you'd type to boot the app — `bin/dev`, `npm run dev`, `foreman start`, etc. (used by `gtl start` and `--start` on `new`/`review`) |
@@ -703,7 +703,7 @@ See [Framework examples](#framework-examples) for complete examples. Available f
 | `hooks.<name>.auto` | `true` to run this hook on every fresh `gtl start` (default: `false`, requires `--with`) |
 | `hooks.<name>.pre_start` | Shell command(s) run before the supervisor launches — string or array of strings |
 | `hooks.<name>.post_stop` | Shell command(s) run in reverse order when the supervisor exits (Ctrl+C) — string or array |
-| `provision.apt` | System packages a host needs before setup (Linux; installed with `sudo apt-get`). Skipped on macOS |
+| `provision.apt` | Archive package names a host needs before setup (Linux; installed with `sudo apt-get`). Apt options and local package paths are rejected. Skipped on macOS |
 | `provision.services` | Service packages to apt-install and `systemctl enable --now` (Linux). Skipped on macOS |
 | `provision.database.source` | A `database.sources.<env>` name to hydrate the template database from (preferred — real data) |
 | `provision.database.hydrate` | Fallback shell command, run in the repo dir, to fill the template when no `source` is set (e.g. `bin/rails db:schema:load db:seed`) |

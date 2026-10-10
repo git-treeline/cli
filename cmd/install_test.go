@@ -13,6 +13,7 @@ import (
 
 	"github.com/git-treeline/cli/internal/config"
 	"github.com/git-treeline/cli/internal/detect"
+	"github.com/git-treeline/cli/internal/proxy"
 	"github.com/git-treeline/cli/internal/registry"
 	setupPkg "github.com/git-treeline/cli/internal/setup"
 	"github.com/spf13/cobra"
@@ -705,5 +706,37 @@ func TestRouterInstallIssuesWith(t *testing.T) {
 					tt.caInstalled, tt.serviceRunning, tt.daemonRequired, tt.daemonInstalled, issues, tt.want)
 			}
 		})
+	}
+}
+
+func TestEnsureRouterCAPreservesCertificateWhenRemovalFails(t *testing.T) {
+	t.Setenv("GTL_HOME", t.TempDir())
+	certPath, err := proxy.EnsureCA("old.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removalErr := errors.New("removal failed")
+	called := false
+	path, err := ensureRouterCA("new.test", func() error {
+		called = true
+		return removalErr
+	})
+	if !called || !errors.Is(err, removalErr) || path != "" {
+		t.Fatalf("called = %v, path = %q, error = %v", called, path, err)
+	}
+	after, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) || proxy.CANeedsRegen("old.test") {
+		t.Fatal("failed removal changed the original CA certificate or key")
+	}
+	path, err = ensureRouterCA("new.test", func() error { return nil })
+	if err != nil || path != certPath || proxy.CANeedsRegen("new.test") {
+		t.Fatalf("retry did not regenerate CA: path = %q, error = %v", path, err)
 	}
 }

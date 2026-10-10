@@ -219,7 +219,8 @@ func TestForDetection_Python(t *testing.T) {
 	assertValidYAML(t, content)
 	assertContains(t, content, "commands:")
 	assertContains(t, content, "pip install")
-	assertContains(t, content, "start: python manage.py runserver")
+	assertContains(t, content, "start: python manage.py runserver 127.0.0.1:{port}")
+	assertNotContains(t, content, "0.0.0.0")
 	assertNotContains(t, content, "setup_commands")
 }
 
@@ -332,7 +333,8 @@ func TestForDetection_Vite(t *testing.T) {
 	assertContains(t, content, `PORT: "{port}"`)
 	assertContains(t, content, "commands:")
 	assertContains(t, content, "npm install")
-	assertContains(t, content, "start: npx vite --port {port} --host")
+	assertContains(t, content, "start: npx vite --port {port} --host 127.0.0.1")
+	assertNotContains(t, content, "--host 0.0.0.0")
 	assertNotContains(t, content, "setup_commands")
 }
 
