@@ -4,6 +4,7 @@
 package setup
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -467,30 +468,13 @@ func (s *Setup) syncTemplateDatabase() error {
 		return nil
 	}
 
-	mergeTarget := s.ProjectConfig.MergeTarget()
-	if mergeTarget == "" {
-		mergeTarget = "main"
+	err := UpdateTemplateDatabase(context.Background(), s.MainRepo, s.ProjectConfig, s.Log)
+	var configErr *TemplateConfigError
+	if !s.Options.StrictDB && errors.As(err, &configErr) {
+		s.warn("Template database was NOT refreshed: %s. Continuing with the existing template.\n%s", configErr.Message, configErr.Hint)
+		return nil
 	}
-
-	s.log("Syncing template database (pulling %s + migrating)", mergeTarget)
-
-	pull := exec.Command("git", "pull", "origin", mergeTarget)
-	pull.Dir = s.MainRepo
-	pull.Stdout = s.Log
-	pull.Stderr = s.Log
-	if err := pull.Run(); err != nil {
-		return fmt.Errorf("git pull in root repo: %w", err)
-	}
-
-	migrate := exec.Command("sh", "-c", migrateCmd)
-	migrate.Dir = s.MainRepo
-	migrate.Stdout = s.Log
-	migrate.Stderr = s.Log
-	if err := migrate.Run(); err != nil {
-		return fmt.Errorf("migrate command failed: %w", err)
-	}
-
-	return nil
+	return err
 }
 
 func (s *Setup) handleProjectRename() error {

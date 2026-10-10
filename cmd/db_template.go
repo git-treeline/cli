@@ -1,13 +1,12 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
-	"strings"
 
 	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/setup"
 	"github.com/git-treeline/cli/internal/worktree"
 	"github.com/spf13/cobra"
 )
@@ -24,14 +23,17 @@ var dbTemplateCmd = &cobra.Command{
 
 var dbTemplateUpdateCmd = &cobra.Command{
 	Use:   "update",
-	Short: "Pull the merge target branch and run migrations in the root repo",
-	Long: `Advances the root template database to match the current state of the
-merge target branch. Pulls latest in the root repo, then runs the
-commands.migrate command configured in .treeline.yml.
+	Short: "Update the root template database from the remote merge target",
+	Long: `Fetches the merge target branch and runs commands.migrate in a temporary,
+detached checkout. Existing checkout branches and worktree databases are unchanged.
 
-The root repo must have a clean working tree. Existing worktree databases
-are not affected — run 'gtl db reset' in a worktree to re-clone from the
-updated template.`,
+The env mapping must use {database}, {database.name}, or {database_1}; these
+resolve to database.template for this operation. Configured copy_files and the
+root repo's env file seed the checkout. Setup commands and hooks are not run;
+commands.migrate must prepare any dependencies it needs in a fresh checkout.
+
+Run 'gtl db reset' in a worktree to re-clone from the updated template.`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -39,7 +41,7 @@ updated template.`,
 		}
 
 		mainRepo := worktree.DetectMainRepo(cwd)
-		pc := config.LoadProjectConfig(cwd)
+		pc := config.LoadProjectConfigReadOnly(worktree.DetectRepoRoot(cwd))
 
 		migrateCmd := pc.MigrateCommand()
 		if migrateCmd == "" {
@@ -49,79 +51,15 @@ updated template.`,
 			})
 		}
 
-		mergeTarget := pc.MergeTarget()
-		if mergeTarget == "" {
-			mergeTarget = resolveRemoteDefaultBranch(mainRepo)
-		}
-
-		if err := checkCleanWorktree(mainRepo); err != nil {
-			return cliErr(cmd, &CliError{
-				Message: fmt.Sprintf("Root repo has uncommitted changes: %s", err),
-				Hint:    "Commit or stash changes in the root repo before updating the template database.",
-			})
-		}
-
-		fmt.Printf("==> Pulling %s in %s\n", mergeTarget, mainRepo)
-		pull := exec.Command("git", "pull", "--ff-only", "origin", mergeTarget)
-		pull.Dir = mainRepo
-		pull.Stdout = os.Stdout
-		var pullStderr strings.Builder
-		pull.Stderr = io.MultiWriter(os.Stderr, &pullStderr)
-		if err := pull.Run(); err != nil {
-			if strings.Contains(pullStderr.String(), "fast-forward") ||
-				strings.Contains(pullStderr.String(), "divergent") {
-				return cliErr(cmd, &CliError{
-					Message: fmt.Sprintf("Branch '%s' has diverged from origin/%s and cannot be fast-forwarded.", mergeTarget, mergeTarget),
-					Hint:    fmt.Sprintf("If origin is the source of truth, reset with:\n  cd %s && git reset --hard origin/%s", mainRepo, mergeTarget),
-				})
+		if err := setup.UpdateTemplateDatabase(cmd.Context(), mainRepo, pc, cmd.OutOrStdout()); err != nil {
+			var configErr *setup.TemplateConfigError
+			if errors.As(err, &configErr) {
+				return cliErr(cmd, &CliError{Message: configErr.Message, Hint: configErr.Hint, Cause: err})
 			}
-			return fmt.Errorf("git pull: %w", err)
+			return cliErr(cmd, err)
 		}
 
-		fmt.Printf("==> Running: %s\n", migrateCmd)
-		migrate := exec.Command("sh", "-c", migrateCmd)
-		migrate.Dir = mainRepo
-		migrate.Stdout = os.Stdout
-		migrate.Stderr = os.Stderr
-		if err := migrate.Run(); err != nil {
-			return fmt.Errorf("migrate command failed: %w", err)
-		}
-
-		fmt.Println("==> Template database updated. Run 'gtl db reset' in any worktree to re-clone.")
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "==> Template database updated. Run 'gtl db reset' in any worktree to re-clone.")
 		return nil
 	},
-}
-
-// resolveRemoteDefaultBranch reads origin/HEAD to find the remote's default
-// branch name. Falls back to "main" if the symbolic ref is absent or unset
-// (e.g. remote added manually, shallow clone, or stale after a branch rename).
-func resolveRemoteDefaultBranch(dir string) string {
-	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		return "main"
-	}
-	// output is "refs/remotes/origin/<branch>\n"
-	ref := strings.TrimSpace(string(out))
-	const prefix = "refs/remotes/origin/"
-	if strings.HasPrefix(ref, prefix) {
-		return ref[len(prefix):]
-	}
-	return "main"
-}
-
-// checkCleanWorktree returns an error if the git working tree at dir has
-// uncommitted changes (staged or unstaged). Untracked files are ignored.
-func checkCleanWorktree(dir string) error {
-	cmd := exec.Command("git", "status", "--porcelain", "--untracked-files=no")
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		return fmt.Errorf("checking working tree: %w", err)
-	}
-	if len(out) > 0 {
-		return fmt.Errorf("working tree is not clean")
-	}
-	return nil
 }
