@@ -68,7 +68,8 @@ func runTrackedRuntimeActionWith(ctx context.Context, dir, action string, effect
 	if err != nil {
 		return true, err
 	}
-	defer locks.Close()
+	// Cleanup does not change the completed operation or its receipt.
+	defer func() { _ = locks.Close() }()
 	if err := reg.CheckReleaseReservations([]string{dir}); err != nil {
 		return true, err
 	}

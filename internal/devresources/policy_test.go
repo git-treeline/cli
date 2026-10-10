@@ -163,30 +163,55 @@ func TestCheckRejectsUnsafeFilesAndMalformedJSON(t *testing.T) {
 			path := filepath.Join(f.normal, "config.json")
 			switch kind {
 			case "missing":
-				os.Remove(path)
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
 			case "hardlink-file":
 				if err := os.Link(path, path+".linked"); err != nil {
 					t.Fatal(err)
 				}
 			case "symlink-file":
-				os.Rename(path, path+".real")
-				os.Symlink(path+".real", path)
+				if err := os.Rename(path, path+".real"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(path+".real", path); err != nil {
+					t.Fatal(err)
+				}
 			case "symlink-dir":
-				os.Rename(f.normal, f.normal+".real")
-				os.Symlink(f.normal+".real", f.normal)
+				if err := os.Rename(f.normal, f.normal+".real"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(f.normal+".real", f.normal); err != nil {
+					t.Fatal(err)
+				}
 			case "writable-file":
-				os.Chmod(path, 0660)
+				if err := os.Chmod(path, 0660); err != nil {
+					t.Fatal(err)
+				}
 			case "writable-parent":
-				os.Chmod(filepath.Dir(f.normal), 0770)
+				if err := os.Chmod(filepath.Dir(f.normal), 0770); err != nil {
+					t.Fatal(err)
+				}
 			case "readable-private":
-				os.Chmod(filepath.Join(f.private, "config.json"), 0644)
+				if err := os.Chmod(filepath.Join(f.private, "config.json"), 0644); err != nil {
+					t.Fatal(err)
+				}
 			case "duplicate-json":
-				os.WriteFile(path, []byte(`{"port":{},"port":{}}`), 0600)
+				if err := os.WriteFile(path, []byte(`{"port":{},"port":{}}`), 0600); err != nil {
+					t.Fatal(err)
+				}
 			case "trailing-json":
-				data, _ := os.ReadFile(path)
-				os.WriteFile(path, append(data, []byte(` {}`)...), 0600)
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, append(data, []byte(` {}`)...), 0600); err != nil {
+					t.Fatal(err)
+				}
 			case "corrupt":
-				os.WriteFile(path, []byte(`{`), 0600)
+				if err := os.WriteFile(path, []byte(`{`), 0600); err != nil {
+					t.Fatal(err)
+				}
 			case "wrong-home":
 				t.Setenv("GTL_HOME", f.normal)
 			}

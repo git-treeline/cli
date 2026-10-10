@@ -143,7 +143,8 @@ func runTrackedStartWith(ctx context.Context, dir string, locks *registry.Lifecy
 			return err
 		}
 	}
-	defer locks.Close()
+	// Cleanup does not change the completed operation or its receipt.
+	defer func() { _ = locks.Close() }()
 	reg := registry.New("")
 	if err := reg.CheckReleaseReservations([]string{dir}); err != nil {
 		return err

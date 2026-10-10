@@ -36,7 +36,8 @@ func newReleaseInspectCommand(registryPath string) *cobra.Command {
 			if err != nil {
 				return releaseRefusal("execution_lock_unavailable")
 			}
-			defer locks.Close()
+			// Cleanup does not change the completed operation or its receipt.
+			defer func() { _ = locks.Close() }()
 			reg := registry.New(registryPath)
 			checkAvailable := func() error {
 				existing, err := reg.GetRelease(operationID)

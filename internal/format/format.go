@@ -291,7 +291,8 @@ func DatabaseCleanupConfigRevision(root string) (string, error) {
 		return "", ErrDatabaseCleanupConfig
 	}
 	file := os.NewFile(uintptr(fd), name)
-	defer file.Close()
+	// This descriptor is read-only; the read result determines success.
+	defer func() { _ = file.Close() }()
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(before, opened) {
 		return "", ErrDatabaseCleanupConfig

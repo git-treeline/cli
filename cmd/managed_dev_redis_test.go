@@ -15,7 +15,7 @@ import (
 func TestManagedDevRedisRuntimeAndRelease(t *testing.T) {
 	for _, mode := range []string{"valid", "sibling", "removed opt-in"} {
 		t.Run(mode, func(t *testing.T) {
-			root, reg, a := managedDevPostgreSQLFixture(t, false)
+			root, reg, _ := managedDevPostgreSQLFixture(t, false)
 			body := strings.Replace(managedDevPostgreSQLConfig, "env: {DATABASE_NAME: '{database}'}", "env: {REDIS_URL: '{redis_url}', REDIS_PREFIX: '{redis_prefix}'}", 1)
 			if err := os.WriteFile(filepath.Join(root, config.ProjectConfigFile), []byte(body), 0600); err != nil {
 				t.Fatal(err)

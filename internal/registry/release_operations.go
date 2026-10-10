@@ -487,7 +487,7 @@ func verifyTarget(t TargetIdentity, removed bool) error {
 		}
 		exit, ok := e.(*exec.ExitError)
 		if !ok || exit.ExitCode() != 128 || string(exit.Stderr) != "fatal: not a git repository (or any of the parent directories): .git\n" {
-			return fmt.Errorf("Git identity unavailable")
+			return fmt.Errorf("git identity unavailable")
 		}
 		for p := t.Path; ; p = filepath.Dir(p) {
 			if _, err := os.Lstat(filepath.Join(p, ".git")); !os.IsNotExist(err) {
@@ -500,7 +500,7 @@ func verifyTarget(t TargetIdentity, removed bool) error {
 		return nil
 	}
 	if e != nil || !strings.HasSuffix(string(out), "\n") {
-		return fmt.Errorf("Git identity unavailable")
+		return fmt.Errorf("git identity unavailable")
 	}
 	common, e := filepath.EvalSymlinks(strings.TrimSuffix(string(out), "\n"))
 	if e != nil || common != t.Common.Path {

@@ -18,25 +18,25 @@ var regexpPostgreSQLUnderscores = regexp.MustCompile(`_+`)
 
 func validatePostgreSQLProject(pc *config.ProjectConfig) error {
 	if pc.Project() != PostgreSQLProject || pc.DatabaseTemplate() != PostgreSQLTemplate {
-		return refusal
+		return errRefusal
 	}
 	args := pc.DatabaseConnArgs()
 	if len(args) != 6 || (args[1] != "127.0.0.1" && args[1] != "localhost" && args[1] != "::1") || !identifier.MatchString(args[5]) {
-		return refusal
+		return errRefusal
 	}
 	switch config.Dig(pc.Data, "database", "port").(type) {
 	case int, string:
 	default:
-		return refusal
+		return errRefusal
 	}
 	port, err := strconv.Atoi(args[3])
 	if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != args[3] {
-		return refusal
+		return errRefusal
 	}
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
 		if strings.HasPrefix(key, "PG") && key != "PGPASSWORD" && key != "PGPASSFILE" {
-			return refusal
+			return errRefusal
 		}
 	}
 	return nil

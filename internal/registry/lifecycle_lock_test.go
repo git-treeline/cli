@@ -235,7 +235,7 @@ func TestLifecycleCancellationAndPartialFailureRelease(t *testing.T) {
 	if locks, err := AcquireLifecycleLocks(canceled, []string{a}); !errors.Is(err, context.Canceled) || locks != nil {
 		t.Fatalf("pre-canceled acquisition: %v", err)
 	}
-	if locks, err := AcquireLifecycleLocks(nil, []string{a}); err == nil || locks != nil {
+	if locks, err := AcquireLifecycleLocks(nil, []string{a}); err == nil || locks != nil { //nolint:staticcheck // Verify the API rejects a nil context.
 		t.Fatal("nil context accepted")
 	}
 }
@@ -363,7 +363,11 @@ func TestLifecycleReservationOutcomesAndRegistryLockIndependence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer registryLock.Close()
+	defer func() {
+		if err := registryLock.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	if err := syscall.Flock(int(registryLock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Fatal(err)
 	}

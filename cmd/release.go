@@ -92,7 +92,8 @@ func runReleaseSingleContext(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		defer locks.Close()
+		// Cleanup does not change the completed operation or its receipt.
+		defer func() { _ = locks.Close() }()
 	}
 	if err := reg.CheckReleaseReservations([]string{absPath}); err != nil {
 		return fmt.Errorf("cannot read release allocation: %w", err)
@@ -329,7 +330,8 @@ func releaseAndTeardown(reg *registry.Registry, allocs []registry.Allocation, dr
 	if err != nil {
 		return 0, err
 	}
-	defer locks.Close()
+	// Cleanup does not change the completed operation or its receipt.
+	defer func() { _ = locks.Close() }()
 	if err := reg.CheckReleaseReservations(targets); err != nil {
 		return 0, err
 	}

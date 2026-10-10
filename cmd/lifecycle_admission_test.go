@@ -357,7 +357,11 @@ func commandFreshEnrollment(t *testing.T, reg *registry.Registry, target registr
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer locks.Close()
+	defer func() {
+		if err := locks.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	enrolled, err := reg.EnrollFreshAllocation(locks, target, allocation)
 	if err != nil {
 		t.Fatal(err)

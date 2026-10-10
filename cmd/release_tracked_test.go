@@ -161,7 +161,11 @@ func TestTrackedReleaseMixedPartitionAndSupervisorBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer locks.Close()
+	defer func() {
+		if err := locks.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	target, err := registry.CaptureReleaseTarget(root)
 	if err != nil {
 		t.Fatal(err)
@@ -253,7 +257,11 @@ func TestTrackedReleaseCapturesForcedRemovalWithoutRemovingFixture(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer locks.Close()
+	defer func() {
+		if err := locks.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	oldFactory := trackedReleaseExecutorFactory
 	t.Cleanup(func() { trackedReleaseExecutorFactory = oldFactory })
 	trackedReleaseExecutorFactory = fakeTrackedReleaseFactory(t, func(context.Context, registry.ReleaseOperation, registry.ReleasePhase) registry.PhaseResult {

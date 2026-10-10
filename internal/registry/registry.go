@@ -209,7 +209,8 @@ func (r *Registry) readReleaseStore() (RegistryData, error) {
 	if err != nil {
 		return RegistryData{}, fmt.Errorf("reading release registry: %w", err)
 	}
-	defer file.Close()
+	// This descriptor is read-only; the read result determines success.
+	defer func() { _ = file.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(file, maxReleaseStoreBytes+1))
 	if err != nil {
 		return RegistryData{}, err

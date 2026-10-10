@@ -247,14 +247,16 @@ func ReadManagedHostsStrict(path string) (ManagedHostsSnapshot, error) {
 	if err != nil {
 		return s, err
 	}
-	defer f.Close()
+	// Read-only cleanup does not change the validated snapshot.
+	defer func() { _ = f.Close() }()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
 		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
 			return s, ErrHostsBusy
 		}
 		return s, err
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	// Closing the descriptor also releases the lock.
+	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
 	s.info = info
 	s.data, err = io.ReadAll(io.LimitReader(f, maxManagedHostsBytes+1))
 	if err != nil {
@@ -282,7 +284,7 @@ func openManagedHostsFile(path string, flags int) (*os.File, os.FileInfo, error)
 	}
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() || !os.SameFile(before, info) {
-		f.Close()
+		_ = f.Close() // Preserve the identity-refusal error during cleanup.
 		return nil, nil, ErrHostsChanged
 	}
 	return f, info, nil
@@ -386,7 +388,8 @@ func SyncManagedHostsNoninteractive(expected ManagedHostsSnapshot, hosts []strin
 		}
 		return err
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	// Closing the descriptor also releases the lock.
+	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
 	current, err := io.ReadAll(io.LimitReader(f, maxManagedHostsBytes+1))
 	pathInfo, pathErr := os.Lstat(expected.path)
 	if err != nil || pathErr != nil || !os.SameFile(info, pathInfo) || !bytes.Equal(current, expected.data) {
@@ -429,7 +432,8 @@ func CheckManagedHostsWrite(expected ManagedHostsSnapshot) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	// This access probe writes nothing; preserve its validation result.
+	defer func() { _ = file.Close() }()
 	if !os.SameFile(expected.info, info) {
 		return ErrHostsChanged
 	}

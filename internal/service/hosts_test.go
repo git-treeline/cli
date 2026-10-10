@@ -143,11 +143,19 @@ func TestStrictManagedHostsChangedOrBusyNeverWrites(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer f.Close()
+				defer func() {
+					if err := f.Close(); err != nil {
+						t.Error(err)
+					}
+				}()
 				if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 					t.Fatal(err)
 				}
-				defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				defer func() {
+					if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
+						t.Error(err)
+					}
+				}()
 				want = ErrHostsBusy
 			case "permission":
 				if err := os.Chmod(path, 0400); err != nil {
@@ -226,11 +234,19 @@ func TestStrictManagedHostsReadWhileWriterLocked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Fatal(err)
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	defer func() {
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
+			t.Error(err)
+		}
+	}()
 	if _, err := ReadManagedHostsStrict(path); !errors.Is(err, ErrHostsBusy) {
 		t.Fatalf("reader could observe partial strict write: %v", err)
 	}

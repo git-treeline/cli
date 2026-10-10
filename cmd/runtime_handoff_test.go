@@ -215,7 +215,9 @@ func TestRuntimeHandoffUncertainHooksNeverReplay(t *testing.T) {
 			if err := sv.ShutdownRequested(uuid.NewString()); err != nil {
 				t.Fatal(err)
 			}
-			if sv.ShutdownComplete() == nil || sv.ShutdownComplete() == nil || calls != 1 {
+			firstErr := sv.ShutdownComplete()
+			retryErr := sv.ShutdownComplete()
+			if firstErr == nil || retryErr == nil || calls != 1 {
 				t.Fatal("uncertain hook succeeded or replayed")
 			}
 			r, err := runtimeowner.New(store.Path).Query(context.Background(), h.Binding)

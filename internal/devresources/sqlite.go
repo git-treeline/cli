@@ -35,23 +35,23 @@ func validSQLitePattern(pattern string) bool {
 // this read-only check does not exclude concurrent external filesystem writers.
 func ValidateSQLiteFile(root, name string) error {
 	if !validSQLiteName(name) || !filepath.IsAbs(root) || filepath.Clean(root) != root {
-		return refusal
+		return errRefusal
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || !filepath.IsAbs(home) {
-		return refusal
+		return errRefusal
 	}
 	home, err = filepath.EvalSymlinks(home)
 	if err != nil {
-		return refusal
+		return errRefusal
 	}
 	workspace := filepath.Join(home, ".treeline-dev", "workspaces")
 	if !strings.HasPrefix(root, workspace+string(filepath.Separator)) {
-		return refusal
+		return errRefusal
 	}
 	relative, err := filepath.Rel(home, root)
 	if err != nil || !validSQLiteName(relative) {
-		return refusal
+		return errRefusal
 	}
 	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
 		parts := strings.Split(filepath.Join(relative, name+suffix), string(filepath.Separator))
@@ -65,18 +65,18 @@ func ValidateSQLiteFile(root, name string) error {
 				break
 			}
 			if err != nil || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
-				return refusal
+				return errRefusal
 			}
 			stat, ok := info.Sys().(*syscall.Stat_t)
 			if !ok || stat.Uid != uint32(os.Getuid()) {
-				return refusal
+				return errRefusal
 			}
 			if index == len(parts)-1 {
 				if !info.Mode().IsRegular() || stat.Nlink != 1 {
-					return refusal
+					return errRefusal
 				}
 			} else if !info.IsDir() {
-				return refusal
+				return errRefusal
 			}
 		}
 	}

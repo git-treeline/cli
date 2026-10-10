@@ -11,10 +11,10 @@ import (
 // or interpreting application commands. Callers validate filesystem containment.
 func ValidateProject(pc *config.ProjectConfig) error {
 	if pc == nil || pc.Validate() != nil || !identifier.MatchString(pc.Project()) {
-		return refusal
+		return errRefusal
 	}
 	if count, ok := integer(pc.Data["port_count"]); !ok || count < 1 || count > increment {
-		return refusal
+		return errRefusal
 	}
 	for key, value := range pc.Data {
 		switch key {
@@ -22,98 +22,98 @@ func ValidateProject(pc *config.ProjectConfig) error {
 		case "database":
 			database, ok := value.(map[string]any)
 			if !ok {
-				return refusal
+				return errRefusal
 			}
 			sqlite := database["adapter"] == "sqlite"
 			postgres := pc.DatabaseAdapter() == "postgresql" && pc.DatabaseTemplate() != ""
 			if postgres && validatePostgreSQLProject(pc) != nil {
-				return refusal
+				return errRefusal
 			}
 			if sqlite && !validSQLiteName(pc.DatabaseTemplate()) {
-				return refusal
+				return errRefusal
 			}
 			for name, entry := range database {
 				switch name {
 				case "adapter":
 					if entry != "postgresql" && entry != "sqlite" {
-						return refusal
+						return errRefusal
 					}
 				case "name":
 					if sqlite {
 						pattern, ok := entry.(string)
 						if !ok || !validSQLitePattern(pattern) {
-							return refusal
+							return errRefusal
 						}
 					} else if entry != "{template}_{worktree}" {
-						return refusal
+						return errRefusal
 					}
 				case "template":
 					if !sqlite && !postgres && entry != nil && entry != "" {
-						return refusal
+						return errRefusal
 					}
 				case "host", "port", "user":
 					if !postgres {
-						return refusal
+						return errRefusal
 					}
 				default:
-					return refusal
+					return errRefusal
 				}
 			}
 		case "hooks", "editor", "redis", "router", "tunnel", "aliases":
 			entries, ok := value.(map[string]any)
 			if !ok || len(entries) != 0 {
-				return refusal
+				return errRefusal
 			}
 		case "copy_files":
 			entries, ok := value.([]any)
 			if !ok || len(entries) > 256 {
-				return refusal
+				return errRefusal
 			}
 			for _, entry := range entries {
 				name, ok := entry.(string)
 				if !ok || !validSQLiteName(name) {
-					return refusal
+					return errRefusal
 				}
 			}
 		case "related":
 			entries, ok := value.([]any)
 			if !ok || len(entries) != 0 {
-				return refusal
+				return errRefusal
 			}
 		case "merge_target", "worktree_base":
 			if value != "" {
-				return refusal
+				return errRefusal
 			}
 		default:
-			return refusal
+			return errRefusal
 		}
 	}
 	if commands, present := pc.Data["commands"]; present {
 		entries, ok := commands.(map[string]any)
 		if !ok {
-			return refusal
+			return errRefusal
 		}
 		for key, value := range entries {
 			if _, ok := value.(string); key != "start" || !ok {
-				return refusal
+				return errRefusal
 			}
 		}
 	}
 	if value, present := pc.Data["env_file"]; present {
 		target, ok := value.(string)
 		if !ok || target == "" || filepath.IsAbs(target) || filepath.Clean(target) != target || target == ".." || strings.HasPrefix(target, "../") || strings.ContainsAny(target, "\x00\r\n") {
-			return refusal
+			return errRefusal
 		}
 	}
 	if value, present := pc.Data["env"]; present {
 		entries, ok := value.(map[string]any)
 		if !ok {
-			return refusal
+			return errRefusal
 		}
 		for key, value := range entries {
 			_, ok := value.(string)
 			if !ok || strings.ContainsAny(key, "\x00\r\n=") || key == "" {
-				return refusal
+				return errRefusal
 			}
 		}
 	}

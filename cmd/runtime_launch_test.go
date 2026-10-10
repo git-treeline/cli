@@ -89,7 +89,11 @@ func TestTrackedStartConnectsFreshAllocationHooksOwnerAndCompletion(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer locks.Close()
+	defer func() {
+		if err := locks.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	if err := runTrackedStartWith(context.Background(), root, locks, "worker", false, effects); err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +186,11 @@ func TestTrackedStartRefusesTargetOrConfigurationChangedByHook(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer locks.Close()
+			defer func() {
+				if err := locks.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
 			if err := runTrackedStartWith(context.Background(), root, locks, "worker", false, effects); err == nil {
 				t.Fatal("changed launch binding accepted")
 			}

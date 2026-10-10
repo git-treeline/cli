@@ -440,13 +440,15 @@ func TestReleaseRegistryCapacityNeverEvictsUnresolved(t *testing.T) {
 	}
 }
 
-func TestReleaseRegistryPriorReaderAndWriterCompatibility(t *testing.T) {
+// This is the hardened schema-2 predecessor from this feature branch, not
+// the released v0.58 CLI, whose release effects predate this preflight.
+func TestReleaseRegistryHardenedPredecessorCompatibility(t *testing.T) {
 	source, e := os.ReadFile("testdata/schema2/registry.go")
 	if e != nil {
 		t.Fatal(e)
 	}
 	if fmt.Sprintf("%x", sha256.Sum256(source)) != "eed8ca25243098a200ab7ebdab1c7c2edced02d86e1fe5c9eaa20fa6f2ca20c4" {
-		t.Fatal("historical source changed")
+		t.Fatal("pinned hardened predecessor source changed")
 	}
 	reg, request := enrolledRequest(t)
 	if _, _, e := reg.PrepareRelease(request); e != nil {
@@ -810,7 +812,11 @@ func freshFixtureEnrollment(t *testing.T, reg *Registry, target TargetIdentity, 
 	}
 	_, lockDir := lifecycleFixture(t)
 	locks := acquireForTest(t, lockDir, target.Path)
-	defer locks.Close()
+	defer func() {
+		if err := locks.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	result, err := reg.EnrollFreshAllocation(locks, target, allocation)
 	if err != nil {
 		t.Fatal(err)

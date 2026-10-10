@@ -847,11 +847,17 @@ func TestFindStrict(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "registry.json")
 			switch kind {
 			case "valid":
-				os.WriteFile(path, []byte(`{"allocations":[{"worktree":"/tmp/strict/../fixture","project":"app","links":{"api":"feature","invalid":3}}]}`), 0640)
+				if err := os.WriteFile(path, []byte(`{"allocations":[{"worktree":"/tmp/strict/../fixture","project":"app","links":{"api":"feature","invalid":3}}]}`), 0640); err != nil {
+					t.Fatal(err)
+				}
 			case "malformed":
-				os.WriteFile(path, []byte(`{"allocations":`), 0640)
+				if err := os.WriteFile(path, []byte(`{"allocations":`), 0640); err != nil {
+					t.Fatal(err)
+				}
 			case "directory":
-				os.Mkdir(path, 0700)
+				if err := os.Mkdir(path, 0700); err != nil {
+					t.Fatal(err)
+				}
 			}
 			alloc, err := New(path).FindStrict("/tmp/fixture")
 			if (err != nil) != (kind == "malformed" || kind == "directory") {

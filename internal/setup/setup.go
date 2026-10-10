@@ -402,7 +402,7 @@ func managedDevGitPath(root string, args ...string) (string, error) {
 	command.Env = append(command.Env, "GIT_CONFIG_NOSYSTEM=1", "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 	output, err := command.Output()
 	if err != nil || !strings.HasSuffix(string(output), "\n") {
-		return "", fmt.Errorf("Git metadata unavailable")
+		return "", fmt.Errorf("git metadata unavailable")
 	}
 	return filepath.EvalSymlinks(strings.TrimSuffix(string(output), "\n"))
 }
@@ -410,7 +410,7 @@ func managedDevGitPath(root string, args ...string) (string, error) {
 func validateManagedDevAlternates(common string, contained func(string) bool) error {
 	objects, err := filepath.EvalSymlinks(filepath.Join(common, "objects"))
 	if err != nil || !contained(objects) {
-		return fmt.Errorf("Git object directory escapes the private workspace root")
+		return fmt.Errorf("git object directory escapes the private workspace root")
 	}
 	path := filepath.Join(common, "objects", "info", "alternates")
 	info, err := os.Lstat(path)
@@ -730,7 +730,8 @@ func readManagedCopySource(root *os.Root, path string) ([]byte, os.FileInfo, err
 	if err != nil {
 		return nil, nil, err
 	}
-	defer handle.Close()
+	// This descriptor is read-only; the read result determines success.
+	defer func() { _ = handle.Close() }()
 	opened, err := handle.Stat()
 	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
 		return nil, nil, fmt.Errorf("source identity changed")

@@ -84,7 +84,8 @@ Must be run from inside a worktree (not the main repo).`,
 		if err != nil {
 			return err
 		}
-		defer admission.locks.Close()
+		// Cleanup does not change the completed operation or its receipt.
+		defer func() { _ = admission.locks.Close() }()
 		absPath, mainRepo := admission.target, admission.source
 		if err := switchWorktreeBranchWithOptions(absPath, mainRepo, branch, switchRunSetup, worktree.CheckoutOptions{DeferSetup: true}); err != nil {
 			return err
@@ -108,13 +109,6 @@ Must be run from inside a worktree (not the main repo).`,
 
 		return nil
 	},
-}
-
-// switchWorktreeBranch fetches a branch, checks it out in the current worktree,
-// updates the registry, and refreshes the environment. Shared by gtl switch
-// and gtl review (when switching in place).
-func switchWorktreeBranch(absPath, mainRepo, branch string, runSetup bool) error {
-	return switchWorktreeBranchWithOptions(absPath, mainRepo, branch, runSetup, worktree.CheckoutOptions{})
 }
 
 func switchWorktreeBranchWithOptions(absPath, mainRepo, branch string, runSetup bool, opts worktree.CheckoutOptions) error {

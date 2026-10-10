@@ -24,7 +24,11 @@ func TestRuntimeStartRegistersBeforeLaunchAndDoesNotReplayInterruptedHandoff(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer locks.Close()
+	defer func() {
+		if err := locks.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	h, err := prepareRuntimeStart(ctx, e.Registry, locks, store, intent.Target, nil, 12345, intent.DatabaseConfigRevision)
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +79,11 @@ func TestRuntimeStartRefusesChangedConfigAndUnknownLegacyOwnership(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer locks.Close()
+			defer func() {
+				if err := locks.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
 			switch kind {
 			case "changed config":
 				if err := os.WriteFile(filepath.Join(intent.Target.Path, ".treeline.yml"), []byte("project: changed\n"), 0600); err != nil {

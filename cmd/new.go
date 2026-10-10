@@ -91,7 +91,8 @@ provision databases, and run setup hooks and commands.`,
 			if err != nil {
 				return err
 			}
-			defer admission.locks.Close()
+			// Cleanup does not change the completed operation or its receipt.
+			defer func() { _ = admission.locks.Close() }()
 			mainRepo = admission.source
 			if !newAllocateOnly {
 				pc = config.LoadProjectConfig(mainRepo)

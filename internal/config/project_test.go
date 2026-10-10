@@ -1642,7 +1642,11 @@ func TestLoadProjectConfigReadOnlyQuietPreservesConfigAndSilence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer captured.Close()
+	defer func() {
+		if err := captured.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	stdout, stderr := os.Stdout, os.Stderr
 	os.Stdout, os.Stderr = captured, captured
 	defer func() { os.Stdout, os.Stderr = stdout, stderr }()

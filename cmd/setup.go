@@ -106,7 +106,8 @@ var setupCmd = &cobra.Command{
 			if err != nil {
 				return err
 			}
-			defer locks.Close()
+			// Cleanup does not change the completed operation or its receipt.
+			defer func() { _ = locks.Close() }()
 			completionLocks = locks
 			if err := registry.New(setup.RegistryPath).CheckReleaseReservations(targets); err != nil {
 				return cliErr(cmd, err)

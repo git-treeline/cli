@@ -196,7 +196,8 @@ func claimFileRevision(path string) (string, error) {
 	if err != nil {
 		return "", claimHostError("config_unavailable")
 	}
-	defer file.Close()
+	// This descriptor is read-only; the read result determines success.
+	defer func() { _ = file.Close() }()
 	info, err = file.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() > hostClaimLimit {
 		return "", claimHostError("config_unavailable")
@@ -480,7 +481,8 @@ func executeHostClaim(cmd *cobra.Command, cwd string, request hostClaimRequest) 
 	if err != nil {
 		return fail("admission_refused")
 	}
-	defer admission.locks.Close()
+	// Cleanup does not change the completed operation or its receipt.
+	defer func() { _ = admission.locks.Close() }()
 	if err = admission.recheck(); err != nil {
 		return fail("binding_conflict")
 	}
@@ -632,7 +634,8 @@ func runHostClaim(cmd *cobra.Command, branch string) error {
 			return claimHostError("invalid_request")
 		}
 		file := os.NewFile(uintptr(fd), claimRequestFile)
-		defer file.Close()
+		// This descriptor is read-only; the read result determines success.
+		defer func() { _ = file.Close() }()
 		info, e := file.Stat()
 		if e != nil || !os.SameFile(named, info) || !info.Mode().IsRegular() || info.Size() > hostClaimLimit {
 			return claimHostError("invalid_request")

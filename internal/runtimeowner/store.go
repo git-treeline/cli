@@ -359,7 +359,8 @@ func (s *Store) read() (envelope, error) {
 	if err != nil {
 		return envelope{}, err
 	}
-	defer file.Close()
+	// This descriptor is read-only; the read result determines success.
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
 		return envelope{}, err

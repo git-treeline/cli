@@ -62,7 +62,8 @@ safe to capture, e.g.: wt=$(gtl claim agent/some-branch)`,
 		if err != nil {
 			return err
 		}
-		defer admission.locks.Close()
+		// Cleanup does not change the completed operation or its receipt.
+		defer func() { _ = admission.locks.Close() }()
 		mainRepo := admission.source
 		pc := config.LoadProjectConfig(mainRepo)
 		uc := config.LoadUserConfig("")

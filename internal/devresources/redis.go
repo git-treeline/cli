@@ -23,7 +23,7 @@ func RedisRequested(pc *config.ProjectConfig) (bool, error) {
 		prefix = prefix || strings.Contains(pattern, "{redis_prefix}")
 	}
 	if url != prefix || (url && pc.Project() != RedisProject) {
-		return false, fmt.Errorf("managed dev cannot derive {redis_url} without paired Redis tokens for the QA project: %w", refusal)
+		return false, fmt.Errorf("managed dev cannot derive {redis_url} without paired Redis tokens for the QA project: %w", errRefusal)
 	}
 	return url, nil
 }
@@ -34,7 +34,7 @@ func RedisPrefix(pc *config.ProjectConfig, worktree string) (string, error) {
 		return "", err
 	}
 	if !filepath.IsAbs(worktree) || filepath.Clean(worktree) != worktree || !redisWorktreeName.MatchString(filepath.Base(worktree)) {
-		return "", refusal
+		return "", errRefusal
 	}
 	return RedisProject + ":" + filepath.Base(worktree), nil
 }
@@ -50,11 +50,11 @@ func ValidateRedisBinding(pc *config.ProjectConfig, allocation map[string]any) e
 		var ok bool
 		actual, ok = value.(string)
 		if !ok {
-			return refusal
+			return errRefusal
 		}
 	}
 	if actual != expected || allocation["redis_db"] != nil {
-		return refusal
+		return errRefusal
 	}
 	return nil
 }

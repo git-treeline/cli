@@ -64,7 +64,8 @@ func (e *releaseExecutor) run(ctx context.Context, intent registry.ReleaseReques
 		if err != nil || locks == nil {
 			return nil, releaseRefusal("execution_lock_unavailable")
 		}
-		defer locks.Close()
+		// Cleanup does not change the completed operation or its receipt.
+		defer func() { _ = locks.Close() }()
 	}
 
 	op, err := e.Registry.GetRelease(intent.OperationID)

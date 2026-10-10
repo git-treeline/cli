@@ -189,7 +189,7 @@ func CaptureReleaseTarget(path string) (TargetIdentity, error) {
 	if gitErr == nil {
 		commonPath := strings.TrimSuffix(string(raw), "\n")
 		if commonPath == string(raw) || !filepath.IsAbs(commonPath) {
-			return TargetIdentity{}, fmt.Errorf("Git common identity unavailable")
+			return TargetIdentity{}, fmt.Errorf("git common identity unavailable")
 		}
 		commonPath, err = filepath.EvalSymlinks(commonPath)
 		if err != nil {
