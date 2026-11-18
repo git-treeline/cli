@@ -25,6 +25,9 @@ jobs:
       - name: Formatting
         run: make fmt-check
 
+      - name: Tidy
+        run: make tidy-check
+
       - name: Lint
         uses: golangci/golangci-lint-action@v9
         with:
