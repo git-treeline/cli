@@ -75,6 +75,44 @@ func TestTunnelHint_QuickNode_NoHint(t *testing.T) {
 	}
 }
 
+func TestShareHint_NamedRails(t *testing.T) {
+	det := &detect.Result{Framework: "rails"}
+	hint := ShareHint(det, "example.dev")
+	assertContains(t, hint, `config.hosts << ".example.dev"`)
+	assertNotContains(t, hint, "trycloudflare.com")
+	assertNotContains(t, hint, "gtl tunnel setup")
+}
+
+func TestShareHint_NamedVite(t *testing.T) {
+	det := &detect.Result{Framework: "vite"}
+	hint := ShareHint(det, "example.dev")
+	assertContains(t, hint, `allowedHosts: [".example.dev"]`)
+	assertNotContains(t, hint, "trycloudflare.com")
+}
+
+func TestShareHint_NamedDjango(t *testing.T) {
+	det := &detect.Result{Framework: "django"}
+	hint := ShareHint(det, "example.dev")
+	assertContains(t, hint, `ALLOWED_HOSTS += [".example.dev"]`)
+	assertNotContains(t, hint, "trycloudflare.com")
+}
+
+func TestShareHint_NamedNode_NoHint(t *testing.T) {
+	det := &detect.Result{Framework: "node"}
+	if hint := ShareHint(det, "example.dev"); hint != "" {
+		t.Errorf("expected no hint for Node, got: %s", hint)
+	}
+}
+
+func TestShareHint_QuickMatchesQuickHint(t *testing.T) {
+	for _, fw := range []string{"rails", "vite", "django", "node"} {
+		det := &detect.Result{Framework: fw}
+		if got, want := ShareHint(det, ""), TunnelHint(det, "", ""); got != want {
+			t.Errorf("%s: ShareHint(\"\") = %q, want quick hint %q", fw, got, want)
+		}
+	}
+}
+
 func TestFormatTunnelHint_Empty(t *testing.T) {
 	if got := FormatTunnelHint(""); got != "" {
 		t.Errorf("expected empty, got: %q", got)
