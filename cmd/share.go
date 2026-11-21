@@ -1,8 +1,15 @@
 package cmd
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+
 	"github.com/git-treeline/cli/internal/config"
+	"github.com/git-treeline/cli/internal/detect"
 	"github.com/git-treeline/cli/internal/share"
+	"github.com/git-treeline/cli/internal/templates"
+	"github.com/git-treeline/cli/internal/tunnel"
 	"github.com/spf13/cobra"
 )
 
@@ -56,12 +63,27 @@ Related commands:
 		tunnelName := uc.TunnelName(shareTunnelName)
 		domain := uc.TunnelDomain(shareTunnelName)
 
-		if domain != "" {
-			printTunnelHint("", domain)
-		} else {
-			printTunnelHint("", "trycloudflare.com")
+		// share.Run falls back to a quick tunnel when the named one is already
+		// running, so the hint must match.
+		hintDomain := domain
+		if tunnelName == "" || tunnel.IsTunnelRunning(tunnelName) {
+			hintDomain = ""
 		}
+		printShareHint(hintDomain)
 
 		return share.Run(port, tunnelName, domain)
 	},
+}
+
+func printShareHint(domain string) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return
+	}
+	absPath, _ := filepath.Abs(cwd)
+	det := detect.Detect(absPath)
+	if formatted := templates.FormatTunnelHint(templates.ShareHint(det, domain)); formatted != "" {
+		fmt.Fprint(os.Stderr, formatted)
+		fmt.Fprintln(os.Stderr)
+	}
 }

@@ -21,6 +21,18 @@ func TunnelHint(det *detect.Result, hostname, domain string) string {
 	return tunnelHintNamed(det, hostname, domain)
 }
 
+// ShareHint returns framework-specific host guidance for `gtl share`. A named
+// share serves from a random s-<id>.<domain> host that changes every run, so
+// the hint is the domain wildcard. With an empty domain (quick tunnel), it
+// returns the quick-tunnel hint.
+func ShareHint(det *detect.Result, domain string) string {
+	if domain == "" {
+		return tunnelHintQuick(det)
+	}
+	// Passing the wildcard as the hostname makes Django allow the whole domain.
+	return tunnelHintNamed(det, "."+domain, domain)
+}
+
 func tunnelHintNamed(det *detect.Result, hostname, domain string) string {
 	wildcard := "." + domain
 
